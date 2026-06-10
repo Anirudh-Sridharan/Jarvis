@@ -28,7 +28,7 @@ import {
   CalendarMirror,
   findFreeTime,
   detectConflicts,
-  createEvent,
+  executeEventWrite,
 } from "./connectors/googleCalendar.js";
 import { whoopConnector } from "./connectors/whoop.js";
 import { appleHealthConnector, createPushEndpointHandler } from "./connectors/appleHealth.js";
@@ -41,6 +41,8 @@ import type {
   Clock,
   TokenStore,
   LlmClient,
+  EventWriteRequest,
+  WriteResult,
 } from "./types.js";
 
 // ── Public re-exports ──────────────────────────────────────────────────────────
@@ -89,9 +91,10 @@ export {
   normalizeCalendarEvent,
   findFreeTime,
   detectConflicts,
-  createEvent,
+  executeEventWrite,
   busyIntervals,
 } from "./connectors/googleCalendar.js";
+export type { CalendarWriteDeps } from "./connectors/googleCalendar.js";
 export {
   normalizeWhoopRecovery,
   normalizeWhoopSleep,
@@ -150,7 +153,8 @@ export interface IntegrationsSystem {
     mirror: CalendarMirror;
     findFreeTime: typeof findFreeTime;
     detectConflicts: typeof detectConflicts;
-    createEvent: typeof createEvent;
+    /** Live Google Calendar write engine, bound to the injected http/tokenStore/mirror. */
+    executeWrite: (req: EventWriteRequest) => Promise<WriteResult>;
   };
   briefing: BriefingService;
   scheduler: Scheduler;
@@ -193,7 +197,12 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
       mirror: calendarMirror,
       findFreeTime,
       detectConflicts,
-      createEvent,
+      executeWrite: (req) =>
+        executeEventWrite(req, {
+          http: config.http,
+          tokenStore: config.tokenStore,
+          mirror: calendarMirror,
+        }),
     },
     briefing,
     scheduler,

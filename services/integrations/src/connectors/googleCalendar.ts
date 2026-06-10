@@ -8,9 +8,10 @@
  *   - Cancelled events → tombstone
  *
  * Write path:
- *   - createEvent / findFreeTime
- *   - TODO(phase5: feature 17) — write path gated behind an approval hook;
- *     currently stubbed with a pass-through that logs the operation
+ *   - executeEventWrite (create/update/delete) / findFreeTime
+ *   - validate → conflict-detect (mirror) → Google API → reconcile mirror.
+ *     Approval is upstream: the agent ReAct loop gates readOnly:false tools
+ *     (feature 17) before tool.run() ever calls this.
  *
  * Calendar events are normalized to CalendarEvent and stored in the local mirror.
  * Events are also converted to MetricPoints (event count per day) for dashboard.
@@ -21,6 +22,7 @@ import type {
   ConnectorSyncResult,
   Cursor,
   HttpClient,
+  HttpResponse,
   MetricPoint,
   CalendarEvent,
   EventTime,
@@ -487,33 +489,161 @@ function clampToWorkHour(isoTs: string, hour: number): Instant {
   return { ms: d.getTime(), iso: isoTs };
 }
 
-// ── Write path (stub — TODO(phase5: feature 17)) ─────────────────────────────
+// ── Calendar write engine (feature 12 write path) ────────────────────────────
+
+export interface CalendarWriteDeps {
+  http: HttpClient;
+  tokenStore: TokenStore;
+  mirror: CalendarMirror;
+}
+
+const GCAL_BASE = "https://www.googleapis.com/calendar/v3";
 
 /**
- * Create a calendar event.
- * TODO(phase5: feature 17): This stub bypasses the approval gate. In phase 5,
- * the write must block until the user approves the change through the approval
- * gate (feature 17) before calling the Google Calendar API.
+ * Execute a calendar write (create / update / delete) against the Google
+ * Calendar API: validate → conflict-detect (mirror) → Google API → reconcile
+ * the canonical response into the mirror. Google is the source of truth; the
+ * mirror is only written from Google's response (no optimistic writes).
+ *
+ * Deterministic transport ONLY — no approval logic lives here. Callers must
+ * arrive through the agent approval gate (feature 17): the ReAct loop blocks
+ * every readOnly:false tool on ApprovalService before tool.run() executes.
  */
-export async function createEvent(
+export async function executeEventWrite(
   req: EventWriteRequest,
-  http: HttpClient,
-  tokenStore: TokenStore
+  deps: CalendarWriteDeps,
 ): Promise<WriteResult> {
-  // TODO(phase5: feature 17) — gate approval before calling Google API
-  console.log(
-    `[calendar] TODO(phase5): createEvent blocked on approval gate for requestId=${req.requestId}`
-  );
+  const fail = (
+    code: number,
+    reason: string,
+    retryable = false,
+    conflicts?: FreeBusySlot[],
+  ): WriteResult => ({
+    requestId: req.requestId,
+    ok: false,
+    op: req.op,
+    error: { code, reason, retryable },
+    ...(conflicts && conflicts.length > 0 ? { conflicts } : {}),
+  });
 
+  // ── Validate (deterministic, no network) ──
+  const start = req.patch?.start?.dateTime;
+  const end = req.patch?.end?.dateTime;
+  if (req.op === "create" && (!start || !end)) {
+    return fail(400, "create requires patch.start.dateTime and patch.end.dateTime");
+  }
+  if ((req.op === "update" || req.op === "delete") && !req.eventId) {
+    return fail(400, `${req.op} requires eventId`);
+  }
+  if (start && end && Date.parse(end) <= Date.parse(start)) {
+    return fail(400, "event end must be after start");
+  }
+
+  // ── Conflict detection against the local mirror ──
+  // getEvents filters on event START within [from, to], so pad the window
+  // backwards to catch events that started earlier but overlap the slot.
+  let conflicts: FreeBusySlot[] = [];
+  if ((req.op === "create" || req.op === "update") && start && end) {
+    const padFrom = new Date(Date.parse(start) - 86_400_000).toISOString();
+    const windowEvents = deps.mirror
+      .getEvents(req.calendarId, padFrom, end)
+      .filter((e) => e.id !== req.eventId); // moving an event never conflicts with itself
+    conflicts = detectConflicts(start, end, windowEvents);
+    if (conflicts.length > 0 && !req.allowConflict) {
+      return fail(409, "proposed time conflicts with existing events", false, conflicts);
+    }
+  }
+
+  // ── Auth (same path the read sync uses; handles refresh) ──
+  let token: string;
+  try {
+    token = await getAccessToken("gcal", deps.tokenStore, deps.http, getRefreshConfig("gcal"));
+  } catch (err) {
+    return fail(401, err instanceof Error ? err.message : String(err));
+  }
+
+  // ── Execute against Google ──
+  const eventsUrl = `${GCAL_BASE}/calendars/${encodeURIComponent(req.calendarId)}/events`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (req.ifMatchEtag && req.op !== "create") headers["If-Match"] = req.ifMatchEtag;
+
+  let res: HttpResponse;
+  if (req.op === "create") {
+    res = await deps.http.request({
+      method: "POST",
+      url: eventsUrl,
+      headers,
+      body: patchToGoogleBody(req.patch),
+    });
+  } else if (req.op === "update") {
+    res = await deps.http.request({
+      method: "PATCH",
+      url: `${eventsUrl}/${encodeURIComponent(req.eventId!)}`,
+      headers,
+      body: patchToGoogleBody(req.patch),
+    });
+  } else {
+    res = await deps.http.request({
+      method: "DELETE",
+      url: `${eventsUrl}/${encodeURIComponent(req.eventId!)}`,
+      headers,
+    });
+  }
+
+  // ── Delete: 204/200 success; 410 = already gone, treat as success ──
+  if (req.op === "delete") {
+    if (res.status === 204 || res.status === 200 || res.status === 410) {
+      deps.mirror.tombstoneEvent(req.calendarId, req.eventId!);
+      return { requestId: req.requestId, ok: true, op: req.op };
+    }
+    return mapApiError(req, res, conflicts);
+  }
+
+  if (res.status !== 200 && res.status !== 201) {
+    return mapApiError(req, res, conflicts);
+  }
+
+  // ── Reconcile the canonical event into the mirror ──
+  const event = normalizeCalendarEvent(req.calendarId, res.body as RawGoogleEvent);
+  deps.mirror.upsertEvent(event);
+  return {
+    requestId: req.requestId,
+    ok: true,
+    op: req.op,
+    event,
+    ...(conflicts.length > 0 ? { conflicts } : {}),
+  };
+}
+
+function patchToGoogleBody(patch: EventWriteRequest["patch"]): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (!patch) return body;
+  if (patch.summary !== undefined) body["summary"] = patch.summary;
+  if (patch.description !== undefined) body["description"] = patch.description;
+  if (patch.location !== undefined) body["location"] = patch.location;
+  if (patch.start !== undefined) body["start"] = patch.start;
+  if (patch.end !== undefined) body["end"] = patch.end;
+  if (patch.attendees !== undefined) body["attendees"] = patch.attendees;
+  if (patch.recurrence !== undefined) body["recurrence"] = patch.recurrence;
+  return body;
+}
+
+function mapApiError(
+  req: EventWriteRequest,
+  res: HttpResponse,
+  conflicts: FreeBusySlot[],
+): WriteResult {
+  const retryable = res.status === 429 || res.status >= 500;
+  const reason =
+    res.status === 412
+      ? "etag mismatch (event changed since last sync) — re-sync and retry with a fresh etag"
+      : `Google Calendar API error: HTTP ${res.status}`;
   return {
     requestId: req.requestId,
     ok: false,
-    op: "create",
-    error: {
-      code: 501,
-      reason: "Write path requires approval gate (phase 5 — feature 17)",
-      retryable: false,
-    },
+    op: req.op,
+    error: { code: res.status, reason, retryable },
+    ...(conflicts.length > 0 ? { conflicts } : {}),
   };
 }
 
