@@ -1,20 +1,18 @@
 /**
- * Cheap token estimator shared by the router and the chat context budget.
+ * Token estimator shared by the router and the chat context budget.
  *
- * Phase 1 uses a chars/4 heuristic. This systematically under-estimates for some
- * scripts, which is why the budget path fails OVER to HF rather than truncating
- * silently (see feature 1 edge case "Token estimation error").
- *
- * TODO(phase2: feature 1) swap for the active model's real tokenizer
- * (MLX Qwen locally; HF tokenizer in cloud mode).
+ * Backed by a real BPE tokenizer (gpt-tokenizer, cl100k_base) as a close
+ * proxy for Qwen's byte-level BPE — typically within a few percent, versus
+ * the old chars/4 heuristic's ±15-25%. Still an ESTIMATE for Qwen (exact
+ * counts live in the MLX sidecar), which is why the budget path fails OVER
+ * to HF rather than truncating silently (feature 1 "Token estimation error").
  */
+import { countTokens as bpeCountTokens } from "gpt-tokenizer/encoding/cl100k_base";
 import type { ChatMessage, ToolSpec } from "./types.js";
-
-const CHARS_PER_TOKEN = 4;
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  return bpeCountTokens(text);
 }
 
 /** Estimate prompt tokens for a full request (messages + serialized tools). */
