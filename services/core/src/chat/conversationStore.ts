@@ -1,10 +1,9 @@
 /**
  * Conversation store (feature 2). Phase 1: in-memory Map.
  *
- * The interface is shaped so a SQLite-backed implementation can drop in later
- * without touching ChatCore.
- * TODO(phase2: feature 2/4) replace InMemoryConversationStore with a SQLite store
- * (the full transcript stays local & searchable after it leaves the window).
+ * The durable implementation is SqliteConversationStore
+ * (./sqliteConversationStore.ts) — the server uses it; tests and the
+ * fake-friendly path keep InMemoryConversationStore.
  */
 import { randomUUID } from "node:crypto";
 import { countTokens } from "./contextBudget.js";

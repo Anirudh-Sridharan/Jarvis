@@ -29,7 +29,10 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { InferenceGateway } from "./inference/gateway.js";
 import { ChatCore } from "./chat/chatCore.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { InMemoryConversationStore } from "./chat/conversationStore.js";
+import { createSqliteConversationStore } from "./chat/sqliteConversationStore.js";
 import { getAgentSystem } from "./agent/agentSystem.js";
 import { bootstrapLiveAgent } from "./agent/liveBootstrap.js";
 import { getMemorySystem } from "./memory/memorySystem.js";
@@ -43,7 +46,13 @@ import { createDefaultVoiceSessionManager } from "./voice/buildVoiceDeps.js";
 
 const config = loadConfig();
 const gateway = new InferenceGateway(config);
-const store = new InMemoryConversationStore();
+// Durable chat transcript (feature 2/4): conversations survive core restarts.
+// Tests keep the in-memory store — they must not touch ~/.jarvis/data.
+const store = process.env["VITEST"]
+  ? new InMemoryConversationStore()
+  : createSqliteConversationStore(
+      process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data"),
+    );
 // Wire the persistent memory system (SQLite-backed) so chat turns are captured
 // and prior memories retrieved. Without this, ChatCore.memory defaults to null
 // and the assistant has no cross-session memory (it can't remember your name
