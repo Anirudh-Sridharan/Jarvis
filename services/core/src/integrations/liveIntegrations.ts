@@ -5,9 +5,8 @@
  *
  * The LLM (briefing generation) is optional — the connect/sync CLI does not
  * need it, so the default is a client that fails loudly if something tries to
- * generate a briefing without a gateway-backed LLM injected.
- * TODO(phase4: feature 15): wire the InferenceGateway LLM here when the
- * briefing scheduler goes live in the server process.
+ * generate a briefing without a gateway-backed LLM injected. The server's
+ * liveBootstrap passes a GatewayLlm so the morning-briefing trigger works.
  */
 
 import { homedir } from "node:os";

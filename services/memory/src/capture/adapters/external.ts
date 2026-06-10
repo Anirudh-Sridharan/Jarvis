@@ -1,18 +1,13 @@
 /**
- * External source adapter STUB.
+ * External source adapter interface (mostly historical).
  *
- * TODO(phase4: feature 9) implement full connector adapters for:
- *   - Gmail (OAuth2, historyId incremental, users.watch webhook)
- *   - Google Calendar (OAuth2, syncToken, push channel)
- *   - GitHub (PAT, ETag + since)
- *   - Apple Health (push: ingestPush() from local REST endpoint)
- *   - Whoop (OAuth2 rotating-refresh, serialized via withWhoopRefreshLock)
- *
- * These adapters share the connector/auth layer with feature 9 (data integration
- * framework). Outputs diverge: ExperienceRecord (here) vs metric series (feature 9).
- *
- * Auth pattern (Whoop): all refreshes go through a single serialized critical section
- * to avoid burning the rotating refresh token. See architecture/auth-and-integrations.md.
+ * The LIVE path for external data → memory is core's ingest bridge
+ * (services/core/src/memory/ingestBridge.ts): feature 9's connector framework
+ * fetches calendar/health/work data into its own stores, and the bridge
+ * converts recent windows into ExperienceRecords via capture.captureExternal
+ * (idempotent — content-hash dedup). This interface remains for a future
+ * per-item streaming adapter (e.g. Gmail users.watch webhooks) if digests
+ * prove too coarse.
  */
 
 import type { ExperienceRecord } from "../../types.js";

@@ -27,9 +27,9 @@ export interface Conversation {
 }
 
 /**
- * Retrieved long-term memory (feature 5). Phase 1 has no memory subsystem, so
- * this type exists only so the assembler seam is ready; nothing produces these yet.
- * TODO(phase2: feature 5) feed real RetrievedMemory[] from hybrid retrieval.
+ * Retrieved long-term memory (feature 5). Produced by @jarvis/memory hybrid
+ * retrieval (ChatCore.retrieveMemories) and injected at prompt edges by the
+ * assembler.
  */
 export interface RetrievedMemory {
   id: string;

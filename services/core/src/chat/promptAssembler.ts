@@ -50,9 +50,9 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
     .join("\n\n");
 
   // --- Retrieved memories: lost-in-the-middle aware -------------------------
-  // TODO(phase2: feature 5) inject retrieved memories here. Render compact,
-  // timestamped bullets; emit the TOP-scored memory LAST so it abuts the recent
-  // history (a prompt edge); weakest memories sit in the attention-dead middle.
+  // Compact timestamped bullets; the TOP-scored memory is emitted LAST so it
+  // abuts the recent history (a prompt edge); weakest memories sit in the
+  // attention-dead middle.
   let memoryBlock = "";
   const injected: RetrievedMemory[] = [];
   if (a.memories.length > 0) {

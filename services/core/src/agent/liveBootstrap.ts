@@ -15,13 +15,16 @@ import { getAgentSystem, type AgentSystemBag } from "./agentSystem.js";
 import { createLiveIntegrations } from "../integrations/liveIntegrations.js";
 import { getMemorySystem } from "../memory/memorySystem.js";
 import { startIngestBridge } from "../memory/ingestBridge.js";
+import { GatewayLlm } from "../memory/gatewayLlm.js";
 
 export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | null {
   if (process.env["VITEST"] || process.env["JARVIS_DISABLE_LIVE_AGENT"] === "1") {
     return null;
   }
   try {
-    const { system } = createLiveIntegrations();
+    // GatewayLlm satisfies the integrations LlmClient too (same structural
+    // shape) — the morning-briefing trigger can generate via HF.
+    const { system } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
     // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
     const memory = getMemorySystem(gateway);
     if (memory) startIngestBridge({ memory, integrations: system });
