@@ -65,6 +65,7 @@ export default function VoiceHud() {
 
   const armedRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const attachGenRef = useRef(0);
   const lastSeqRef = useRef(0);
   const assistantIdRef = useRef<string | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -117,8 +118,9 @@ export default function VoiceHud() {
 
   // Attach to /voice/events; reconnect with backoff while armed.
   const attach = useCallback(async () => {
+    const gen = ++attachGenRef.current;
     let backoffMs = 1000;
-    while (armedRef.current) {
+    while (armedRef.current && attachGenRef.current === gen) {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
@@ -155,6 +157,17 @@ export default function VoiceHud() {
               continue;
             }
             if (frame.type === "voice_status") {
+              if (!frame.active && armedRef.current) {
+                // Core restarted or the session died out from under us: its seq
+                // counter restarts, so our dedupe high-water mark is stale.
+                lastSeqRef.current = 0;
+                armedRef.current = false;
+                setArmed(false);
+                setVoiceState("inactive");
+                setError("Voice session lost — arm again.");
+                abortRef.current?.abort();
+                break;
+              }
               setVoiceState(frame.active ? frame.state : "inactive");
             } else if (frame.type === "voice_event") {
               if (frame.seq <= lastSeqRef.current) continue; // replay dedupe
@@ -168,12 +181,12 @@ export default function VoiceHud() {
       } finally {
         abortRef.current = null;
       }
-      if (!armedRef.current) break;
+      if (!armedRef.current || attachGenRef.current !== gen) break;
       setReconnecting(true);
       await new Promise((r) => setTimeout(r, backoffMs));
       backoffMs = Math.min(backoffMs * 2, 10_000);
     }
-    setReconnecting(false);
+    if (attachGenRef.current === gen) setReconnecting(false);
   }, [handleEvent]);
 
   const arm = useCallback(async () => {
@@ -219,7 +232,7 @@ export default function VoiceHud() {
       try {
         const res = await fetch(`${CORE_URL}/voice/status`);
         const body = (await res.json()) as { ok: boolean; status?: { active: boolean } };
-        if (!cancelled && body.ok && body.status?.active) {
+        if (!cancelled && body.ok && body.status?.active && abortRef.current === null) {
           armedRef.current = true;
           setArmed(true);
           void attach();
@@ -244,12 +257,13 @@ export default function VoiceHud() {
         <button
           className="voice-hud__toggle"
           disabled={busy}
+          aria-pressed={armed}
           onClick={() => void (armed ? disarm() : arm())}
         >
           ◉ VOICE {armed ? "ON" : "OFF"}
         </button>
         <span className={`voice-hud__ring voice-hud__ring--${displayState}`} aria-hidden />
-        <span className="voice-hud__state">{label}</span>
+        <span className="voice-hud__state" role="status" aria-live="polite">{label}</span>
         {barged ? <span className="voice-hud__barge">BARGE-IN</span> : null}
         {reconnecting ? <span className="voice-hud__conn">RECONNECTING…</span> : null}
         {error ? <span className="voice-hud__error">{error}</span> : null}
