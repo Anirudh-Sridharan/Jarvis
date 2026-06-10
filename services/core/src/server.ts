@@ -1,0 +1,285 @@
+/**
+ * Core HTTP server (features 1 + 2 + agent): Hono app wiring the inference
+ * gateway, chat core, and agent system behind the cross-package contract.
+ *
+ * Endpoints:
+ *   GET  /healthz  -> { ok: true }
+ *   GET  /status   -> { ok: true, model: { id, state, target, ramHeadroomGB, fallbackActive } }
+ *   POST /chat     -> SSE stream of { type: status|token|done|error } events
+ *                     body: { message: string, conversationId?: string }
+ *   POST /warmup   -> { ok, state, modelId }
+ *
+ *   Agent endpoints (degrade gracefully if subsystems unavailable):
+ *   POST /agent    -> SSE stream of agent steps + approval-needed events
+ *                     body: { goal: string }
+ *   GET  /approvals                  -> pending approval requests
+ *   POST /approvals/:id/approve      -> approve a pending request
+ *   POST /approvals/:id/reject       -> reject a pending request
+ *   GET  /audit                      -> recent audit entries + chain verify flag
+ *
+ * Listens on CORE_PORT (default 8080).
+ */
+import "./loadEnv.js"; // MUST be first: populates process.env from .env before config reads it
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { stream } from "hono/streaming";
+import { z } from "zod";
+import { loadConfig } from "./config.js";
+import { InferenceGateway } from "./inference/gateway.js";
+import { ChatCore } from "./chat/chatCore.js";
+import { InMemoryConversationStore } from "./chat/conversationStore.js";
+import { getAgentSystem } from "./agent/agentSystem.js";
+import { getMemorySystem } from "./memory/memorySystem.js";
+import { ConsolidationScheduler } from "./memory/consolidationScheduler.js";
+
+const config = loadConfig();
+const gateway = new InferenceGateway(config);
+const store = new InMemoryConversationStore();
+// Wire the persistent memory system (SQLite-backed) so chat turns are captured
+// and prior memories retrieved. Without this, ChatCore.memory defaults to null
+// and the assistant has no cross-session memory (it can't remember your name
+// after a restart). Returns null and degrades gracefully if memory can't init.
+const memory = getMemorySystem(gateway);
+const chatCore = new ChatCore(gateway, store, memory);
+// Background consolidation: promotes captured turns into the retrievable graph
+// so recall works without a manual step (retrieval only sees consolidated
+// memories). Not started under tests (VITEST guard).
+const consolidationScheduler = memory ? new ConsolidationScheduler(memory) : null;
+if (consolidationScheduler && !process.env["VITEST"]) {
+  consolidationScheduler.start();
+}
+
+const app = new Hono();
+
+app.get("/healthz", (c) => c.json({ ok: true }));
+
+app.get("/status", (c) => {
+  const s = gateway.status();
+  return c.json({
+    ok: true,
+    model: {
+      id: s.id,
+      state: s.state,
+      target: s.target,
+      ramHeadroomGB: s.ramHeadroomGB,
+      fallbackActive: s.fallbackActive,
+    },
+  });
+});
+
+/**
+ * POST /warmup
+ * Pre-loads the default local chat model so the first voice turn pays a reduced
+ * cold-start cost. Called by the voice orchestrator on wake-word detection.
+ * Returns { ok, state, modelId }.
+ */
+app.post("/warmup", async (c) => {
+  let entry: ReturnType<typeof gateway.registry.defaultFor> | undefined;
+  try {
+    entry = gateway.registry.defaultFor("chat", "local");
+  } catch {
+    return c.json({ ok: false, state: "unavailable", error: "No local chat model configured" }, 503);
+  }
+  try {
+    await gateway.modelManager.ensureReady(entry.id, entry.modelRef);
+  } catch (err) {
+    const state = gateway.modelManager.getState();
+    return c.json({
+      ok: false,
+      state,
+      modelId: entry.id,
+      error: err instanceof Error ? err.message : String(err),
+    }, 503);
+  }
+  const state = gateway.modelManager.getState();
+  return c.json({ ok: true, state, modelId: entry.id });
+});
+
+/**
+ * POST /consolidate
+ * Manually run a memory-consolidation pass — promotes turns captured this
+ * session into the retrievable graph so they can be recalled immediately,
+ * instead of waiting for the background scheduler. Returns the run summary, or
+ * status "busy" if one is already in flight.
+ */
+app.post("/consolidate", async (c) => {
+  if (!memory || !consolidationScheduler) {
+    return c.json({ ok: false, error: "Memory system not available" }, 503);
+  }
+  const res = await consolidationScheduler.runNow("manual");
+  if (res === null) {
+    return c.json({ ok: true, status: "busy" });
+  }
+  return c.json({ ok: true, status: "ran", run: res.run });
+});
+
+const chatBodySchema = z.object({
+  message: z.string().min(1),
+  conversationId: z.string().optional(),
+});
+
+app.post("/chat", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+  const parsed = chatBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, error: parsed.error.message }, 400);
+  }
+  const { message, conversationId } = parsed.data;
+
+  // Bridge client disconnects to the upstream generation via AbortController.
+  const ac = new AbortController();
+
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+
+  return stream(c, async (s) => {
+    s.onAbort(() => ac.abort());
+    const send = async (obj: unknown) => {
+      await s.write(`data: ${JSON.stringify(obj)}\n\n`);
+    };
+    try {
+      for await (const ev of chatCore.send({ message, conversationId }, ac.signal)) {
+        if (ev.type === "status") {
+          await send({ type: "status", state: ev.state });
+        } else if (ev.type === "token") {
+          await send({ type: "token", text: ev.text });
+        } else if (ev.type === "done") {
+          await send({
+            type: "done",
+            conversationId: ev.conversationId,
+            messageId: ev.messageId,
+          });
+        } else if (ev.type === "error") {
+          await send({ type: "error", message: ev.message });
+        }
+      }
+    } catch (err) {
+      await send({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+});
+
+// ── Agent system (lazy, degrades gracefully) ──────────────────────────────────
+
+// We do NOT import @jarvis/integrations here to keep server.ts decoupled from
+// the integrations wiring. The agentBag is null until setAgentSystem() is called
+// externally (e.g. from a daemon entry point), OR the test injects it.
+// For the HTTP layer, we call getAgentSystem(gateway, null) which returns null
+// gracefully when integrations aren't available.
+const agentBag = getAgentSystem(gateway, null);
+
+const agentBodySchema = z.object({
+  goal: z.string().min(1),
+});
+
+app.post("/agent", async (c) => {
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+  const parsed = agentBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, error: parsed.error.message }, 400);
+  }
+  const { goal } = parsed.data;
+
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+
+  return stream(c, async (s) => {
+    const send = async (obj: unknown) => {
+      await s.write(`data: ${JSON.stringify(obj)}\n\n`);
+    };
+    try {
+      await send({ type: "status", state: "planning" });
+      const result = await agentBag.agentSystem.agent.run(goal, { source: "chat" });
+      await send({ type: "done", runId: result.run.id, status: result.run.status, result: result.run.result });
+    } catch (err) {
+      await send({
+        type: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+});
+
+app.get("/approvals", (c) => {
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+  return c.json({ ok: true, pending: agentBag.approvalQueue.list() });
+});
+
+app.post("/approvals/:id/approve", async (c) => {
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+  const requestId = c.req.param("id");
+  const ok = agentBag.approvalQueue.approve(requestId, "user");
+  if (!ok) {
+    return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
+  }
+  return c.json({ ok: true, requestId, status: "approved" });
+});
+
+app.post("/approvals/:id/reject", async (c) => {
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+  const requestId = c.req.param("id");
+  const ok = agentBag.approvalQueue.reject(requestId, "user");
+  if (!ok) {
+    return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
+  }
+  return c.json({ ok: true, requestId, status: "rejected" });
+});
+
+const AUDIT_DEFAULT_LIMIT = 100;
+
+app.get("/audit", (c) => {
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+  try {
+    const verify = agentBag.agentSystem.audit.verifyChain();
+    const count = agentBag.agentSystem.audit.count;
+    return c.json({ ok: true, count, chainValid: verify.ok, brokenAt: verify.brokenAt ?? null });
+  } catch (err) {
+    return c.json({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }, 500);
+  }
+});
+
+const port = config.env.corePort;
+// Only bind the port when run as the core process. Vitest sets VITEST, so tests
+// can import this module (for the exported app/gateway/chatCore) without the
+// server starting to listen.
+if (!process.env["VITEST"]) {
+  serve({ fetch: app.fetch, port }, (info) => {
+    console.error(`[core] Jarvis core listening on http://127.0.0.1:${info.port}`);
+    console.error(`[core] MLX sidecar: ${config.env.mlxSidecarUrl}`);
+    console.error(
+      `[core] HF endpoint: ${config.env.hfEndpointUrl ?? "(not configured)"}`,
+    );
+  });
+}
+
+export { app, gateway, chatCore, store, agentBag, memory, consolidationScheduler };

@@ -1,0 +1,32 @@
+{
+  "name": "@jarvis/voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis voice orchestration — deterministic pipeline for the low-latency voice loop (features 7 + 8). Audio models injected as interfaces.",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "eventsource-parser": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

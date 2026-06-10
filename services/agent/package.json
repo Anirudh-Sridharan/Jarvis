@@ -1,0 +1,28 @@
+{
+  "name": "@jarvis/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis agent subsystem — tool execution core (feature 16), action approval & safety gate (feature 17), task automation & skills (feature 18), proactive scheduling & triggers (feature 19).",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./testing": "./dist/testing/fakes.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@jarvis/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jarvis web dashboard — Phase 1: chat UI talking to the core service. Full life-metrics dashboard (feature 14) comes later.",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000"
+  },
+  "dependencies": {
+    "@jarvis/integrations": "*",
+    "@jarvis/memory": "*",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.5.0"
+  }
+}

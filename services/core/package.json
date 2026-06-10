@@ -1,0 +1,33 @@
+{
+  "name": "@jarvis/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis core service — inference core (feature 1) + conversational chat core (feature 2).",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "chat": "tsx src/cli/chat.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@jarvis/agent": "*",
+    "@jarvis/integrations": "*",
+    "@jarvis/memory": "*",
+    "hono": "^4.6.14",
+    "yaml": "^2.6.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

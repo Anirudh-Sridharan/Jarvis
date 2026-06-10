@@ -1,0 +1,7 @@
+# Next.js build output (root .gitignore also covers .next/, but kept here for clarity)
+/.next/
+/out/
+next-env.d.ts
+
+# env
+.env*.local

@@ -1,0 +1,21 @@
+{
+  "name": "jarvis",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Jarvis — a local-first, persistent-memory personal AI assistant. See features.md and architecture/.",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "core": "npm --workspace @jarvis/core run dev",
+    "core:build": "npm --workspace @jarvis/core run build",
+    "dashboard": "npm --workspace @jarvis/dashboard run dev",
+    "chat": "npm --workspace @jarvis/core run chat",
+    "sidecar": "bash sidecar/mlx/run.sh"
+  }
+}

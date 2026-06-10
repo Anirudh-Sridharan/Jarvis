@@ -1,0 +1,25 @@
+{
+  "name": "@jarvis/integrations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis data-integration subsystem — features 9 (framework), 10 (health), 12 (calendar), 13 (work + todos), 15 (briefing).",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./testing": "./dist/testing/fakes.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

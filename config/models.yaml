@@ -1,0 +1,33 @@
+# Model registry + routing config (consumed by services/core inference module — feature 1).
+# MLX repo IDs verified on the HF Hub (mlx-community, 2026-06). See architecture/model-serving.md.
+
+idleTimeoutSeconds: 600        # unload local model after 10 min idle
+
+routing:
+  agentLocalTokenCap: 12000    # agent requests above this escalate to HF
+  localCtxSafe: 24000          # any request above this goes to HF regardless
+
+models:
+  - id: qwen-local-chat
+    kind: chat
+    provider: mlx
+    modelRef: mlx-community/Qwen3-4B-Instruct-2507-4bit   # ~2.5GB @ 4-bit, fits the 16GB Air
+    quant: 4bit
+    ctxWindow: 16384
+    approxRamGB: 6
+    default: true
+
+  - id: qwen-hf-reasoning
+    kind: chat
+    provider: hf
+    modelRef: Qwen/Qwen3-Next-80B-A3B-Instruct         # serverless via HF Inference Providers (routes to novita/featherless-ai)
+    # Instruct (non-thinking) MoE, ~3B active params: answers directly, supports tool-calling. No reasoning-token overhead.
+    # routing suffix optional: append :fastest (default), :cheapest, :novita, or :featherless-ai to pin a provider
+    ctxWindow: 131072                                  # Qwen3-Next-80B-A3B-Instruct context
+    endpointUrl: ${HF_ENDPOINT_URL}
+
+  - id: qwen-embed
+    kind: embedding
+    provider: mlx
+    modelRef: mlx-community/Qwen3-Embedding-0.6B-8bit   # ~0.6GB, 8-bit (retrieval is precision-sensitive)
+    default: true

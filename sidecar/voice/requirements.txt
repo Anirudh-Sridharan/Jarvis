@@ -1,0 +1,59 @@
+# Jarvis Voice sidecar dependencies.
+#
+# REQUIRES Python >= 3.11
+# ========================
+# The system python3 on the target MacBook Air M3 (arm64, macOS) is 3.9.6,
+# which is TOO OLD.  These packages require Python 3.11+.
+# Use run.sh, which builds an isolated .venv from a 3.11+ interpreter.
+#
+#   brew install python@3.12     # or: uv python install 3.12
+#
+# See README.md for full setup instructions.
+#
+# MODEL DOWNLOADS
+# ===============
+# Models are NOT bundled.  They are downloaded on first use (or pre-downloaded
+# for lower cold-start).  See README.md → "Model downloads".
+
+# --- HTTP / WebSocket server ---
+fastapi
+uvicorn[standard]
+pydantic>=2
+websockets
+
+# --- STT: faster-whisper (CTranslate2, default engine) ---
+# Uses int8 quantisation; runs on CPU/ANE.  Model: "small" (default).
+# Alternative lower-latency engine on Apple Silicon: Parakeet-TDT via mlx-audio
+# (see stt.py → make_parakeet_transcriber).
+faster-whisper
+
+# --- VAD: Silero ---
+# The silero-vad package wraps the PyTorch Hub model as a pure pip install.
+# Alternatively install PyTorch and let torch.hub download silero-vad on first use:
+#   torch
+silero-vad
+
+# --- TTS: Kokoro ---
+# kokoro >= 0.9 ships KPipeline.  For Apple Silicon with MLX acceleration
+# (recommended for sub-300 ms TTFA) also install:
+#   pip install mlx-audio        # provides mlx_audio.tts.models.kokoro.KokoroPipeline
+# See tts.py → "MLX variant" note.
+kokoro
+
+# --- Wake word: openWakeWord ---
+# Provides the "hey_jarvis" pre-trained model and downloads it on first use.
+openwakeword
+
+# --- Audio I/O: PyAudio (for the wake word mic capture loop) ---
+# On macOS install portaudio first: brew install portaudio
+pyaudio
+
+# --- Numerics ---
+numpy
+
+# --- OPTIONAL: Pipecat all-in-one pipeline (pipeline_pipecat.py) ---
+# Uncomment to enable the full Pipecat pipeline (VAD+STT+LLM+TTS in one loop).
+# pipecat-ai[silero,local,openai]
+#
+# The MLX Parakeet-TDT alternative for lower-latency STT on Apple Silicon:
+# mlx-audio

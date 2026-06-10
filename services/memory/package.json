@@ -1,0 +1,28 @@
+{
+  "name": "@jarvis/memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis memory subsystem — capture (feature 3), long-term store (feature 4), hybrid retrieval (feature 5), nightly consolidation (feature 6).",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./testing": "./dist/testing/fakes.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

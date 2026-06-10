@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnp.*
+
+# builds
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python-version
+
+# env & secrets
+.env
+.env.local
+*.local
+
+# local data (capture journal, dbs, checkpoints, logs)
+data/
+*.db
+*.sqlite
+*.log
+
+# os
+.DS_Store

@@ -1,0 +1,638 @@
+/**
+ * Proactive scheduler (feature 19).
+ *
+ * Responsibilities:
+ *   1. On start: catch-up on missed cron runs (machine was asleep/off).
+ *   2. Arm timers for due cron triggers.
+ *   3. Subscribe to event triggers on the internal bus.
+ *   4. Poll condition triggers on their cadence (debounce + cooldown).
+ *   5. Acquire per-trigger advisory LOCK before each run to prevent overlap.
+ *   6. Wake agent or run deterministic ScheduledJob per trigger action.
+ *   7. Persist EpisodicState + TriggerRun after each run.
+ *   8. Release lock and recompute nextRunAt.
+ *
+ * The deterministic core owns the clock, locks, catch-up, and debounce.
+ * The only AI is the AgentRunner woken in step 6 for agent-goal triggers.
+ *
+ * NOTE: This implementation uses setInterval + setTimeout to approximate cron.
+ * In production, replace the cron tick with a real cron-parser (DST-aware).
+ * The cron expression parser is injected as `parseCronNext` for testability.
+ */
+
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import type {
+  Trigger,
+  TriggerRun,
+  EpisodicState,
+  ScheduledJob,
+  TriggerContext,
+  JobResult,
+  Clock,
+  LlmClient,
+  ToolRegistry,
+  ApprovalSink,
+} from "../types.js";
+import { TriggerStore } from "./triggers.js";
+import { EpisodicStateStore } from "./episodicState.js";
+import { AgentRunner } from "../core/agent.js";
+import { Checkpointer } from "../core/checkpointer.js";
+import { ApprovalService } from "../safety/approval.js";
+import { AuditLog } from "../safety/audit.js";
+
+const RUN_DDL = `
+CREATE TABLE IF NOT EXISTS trigger_runs (
+  id           TEXT PRIMARY KEY,
+  trigger_id   TEXT NOT NULL,
+  fired_at     TEXT NOT NULL,
+  fired_by     TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  ran_as       TEXT NOT NULL,  -- JSON
+  context_summary TEXT NOT NULL,
+  result       TEXT,           -- JSON
+  error        TEXT,           -- JSON
+  started_at   TEXT NOT NULL,
+  finished_at  TEXT,
+  scheduled_for TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_trigger ON trigger_runs (trigger_id, fired_at DESC);
+`;
+
+const MIN_INTERVAL_SEC = 5; // runaway floor
+
+// Per-trigger advisory lock
+const locks = new Map<string, boolean>();
+
+function acquireLock(triggerId: string): boolean {
+  if (locks.get(triggerId)) return false;
+  locks.set(triggerId, true);
+  return true;
+}
+
+function releaseLock(triggerId: string): void {
+  locks.delete(triggerId);
+}
+
+export interface SchedulerOptions {
+  dataDir: string;
+  clock: Clock;
+  llm: LlmClient;
+  tools: ToolRegistry;
+  approvalSink: ApprovalSink;
+  /** DST-aware cron next-fire parser. Returns ms-since-epoch for next occurrence. */
+  parseCronNext?: (expr: string, tz: string, after?: number) => number | null;
+  /** Optional event bus */
+  eventBus?: EventBus;
+}
+
+export interface EventBus {
+  on(topic: string, handler: (payload: unknown) => void): void;
+  emit(topic: string, payload: unknown): void;
+}
+
+export class Scheduler {
+  private triggerStore: TriggerStore;
+  private episodicStore: EpisodicStateStore;
+  private runDb: DatabaseSync;
+  private jobs = new Map<string, ScheduledJob>();
+  private agentRunner: AgentRunner;
+  private approvalService: ApprovalService;
+  private auditLog: AuditLog;
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private intervals = new Map<string, ReturnType<typeof setInterval>>();
+  private opts: SchedulerOptions;
+
+  constructor(opts: SchedulerOptions) {
+    this.opts = opts;
+    mkdirSync(opts.dataDir, { recursive: true });
+
+    this.triggerStore = new TriggerStore(opts.dataDir);
+    this.episodicStore = new EpisodicStateStore(opts.dataDir);
+
+    this.runDb = new DatabaseSync(join(opts.dataDir, "trigger_runs.db"));
+    this.runDb.exec("PRAGMA journal_mode=WAL");
+    this.runDb.exec(RUN_DDL);
+
+    this.approvalService = new ApprovalService(opts.approvalSink, opts.clock);
+    this.auditLog = new AuditLog(opts.dataDir);
+
+    const checkpointer = new Checkpointer(opts.dataDir);
+    this.agentRunner = new AgentRunner({
+      llm: opts.llm,
+      tools: opts.tools,
+      checkpointer,
+      approvalService: this.approvalService,
+      auditLog: this.auditLog,
+      clock: opts.clock,
+    });
+  }
+
+  registerJob(job: ScheduledJob): void {
+    this.jobs.set(job.name, job);
+  }
+
+  /**
+   * Start the scheduler: catch-up + arm triggers.
+   */
+  async start(): Promise<void> {
+    await this.catchUp();
+    const triggers = this.triggerStore.list({ enabled: true });
+    for (const t of triggers) {
+      this.armTrigger(t);
+    }
+  }
+
+  /**
+   * Stop all timers/intervals.
+   */
+  stop(): void {
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    for (const interval of this.intervals.values()) clearInterval(interval);
+    this.timers.clear();
+    this.intervals.clear();
+  }
+
+  /**
+   * Add a new trigger to the store and arm it.
+   */
+  addTrigger(
+    trigger: Omit<Trigger, "id" | "createdAt" | "updatedAt" | "status">,
+  ): Trigger {
+    const t = this.triggerStore.create(trigger, this.opts.clock.isoNow());
+    this.armTrigger(t);
+    return t;
+  }
+
+  /**
+   * Manually fire a trigger (for testing / catch-up).
+   */
+  async fireTrigger(
+    triggerId: string,
+    firedBy: TriggerRun["firedBy"] = "manual",
+    scheduledFor?: string,
+  ): Promise<TriggerRun> {
+    const trigger = this.triggerStore.get(triggerId);
+    if (!trigger) throw new Error(`Trigger not found: ${triggerId}`);
+    return this.fire(trigger, firedBy, scheduledFor);
+  }
+
+  /** Expose trigger store for tests. */
+  get triggers(): TriggerStore {
+    return this.triggerStore;
+  }
+
+  /** Expose episodic store for tests. */
+  get episodic(): EpisodicStateStore {
+    return this.episodicStore;
+  }
+
+  // ── Internal: catch-up ────────────────────────────────────────────────────
+
+  private async catchUp(): Promise<void> {
+    const cronTriggers = this.triggerStore.list({ enabled: true, kind: "cron" });
+    const now = this.opts.clock.now();
+
+    for (const t of cronTriggers) {
+      if (!t.lastRunAt || !t.cron) continue;
+
+      const lastRun = new Date(t.lastRunAt).getTime();
+      const missed = this.computeMissedOccurrences(
+        t.cron.expr,
+        t.cron.timezone,
+        lastRun,
+        now,
+      );
+
+      if (missed.length === 0) continue;
+
+      const policy = t.catchUp;
+      if (policy === "skip") {
+        // Just realign nextRunAt — no runs
+        continue;
+      }
+
+      const toRun = policy === "run-once" ? [missed[0]!] : missed;
+      for (const scheduledFor of toRun) {
+        if (acquireLock(t.id)) {
+          try {
+            await this.fire(
+              t,
+              "catch-up",
+              new Date(scheduledFor).toISOString(),
+            );
+          } finally {
+            releaseLock(t.id);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Simple missed-occurrence computation.
+   * Returns timestamps of missed occurrences between lastRunAt and now.
+   */
+  private computeMissedOccurrences(
+    expr: string,
+    tz: string,
+    lastRunMs: number,
+    nowMs: number,
+  ): number[] {
+    const missed: number[] = [];
+    if (!this.opts.parseCronNext) return missed;
+
+    let cursor = lastRunMs;
+    while (true) {
+      const next = this.opts.parseCronNext(expr, tz, cursor);
+      if (next === null || next >= nowMs) break;
+      missed.push(next);
+      cursor = next + 1000;
+      if (missed.length > 100) break; // safety cap
+    }
+    return missed;
+  }
+
+  // ── Internal: arm a single trigger ───────────────────────────────────────
+
+  private armTrigger(t: Trigger): void {
+    if (t.kind === "cron") {
+      this.armCron(t);
+    } else if (t.kind === "event" && this.opts.eventBus) {
+      this.armEvent(t);
+    } else if (t.kind === "condition") {
+      this.armCondition(t);
+    }
+  }
+
+  private armCron(t: Trigger): void {
+    if (!t.cron || !this.opts.parseCronNext) return;
+
+    const nextMs = this.opts.parseCronNext(
+      t.cron.expr,
+      t.cron.timezone,
+      this.opts.clock.now(),
+    );
+    if (nextMs === null) return;
+
+    const delay = Math.max(0, nextMs - this.opts.clock.now());
+    const timer = setTimeout(async () => {
+      this.timers.delete(t.id);
+      const current = this.triggerStore.get(t.id);
+      if (!current?.enabled) return;
+
+      if (acquireLock(t.id)) {
+        try {
+          await this.fire(t, "cron", new Date(nextMs).toISOString());
+        } finally {
+          releaseLock(t.id);
+        }
+      }
+
+      // Re-arm (unless one-shot)
+      if (!t.cron?.oneShot) {
+        const updated = this.triggerStore.get(t.id);
+        if (updated?.enabled) this.armCron(updated);
+      } else {
+        this.triggerStore.disable(t.id, this.opts.clock.isoNow());
+      }
+    }, delay);
+
+    this.timers.set(t.id, timer);
+  }
+
+  private armEvent(t: Trigger): void {
+    if (!t.event || !this.opts.eventBus) return;
+    this.opts.eventBus.on(t.event.topic, async (payload) => {
+      if (t.event?.filter && !matchesFilter(payload, t.event.filter)) return;
+      const current = this.triggerStore.get(t.id);
+      if (!current?.enabled) return;
+
+      if (acquireLock(t.id)) {
+        try {
+          await this.fire(t, "event");
+        } finally {
+          releaseLock(t.id);
+        }
+      }
+    });
+  }
+
+  private armCondition(t: Trigger): void {
+    if (!t.condition) return;
+    const pollMs = Math.max(t.condition.pollEverySec, MIN_INTERVAL_SEC) * 1000;
+    let debounceSince: number | null = null;
+
+    const interval = setInterval(async () => {
+      const current = this.triggerStore.get(t.id);
+      if (!current?.enabled) return;
+
+      // Check cooldown
+      const episodic = this.episodicStore.read(t.id);
+      if (episodic.conditionState?.cooldownUntil) {
+        const cooldownEnd = new Date(episodic.conditionState.cooldownUntil).getTime();
+        if (this.opts.clock.now() < cooldownEnd) return;
+      }
+
+      // Evaluate condition
+      const value = await this.evaluateCondition(
+        t.condition!.metric,
+        t.condition!.predicate,
+      );
+
+      if (value.satisfied) {
+        if (debounceSince === null) {
+          debounceSince = this.opts.clock.now();
+        }
+        const heldMs = this.opts.clock.now() - debounceSince;
+        if (heldMs >= t.condition!.debounceSec * 1000) {
+          // Fire
+          debounceSince = null;
+          if (acquireLock(t.id)) {
+            try {
+              await this.fire(t, "condition");
+            } finally {
+              releaseLock(t.id);
+            }
+            // Set cooldown
+            const cooldownUntil = new Date(
+              this.opts.clock.now() + t.condition!.cooldownSec * 1000,
+            ).toISOString();
+            this.episodicStore.updateConditionState(t.id, {
+              lastValue: value.currentValue,
+              crossedAt: this.opts.clock.isoNow(),
+              cooldownUntil,
+            });
+          }
+        }
+      } else {
+        debounceSince = null; // reset debounce if condition no longer holds
+      }
+    }, pollMs);
+
+    this.intervals.set(t.id, interval);
+  }
+
+  /**
+   * Evaluate a condition metric + predicate.
+   * Stub: in production, queries feature 13/10/11 metric sources.
+   */
+  private async evaluateCondition(
+    metric: string,
+    predicate: string,
+  ): Promise<{ satisfied: boolean; currentValue?: number }> {
+    // Parse predicate like "< 33" or "> 0"
+    const match = predicate.match(/^([<>]=?|==?)\s*(\d+(?:\.\d+)?)$/);
+    if (!match) return { satisfied: false };
+
+    const op = match[1]!;
+    const threshold = parseFloat(match[2]!);
+
+    // In production: look up the metric value from injected metric source
+    // For now, this is a testable stub — use injected metric provider if available
+    const metricValue = await this.getMetricValue(metric);
+    if (metricValue === null) return { satisfied: false };
+
+    let satisfied = false;
+    switch (op) {
+      case "<": satisfied = metricValue < threshold; break;
+      case "<=": satisfied = metricValue <= threshold; break;
+      case ">": satisfied = metricValue > threshold; break;
+      case ">=": satisfied = metricValue >= threshold; break;
+      case "=": case "==": satisfied = metricValue === threshold; break;
+    }
+
+    return { satisfied, currentValue: metricValue };
+  }
+
+  /** Injectable metric provider (override in tests). */
+  metricProvider?: (metric: string) => Promise<number | null>;
+
+  private async getMetricValue(metric: string): Promise<number | null> {
+    if (this.metricProvider) {
+      return this.metricProvider(metric);
+    }
+    return null;
+  }
+
+  // ── Internal: execute a trigger ──────────────────────────────────────────
+
+  private async fire(
+    trigger: Trigger,
+    firedBy: TriggerRun["firedBy"],
+    scheduledFor?: string,
+  ): Promise<TriggerRun> {
+    const runId = randomUUID();
+    const now = this.opts.clock.isoNow();
+
+    const ranAs: TriggerRun["ranAs"] =
+      "job" in trigger.action
+        ? { job: trigger.action.job }
+        : { agentRunId: "" }; // updated after agent run
+
+    const run: TriggerRun = {
+      id: runId,
+      triggerId: trigger.id,
+      firedAt: now,
+      firedBy,
+      status: "running",
+      ranAs,
+      contextSummary: "",
+      startedAt: now,
+      scheduledFor,
+    };
+
+    this.saveRun(run);
+    this.triggerStore.setStatus(trigger.id, "running", now);
+
+    try {
+      const episodic = this.episodicStore.read(trigger.id);
+      const ctx: TriggerContext = {
+        trigger,
+        episodic,
+        inputs: scheduledFor ? { scheduledFor } : { firedBy },
+        firedAt: now,
+        firedBy,
+      };
+      run.contextSummary = `trigger=${trigger.name} firedBy=${firedBy}`;
+
+      let result: unknown;
+      let episodicUpdate: Partial<EpisodicState> = {};
+
+      if ("job" in trigger.action) {
+        const job = this.jobs.get(trigger.action.job);
+        if (!job) throw new Error(`Job not found: ${trigger.action.job}`);
+
+        const jobResult: JobResult = await Promise.race([
+          job.handler(ctx),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Job timeout")),
+              job.maxDurationSec * 1000,
+            ),
+          ),
+        ]);
+
+        result = jobResult;
+        if (jobResult.episodicUpdate) {
+          episodicUpdate = jobResult.episodicUpdate;
+        }
+      } else {
+        // Wake the agent as a REASONER
+        const agentResult = await this.agentRunner.run(
+          trigger.action.agentGoal,
+          { source: "scheduler" },
+        );
+        result = agentResult.run.result;
+        run.ranAs = { agentRunId: agentResult.run.id };
+        episodicUpdate = {
+          lastDecision: `agent run ${agentResult.run.id}: status=${agentResult.run.status}`,
+        };
+
+        if (agentResult.run.status === "awaiting-approval") {
+          run.status = "awaiting-approval";
+        }
+      }
+
+      // Persist episodic state
+      const updated: EpisodicState = {
+        ...episodic,
+        ...episodicUpdate,
+        lastFiredAt: now,
+        runHistoryRefs: [...episodic.runHistoryRefs, runId].slice(-20),
+        updatedAt: now,
+      };
+      this.episodicStore.write(trigger.id, updated);
+
+      if (run.status !== "awaiting-approval") {
+        run.status = "done";
+      }
+      run.result = result;
+      run.finishedAt = this.opts.clock.isoNow();
+    } catch (err) {
+      run.status = "failed";
+      run.error = {
+        code: "run-error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+      run.finishedAt = this.opts.clock.isoNow();
+    }
+
+    this.saveRun(run);
+    this.triggerStore.setStatus(trigger.id, "scheduled", this.opts.clock.isoNow());
+    this.triggerStore.bumpLastRun(trigger.id, runId, undefined, this.opts.clock.isoNow());
+
+    return run;
+  }
+
+  // ── Run persistence ───────────────────────────────────────────────────────
+
+  private saveRun(run: TriggerRun): void {
+    this.runDb
+      .prepare(
+        `INSERT OR REPLACE INTO trigger_runs
+         (id, trigger_id, fired_at, fired_by, status, ran_as, context_summary, result, error, started_at, finished_at, scheduled_for)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        run.id,
+        run.triggerId,
+        run.firedAt,
+        run.firedBy,
+        run.status,
+        JSON.stringify(run.ranAs),
+        run.contextSummary,
+        run.result !== undefined ? JSON.stringify(run.result) : null,
+        run.error ? JSON.stringify(run.error) : null,
+        run.startedAt,
+        run.finishedAt ?? null,
+        run.scheduledFor ?? null,
+      );
+  }
+
+  getRun(runId: string): TriggerRun | undefined {
+    const row = this.runDb
+      .prepare(`SELECT * FROM trigger_runs WHERE id = ?`)
+      .get(runId) as {
+      id: string;
+      trigger_id: string;
+      fired_at: string;
+      fired_by: string;
+      status: string;
+      ran_as: string;
+      context_summary: string;
+      result: string | null;
+      error: string | null;
+      started_at: string;
+      finished_at: string | null;
+      scheduled_for: string | null;
+    } | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      id: row.id,
+      triggerId: row.trigger_id,
+      firedAt: row.fired_at,
+      firedBy: row.fired_by as TriggerRun["firedBy"],
+      status: row.status as TriggerRun["status"],
+      ranAs: JSON.parse(row.ran_as) as TriggerRun["ranAs"],
+      contextSummary: row.context_summary,
+      result: row.result ? (JSON.parse(row.result) as unknown) : undefined,
+      error: row.error
+        ? (JSON.parse(row.error) as { code: string; message: string })
+        : undefined,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at ?? undefined,
+      scheduledFor: row.scheduled_for ?? undefined,
+    };
+  }
+
+  listRuns(triggerId: string): TriggerRun[] {
+    const rows = this.runDb
+      .prepare(
+        `SELECT * FROM trigger_runs WHERE trigger_id = ? ORDER BY fired_at DESC LIMIT 50`,
+      )
+      .all(triggerId) as Array<{
+      id: string;
+      trigger_id: string;
+      fired_at: string;
+      fired_by: string;
+      status: string;
+      ran_as: string;
+      context_summary: string;
+      result: string | null;
+      error: string | null;
+      started_at: string;
+      finished_at: string | null;
+      scheduled_for: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      triggerId: row.trigger_id,
+      firedAt: row.fired_at,
+      firedBy: row.fired_by as TriggerRun["firedBy"],
+      status: row.status as TriggerRun["status"],
+      ranAs: JSON.parse(row.ran_as) as TriggerRun["ranAs"],
+      contextSummary: row.context_summary,
+      result: row.result ? (JSON.parse(row.result) as unknown) : undefined,
+      error: row.error
+        ? (JSON.parse(row.error) as { code: string; message: string })
+        : undefined,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at ?? undefined,
+      scheduledFor: row.scheduled_for ?? undefined,
+    }));
+  }
+}
+
+function matchesFilter(
+  payload: unknown,
+  filter: Record<string, unknown>,
+): boolean {
+  if (typeof payload !== "object" || payload === null) return false;
+  const p = payload as Record<string, unknown>;
+  return Object.entries(filter).every(([k, v]) => p[k] === v);
+}

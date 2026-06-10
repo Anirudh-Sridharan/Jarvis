@@ -1,0 +1,12 @@
+# Jarvis MLX sidecar dependencies.
+# REQUIRES Python >= 3.11 (current mlx-lm). The system python3 on the M3 Air
+# is 3.9 and will NOT install these — use run.sh, which builds a 3.11+ venv.
+
+# Apple Silicon MLX runtime + LLM toolkit (load, stream_generate, server).
+mlx
+mlx-lm
+
+# OpenAI-compatible HTTP layer.
+fastapi
+uvicorn[standard]
+pydantic>=2
