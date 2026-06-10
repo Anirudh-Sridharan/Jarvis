@@ -223,11 +223,13 @@ app.post("/chat", async (c) => {
 
 // ── Agent system (lazy, degrades gracefully) ──────────────────────────────────
 
-// The agent bag resolves PER REQUEST (not snapshotted at import). Resolution
-// order: (1) an existing singleton — tests inject one via setAgentSystem();
-// (2) live bootstrap — wires real integrations (fetch + Keychain) on first
-// use in a live run. Bootstrap is skipped under vitest and when
-// JARVIS_DISABLE_LIVE_AGENT=1, so tests still see 503 until they inject.
+// Live bootstrap runs ONCE at startup: wires real integrations, starts the
+// memory ingest bridge, and registers + starts proactive triggers. It is
+// memoized (success or failure) and skipped under vitest /
+// JARVIS_DISABLE_LIVE_AGENT=1, so tests still see 503 until they inject via
+// setAgentSystem(). The per-request resolution below prefers an injected
+// singleton, then falls back to the (memoized) bootstrap result.
+bootstrapLiveAgent(gateway);
 const currentAgentBag = () => getAgentSystem(gateway, null) ?? bootstrapLiveAgent(gateway);
 
 const agentBodySchema = z.object({

@@ -1,7 +1,13 @@
 /**
  * bootstrapLiveAgent — wires live integrations (real fetch HttpClient + macOS
- * Keychain TokenStore) into the agent-system singleton so /agent and
- * /approvals work in a live `npm run core` without a separate daemon entry.
+ * Keychain TokenStore) into the agent-system singleton, starts the memory
+ * ingest bridge, and registers + starts the proactive triggers (nightly
+ * consolidation, morning briefing). Called once at server startup; the lazy
+ * per-request fallback hits the memoized result.
+ *
+ * The attempt is MEMOIZED: success or failure, it runs exactly once per
+ * process — a failed attempt must not re-open integrations (SQLite handles,
+ * Keychain wiring) on every subsequent request.
  *
  * Skipped under vitest (tests inject via setAgentSystem and must see 503
  * before doing so) and when JARVIS_DISABLE_LIVE_AGENT=1.
@@ -16,19 +22,45 @@ import { createLiveIntegrations } from "../integrations/liveIntegrations.js";
 import { getMemorySystem } from "../memory/memorySystem.js";
 import { startIngestBridge } from "../memory/ingestBridge.js";
 import { GatewayLlm } from "../memory/gatewayLlm.js";
+import { registerProactiveTriggers } from "./proactiveBootstrap.js";
+
+let attempted = false;
+let cachedBag: AgentSystemBag | null = null;
 
 export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | null {
   if (process.env["VITEST"] || process.env["JARVIS_DISABLE_LIVE_AGENT"] === "1") {
     return null;
   }
+  if (attempted) return cachedBag;
+  attempted = true;
+
   try {
     // GatewayLlm satisfies the integrations LlmClient too (same structural
     // shape) — the morning-briefing trigger can generate via HF.
     const { system } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
-    // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
+    const bag = getAgentSystem(gateway, system);
+    if (!bag) return null; // getAgentSystem already logged; stay memoized-null
+
     const memory = getMemorySystem(gateway);
-    if (memory) startIngestBridge({ memory, integrations: system });
-    return getAgentSystem(gateway, system);
+    if (memory) {
+      // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
+      startIngestBridge({ memory, integrations: system });
+      // Proactive triggers (nightly consolidation, morning briefing) + live cron.
+      registerProactiveTriggers({
+        agentSystem: bag.agentSystem,
+        integrations: system,
+        memory,
+      });
+      void bag.agentSystem.triggers.start().catch((err: unknown) => {
+        console.warn(
+          "[agent] proactive scheduler failed to start:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    }
+
+    cachedBag = bag;
+    return bag;
   } catch (err) {
     console.warn(
       "[agent] live bootstrap failed — agent endpoints disabled.",
@@ -36,4 +68,10 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     );
     return null;
   }
+}
+
+/** Reset the memoized attempt (tests only). */
+export function resetLiveBootstrap(): void {
+  attempted = false;
+  cachedBag = null;
 }
