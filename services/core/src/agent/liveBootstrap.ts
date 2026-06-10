@@ -13,6 +13,8 @@
 import type { InferenceGateway } from "../inference/gateway.js";
 import { getAgentSystem, type AgentSystemBag } from "./agentSystem.js";
 import { createLiveIntegrations } from "../integrations/liveIntegrations.js";
+import { getMemorySystem } from "../memory/memorySystem.js";
+import { startIngestBridge } from "../memory/ingestBridge.js";
 
 export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | null {
   if (process.env["VITEST"] || process.env["JARVIS_DISABLE_LIVE_AGENT"] === "1") {
@@ -20,6 +22,9 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
   }
   try {
     const { system } = createLiveIntegrations();
+    // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
+    const memory = getMemorySystem(gateway);
+    if (memory) startIngestBridge({ memory, integrations: system });
     return getAgentSystem(gateway, system);
   } catch (err) {
     console.warn(
