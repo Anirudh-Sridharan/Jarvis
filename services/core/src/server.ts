@@ -385,25 +385,30 @@ app.get("/voice/events", (c) => {
     heartbeat.unref?.();
     s.onAbort(() => {
       open = false;
-      unsubscribe();
-      clearInterval(heartbeat);
       notify?.();
       notify = null;
     });
 
-    await send({ type: "voice_status", ...session.status() });
-    for (const frame of session.recentEvents()) {
-      await send({ type: "voice_event", ...frame });
-    }
-    while (open) {
-      while (queue.length > 0) {
-        const frame = queue.shift();
-        if (frame) await send({ type: "voice_event", ...frame });
+    try {
+      await send({ type: "voice_status", ...session.status() });
+      for (const frame of session.recentEvents()) {
+        await send({ type: "voice_event", ...frame });
       }
-      if (!open) break;
-      await new Promise<void>((resolve) => {
-        notify = resolve;
-      });
+      while (open) {
+        while (open && queue.length > 0) {
+          const frame = queue.shift();
+          if (frame) await send({ type: "voice_event", ...frame });
+        }
+        if (!open) break;
+        await new Promise<void>((resolve) => {
+          notify = resolve;
+        });
+      }
+    } finally {
+      // Cleanup must run on abort AND on any throw — a leaked subscriber would
+      // accumulate per dashboard reconnect.
+      unsubscribe();
+      clearInterval(heartbeat);
     }
   });
 });
@@ -413,7 +418,7 @@ const port = config.env.corePort;
 // can import this module (for the exported app/gateway/chatCore) without the
 // server starting to listen.
 if (!process.env["VITEST"]) {
-  serve({ fetch: app.fetch, port }, (info) => {
+  serve({ fetch: app.fetch, hostname: "127.0.0.1", port }, (info) => {
     console.error(`[core] Jarvis core listening on http://127.0.0.1:${info.port}`);
     console.error(`[core] MLX sidecar: ${config.env.mlxSidecarUrl}`);
     console.error(
