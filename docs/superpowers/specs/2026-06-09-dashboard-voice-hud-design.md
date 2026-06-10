@@ -88,12 +88,14 @@ electric-blue monochrome, Share Tech Mono):
 - **Sync on load**: `GET /voice/status` on mount; the session lives in core, so a
   reloaded tab reattaches to a running session instead of restarting it.
 
-### Chat integration
-Chat message state is lifted into a shared `useChatFeed` hook owned by the home
-page. `Chat.tsx` consumes it for typed turns (behavior unchanged). `VoiceHud`
-appends voice turns: `final_transcript` → user bubble with a mic glyph, `token` →
-streams into an assistant bubble, `turn_complete` → finalize. Voice turns use the
-orchestrator's own core-side conversation; the dashboard merges only the display.
+### Transcript display
+**Amended during planning:** the home page does not embed the Chat panel —
+`Chat.tsx` lives on the `/chat` route and the home page only links to it, so the
+originally proposed lifted `useChatFeed` hook would require cross-route global
+state for no benefit. Instead `VoiceHud` renders its own compact transcript feed:
+`final_transcript` → user line with a mic glyph, `token` → streams into an
+assistant line, `turn_complete` → finalize. Voice turns use the orchestrator's
+own core-side conversation; `Chat.tsx` is untouched.
 
 ## Error handling
 
