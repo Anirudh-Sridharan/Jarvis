@@ -11,13 +11,23 @@
 
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applySchema } from "../src/db/schema.js";
 import {
   CalendarMirror,
   executeEventWrite,
   type CalendarWriteDeps,
 } from "../src/connectors/googleCalendar.js";
-import { FakeHttp, MemoryTokenStore, makeTokens } from "../src/testing/fakes.js";
+import { createIntegrations } from "../src/index.js";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  makeTokens,
+  FixedClock,
+  FakeLlm,
+} from "../src/testing/fakes.js";
 import type { CalendarEvent, EventWriteRequest } from "../src/types.js";
 
 function makeDb(): DatabaseSync {
@@ -333,5 +343,43 @@ describe("executeEventWrite: error mapping", () => {
     expect(result.error?.code).toBe(412);
     expect(result.error?.retryable).toBe(false);
     expect(result.error?.reason).toContain("etag");
+  });
+});
+
+describe("createIntegrations: bound calendar.executeWrite", () => {
+  it("executes a write without the caller passing transport deps", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "jarvis-calwrite-"));
+    try {
+      const http = new FakeHttp();
+      const tokens = new MemoryTokenStore();
+      tokens.seed("gcal", makeTokens());
+      http.add(/\/calendars\/primary\/events$/, {
+        status: 200,
+        headers: {},
+        body: googleEventResponse(),
+      });
+
+      const system = createIntegrations({
+        http,
+        clock: new FixedClock(),
+        tokenStore: tokens,
+        llm: new FakeLlm(),
+        dataDir,
+      });
+
+      const result = await system.calendar.executeWrite(createReq());
+
+      expect(result.ok).toBe(true);
+      expect(result.event?.id).toBe("evt-new-1");
+      // reconciled into the SAME mirror instance the system exposes
+      const mirrored = system.calendar.mirror.getEvents(
+        "primary",
+        "2026-06-12T00:00:00Z",
+        "2026-06-13T00:00:00Z",
+      );
+      expect(mirrored.map((e) => e.id)).toContain("evt-new-1");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
