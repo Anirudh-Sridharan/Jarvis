@@ -210,10 +210,40 @@ describe("VoiceSessionManager", () => {
   });
 
   it("fast stop()/start() overlap leaves the new session armed", async () => {
-    const { manager } = makeManager();
+    // Delay /wake/disable so the stale stop()'s teardown would land AFTER the
+    // new session arms on an unserialized implementation.
+    let releaseDisable: (() => void) | null = null;
+    let delayedDisable = false;
+    const calls: string[] = [];
+    const stt = new FakeSttEngine();
+    const tts = new FakeTtsEngine();
+    const core = new FakeCoreClient();
+    const manager = new VoiceSessionManager({
+      sidecarUrl: "http://sidecar.test",
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith("/health")) return Response.json({ state: "ready" });
+        if (url.endsWith("/wake/disable") && !delayedDisable) {
+          // Delay only the stale stop()'s disable; the final cleanup stop's
+          // disable must resolve immediately or the test would hang.
+          delayedDisable = true;
+          await new Promise<void>((r) => {
+            releaseDisable = r;
+          });
+        }
+        return Response.json({ ok: true });
+      }) as typeof fetch,
+      orchestratorFactory: (wakeSource) =>
+        createVoiceOrchestrator({ wakeWord: wakeSource, stt, tts, core }),
+    });
+
     await manager.start();
     const stopping = manager.stop();
     const restarting = manager.start();
+    // Let the restart attempt queue up, then release the slow disable.
+    await new Promise((r) => setTimeout(r, 10));
+    releaseDisable?.();
     await Promise.all([stopping, restarting]);
     expect(manager.status().active).toBe(true);
     expect(manager.dispatchWake(wakeEvent())).toBe(true);

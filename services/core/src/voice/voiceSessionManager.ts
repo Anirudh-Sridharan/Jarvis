@@ -138,10 +138,14 @@ export class VoiceSessionManager {
     } catch {
       // Best effort — the sidecar may already be down.
     }
-    await orchestrator.stop(); // cancels in-flight TTS/LLM, disarms wake source
-    // Unsubscribe only after stop() so terminal state_change events are relayed.
-    this.unsubscribeOrchestrator?.();
-    this.unsubscribeOrchestrator = null;
+    try {
+      await orchestrator.stop(); // cancels in-flight TTS/LLM, disarms wake source
+    } finally {
+      // Unsubscribe only after stop() so terminal state_change events are
+      // relayed, but always unsubscribe — even if stop() rejects.
+      this.unsubscribeOrchestrator?.();
+      this.unsubscribeOrchestrator = null;
+    }
     return this.status();
   }
 
