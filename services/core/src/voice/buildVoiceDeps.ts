@@ -5,9 +5,12 @@
  * and turn tuning can't drift between the two entry points.
  */
 import type { OrchestratorConfig, OrchestratorDeps } from "@jarvis/voice";
+import { createVoiceOrchestrator } from "@jarvis/voice";
 import { SidecarSttEngine } from "./sidecarStt.js";
 import { SidecarTtsEngine } from "./sidecarTts.js";
 import { CoreHttpClient } from "./coreVoiceClient.js";
+import { VoiceSessionManager } from "./voiceSessionManager.js";
+import type { HttpWakeSource } from "./httpWakeSource.js";
 
 export interface VoiceDepsOptions {
   coreUrl: string;
@@ -45,4 +48,17 @@ export function voiceUrlsFromEnv(): VoiceDepsOptions {
     coreUrl: process.env["CORE_URL"] ?? `http://127.0.0.1:${corePort}`,
     sidecarUrl: process.env["VOICE_SIDECAR_URL"] ?? "http://127.0.0.1:8089",
   };
+}
+
+/** The real session manager wired for live use — engines built per start(). */
+export function createDefaultVoiceSessionManager(): VoiceSessionManager {
+  const urls = voiceUrlsFromEnv();
+  return new VoiceSessionManager({
+    sidecarUrl: urls.sidecarUrl,
+    orchestratorFactory: (wakeSource: HttpWakeSource) =>
+      createVoiceOrchestrator(
+        { wakeWord: wakeSource, ...buildVoiceDeps(urls) },
+        VOICE_TURN_CONFIG,
+      ),
+  });
 }

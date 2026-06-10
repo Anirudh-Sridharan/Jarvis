@@ -20,8 +20,10 @@
  * Listens on CORE_PORT (default 8080).
  */
 import "./loadEnv.js"; // MUST be first: populates process.env from .env before config reads it
+import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { stream } from "hono/streaming";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
@@ -31,6 +33,12 @@ import { InMemoryConversationStore } from "./chat/conversationStore.js";
 import { getAgentSystem } from "./agent/agentSystem.js";
 import { getMemorySystem } from "./memory/memorySystem.js";
 import { ConsolidationScheduler } from "./memory/consolidationScheduler.js";
+import type { WakeEvent } from "@jarvis/voice";
+import {
+  getVoiceSessionManager,
+  type VoiceEventFrame,
+} from "./voice/voiceSessionManager.js";
+import { createDefaultVoiceSessionManager } from "./voice/buildVoiceDeps.js";
 
 const config = loadConfig();
 const gateway = new InferenceGateway(config);
@@ -50,6 +58,19 @@ if (consolidationScheduler && !process.env["VITEST"]) {
 }
 
 const app = new Hono();
+
+// The dashboard (http://localhost:3000) calls core from the browser — without
+// CORS every fetch fails preflight. Loopback-only origins: this is a
+// local-first single-user app, never reflect arbitrary origins.
+app.use(
+  "*",
+  cors({
+    origin: (origin) =>
+      origin && /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
+        ? origin
+        : "",
+  }),
+);
 
 app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -107,10 +128,13 @@ app.post("/consolidate", async (c) => {
     return c.json({ ok: false, error: "Memory system not available" }, 503);
   }
   const res = await consolidationScheduler.runNow("manual");
-  if (res === null) {
+  if (res.status === "busy") {
     return c.json({ ok: true, status: "busy" });
   }
-  return c.json({ ok: true, status: "ran", run: res.run });
+  if (res.status === "failed") {
+    return c.json({ ok: false, status: "failed", error: res.error }, 500);
+  }
+  return c.json({ ok: true, status: "ran", run: res.result.run });
 });
 
 const chatBodySchema = z.object({
@@ -171,17 +195,20 @@ app.post("/chat", async (c) => {
 // ── Agent system (lazy, degrades gracefully) ──────────────────────────────────
 
 // We do NOT import @jarvis/integrations here to keep server.ts decoupled from
-// the integrations wiring. The agentBag is null until setAgentSystem() is called
-// externally (e.g. from a daemon entry point), OR the test injects it.
-// For the HTTP layer, we call getAgentSystem(gateway, null) which returns null
-// gracefully when integrations aren't available.
-const agentBag = getAgentSystem(gateway, null);
+// the integrations wiring. The agent bag is null until setAgentSystem() is
+// called externally (e.g. from a daemon entry point), OR the test injects it.
+// Resolved PER REQUEST (not snapshotted at import) so a setAgentSystem() call
+// after this module loads makes the agent endpoints live. With integrations:
+// null, getAgentSystem returns whatever singleton already exists (or null)
+// without poisoning the lazy initialization.
+const currentAgentBag = () => getAgentSystem(gateway, null);
 
 const agentBodySchema = z.object({
   goal: z.string().min(1),
 });
 
 app.post("/agent", async (c) => {
+  const agentBag = currentAgentBag();
   if (!agentBag) {
     return c.json({ ok: false, error: "Agent system not available" }, 503);
   }
@@ -220,6 +247,7 @@ app.post("/agent", async (c) => {
 });
 
 app.get("/approvals", (c) => {
+  const agentBag = currentAgentBag();
   if (!agentBag) {
     return c.json({ ok: false, error: "Agent system not available" }, 503);
   }
@@ -227,6 +255,7 @@ app.get("/approvals", (c) => {
 });
 
 app.post("/approvals/:id/approve", async (c) => {
+  const agentBag = currentAgentBag();
   if (!agentBag) {
     return c.json({ ok: false, error: "Agent system not available" }, 503);
   }
@@ -239,6 +268,7 @@ app.post("/approvals/:id/approve", async (c) => {
 });
 
 app.post("/approvals/:id/reject", async (c) => {
+  const agentBag = currentAgentBag();
   if (!agentBag) {
     return c.json({ ok: false, error: "Agent system not available" }, 503);
   }
@@ -253,6 +283,7 @@ app.post("/approvals/:id/reject", async (c) => {
 const AUDIT_DEFAULT_LIMIT = 100;
 
 app.get("/audit", (c) => {
+  const agentBag = currentAgentBag();
   if (!agentBag) {
     return c.json({ ok: false, error: "Agent system not available" }, 503);
   }
@@ -268,6 +299,115 @@ app.get("/audit", (c) => {
   }
 });
 
+// ── Voice session (dashboard HUD: features 7+8 hands-free mode) ──────────────
+
+// Resolved per request so tests can inject a fake-built manager via
+// setVoiceSessionManager() (same pattern as the agent bag above). The default
+// factory only wires constructors — nothing spawns until /voice/start.
+const currentVoiceSession = () =>
+  getVoiceSessionManager(createDefaultVoiceSessionManager)!;
+
+app.post("/voice/start", async (c) => {
+  const result = await currentVoiceSession().start();
+  return result.ok ? c.json(result) : c.json(result, 503);
+});
+
+app.post("/voice/stop", async (c) => {
+  const status = await currentVoiceSession().stop();
+  return c.json({ ok: true, status });
+});
+
+app.get("/voice/status", (c) => {
+  return c.json({ ok: true, status: currentVoiceSession().status() });
+});
+
+// The Python sidecar's wakeword.py POSTs:
+//   { event: "wake", id, source: "wakeword", phrase, confidence, ts, device_id }
+// Map snake_case fields onto the TS WakeEvent shape.
+const wakePayloadSchema = z.object({
+  event: z.string().optional(),
+  id: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  ts: z.number().optional(),
+  device_id: z.string().optional(),
+});
+
+app.post("/voice/wake", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+  const parsed = wakePayloadSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, error: parsed.error.message }, 400);
+  }
+  const p = parsed.data;
+  const wake: WakeEvent = {
+    id: p.id ?? randomUUID(),
+    source: "wakeword",
+    phrase: "Hey Jarvis",
+    confidence: p.confidence ?? 1,
+    timestamp: p.ts ?? Date.now(),
+    deviceId: p.device_id ?? "sidecar",
+    warmTriggered: false,
+  };
+  const accepted = currentVoiceSession().dispatchWake(wake);
+  return c.json({ ok: true, accepted });
+});
+
+app.get("/voice/events", (c) => {
+  const session = currentVoiceSession();
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+
+  return stream(c, async (s) => {
+    const send = async (obj: unknown) => {
+      await s.write(`data: ${JSON.stringify(obj)}\n\n`);
+    };
+
+    let open = true;
+    let notify: (() => void) | null = null;
+    const queue: VoiceEventFrame[] = [];
+    // Subscribe BEFORE snapshotting so no frame falls in the gap; the client
+    // dedupes overlap by seq.
+    const unsubscribe = session.subscribe((frame) => {
+      queue.push(frame);
+      notify?.();
+      notify = null;
+    });
+    // Comment heartbeat keeps proxies/browsers from timing the stream out.
+    const heartbeat = setInterval(() => {
+      void s.write(`: hb\n\n`).catch(() => undefined);
+    }, 15_000);
+    heartbeat.unref?.();
+    s.onAbort(() => {
+      open = false;
+      unsubscribe();
+      clearInterval(heartbeat);
+      notify?.();
+      notify = null;
+    });
+
+    await send({ type: "voice_status", ...session.status() });
+    for (const frame of session.recentEvents()) {
+      await send({ type: "voice_event", ...frame });
+    }
+    while (open) {
+      while (queue.length > 0) {
+        const frame = queue.shift();
+        if (frame) await send({ type: "voice_event", ...frame });
+      }
+      if (!open) break;
+      await new Promise<void>((resolve) => {
+        notify = resolve;
+      });
+    }
+  });
+});
+
 const port = config.env.corePort;
 // Only bind the port when run as the core process. Vitest sets VITEST, so tests
 // can import this module (for the exported app/gateway/chatCore) without the
@@ -280,6 +420,21 @@ if (!process.env["VITEST"]) {
       `[core] HF endpoint: ${config.env.hfEndpointUrl ?? "(not configured)"}`,
     );
   });
+
+  // Stop the voice session on exit so the sidecar's wake listener (system mic)
+  // doesn't keep firing at a dead core. Best effort with a hard deadline.
+  const shutdown = (): void => {
+    const session = getVoiceSessionManager();
+    if (!session) process.exit(0);
+    const deadline = setTimeout(() => process.exit(0), 3_000);
+    deadline.unref?.();
+    void session
+      .stop()
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
 
-export { app, gateway, chatCore, store, agentBag, memory, consolidationScheduler };
+export { app, gateway, chatCore, store, currentAgentBag, memory, consolidationScheduler };
