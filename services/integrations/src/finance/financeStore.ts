@@ -190,6 +190,34 @@ export class FinanceStore {
     }));
   }
 
+  /** Recent transactions, newest first (posted date, pending date fallback). */
+  listTransactions(opts: { limit?: number; accountId?: string } = {}): Transaction[] {
+    const limit = opts.limit ?? 50;
+    const where = opts.accountId ? "WHERE account_id = ?" : "";
+    const params = opts.accountId ? [opts.accountId, limit] : [limit];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM fin_transactions ${where}
+         ORDER BY COALESCE(posted_at, pending_at) DESC LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      id: r["id"] as string,
+      sourceTxnId: (r["source_txn_id"] as string | null) ?? null,
+      accountId: r["account_id"] as string,
+      amountMinor: r["amount_minor"] as number,
+      currency: r["currency"] as string,
+      description: r["description"] as string,
+      postedAt: (r["posted_at"] as string | null) ?? null,
+      pendingAt: (r["pending_at"] as string | null) ?? null,
+      status: r["status"] as Transaction["status"],
+      categoryId: r["category_id"] as string,
+      categorySource: r["category_source"] as Transaction["categorySource"],
+      categoryConfidence: (r["category_confidence"] as number | null) ?? undefined,
+      dedupeHash: r["dedupe_hash"] as string,
+    }));
+  }
+
   listCategories(): Category[] {
     const rows = this.db.prepare(`SELECT * FROM fin_categories`).all() as Record<string, unknown>[];
     return rows.map((r) => ({
@@ -199,6 +227,22 @@ export class FinanceStore {
       parentId: (r["parent_id"] as string | null) ?? null,
       color: r["color"] as string,
       isBuiltIn: r["is_built_in"] === 1,
+    }));
+  }
+
+  /** Latest balance snapshot per account (all accounts, any status). */
+  latestBalances(): Array<{ accountId: string; amountMinor: number; currency: string; asOf: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT account_id, amount_minor, currency, as_of FROM fin_balances b
+         WHERE as_of = (SELECT MAX(as_of) FROM fin_balances WHERE account_id = b.account_id)`,
+      )
+      .all() as Array<{ account_id: string; amount_minor: number; currency: string; as_of: string }>;
+    return rows.map((r) => ({
+      accountId: r.account_id,
+      amountMinor: r.amount_minor,
+      currency: r.currency,
+      asOf: r.as_of,
     }));
   }
 

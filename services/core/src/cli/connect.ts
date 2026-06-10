@@ -19,6 +19,7 @@ import {
   getOAuthProvider,
   isOAuthSource,
   type OAuthSourceId,
+  type SourceId,
   type SyncRun,
 } from "@jarvis/integrations";
 import { createLiveIntegrations } from "../integrations/liveIntegrations.js";
@@ -27,6 +28,9 @@ import { KeychainTokenStore } from "../integrations/keychainTokenStore.js";
 
 const OAUTH_SOURCES: OAuthSourceId[] = ["whoop", "gcal", "gmail"];
 
+/** Pull-based connectors the scheduler can sync on demand (apple_health is push). */
+const SYNCABLE_SOURCES: SourceId[] = ["whoop", "gcal", "gmail", "github"];
+
 function usage(): never {
   console.log(
     [
@@ -34,7 +38,7 @@ function usage(): never {
       "",
       "  whoop | gcal | gmail     authorize a source (loopback OAuth consent)",
       "  status                   show token + last-sync state for all sources",
-      "  sync <source>            run one manual sync for a source",
+      "  sync <source>            run one manual sync (whoop|gcal|gmail|github|simplefin)",
       "  disconnect <source>      remove a source's tokens from the Keychain",
       "",
       `OAuth redirect: http://127.0.0.1:${oauthPort()}/callback (set JARVIS_OAUTH_PORT to change)`,
@@ -108,13 +112,44 @@ function printRun(run: SyncRun): void {
   }
 }
 
-async function sync(source: OAuthSourceId): Promise<void> {
+async function sync(arg: string | undefined): Promise<void> {
+  if (arg === "simplefin") return syncFinance();
+
+  if (!arg || !SYNCABLE_SOURCES.includes(arg as SourceId)) {
+    console.error(
+      `Expected one of: ${SYNCABLE_SOURCES.join(", ")}, simplefin — got "${arg ?? ""}"`,
+    );
+    process.exit(1);
+  }
+  const source = arg as SourceId;
+
   const { system, http, tokenStore } = createLiveIntegrations();
   const connector = system.connectors.get(source);
   console.log(`Syncing ${source}…`);
   const run = await system.scheduler.runSync(connector, http, tokenStore, "manual");
   printRun(run);
   process.exit(run.status === "ok" ? 0 : 1);
+}
+
+async function syncFinance(): Promise<void> {
+  const accessUrl = process.env["SIMPLEFIN_ACCESS_URL"];
+  if (!accessUrl) {
+    console.error(
+      "SIMPLEFIN_ACCESS_URL is not set — claim an access URL from your SimpleFIN " +
+        "bridge setup token and add it to .env.",
+    );
+    process.exit(1);
+  }
+  const { system } = createLiveIntegrations();
+  console.log("Syncing simplefin…");
+  const result = await system.finance.sync({ accessUrl });
+  console.log(`\nSync simplefin: ok`);
+  console.log(`  accounts: ${result.accounts}`);
+  console.log(`  transactions: +${result.newTransactions} new, ${result.updatedTransactions} updated`);
+  for (const nw of result.netWorth) {
+    console.log(`  net worth: ${(nw.amountMinor / 100).toFixed(2)} ${nw.currency}`);
+  }
+  process.exit(0);
 }
 
 async function disconnect(source: OAuthSourceId): Promise<void> {
@@ -136,7 +171,7 @@ async function main(): Promise<void> {
     case "status":
       return status();
     case "sync":
-      return sync(requireOAuthSource(arg));
+      return sync(arg);
     case "disconnect":
       return disconnect(requireOAuthSource(arg));
     default:

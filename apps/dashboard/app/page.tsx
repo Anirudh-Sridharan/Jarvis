@@ -53,7 +53,7 @@ export default async function HomePage() {
 
   // Parallel fetches — per-widget Suspense boundaries not needed here
   // because we gracefully handle error state inline
-  const [sleepEnv, recoveryEnv, briefingEnv, agendaEnv, todosEnv] = await Promise.all([
+  const [sleepEnv, recoveryEnv, briefingEnv, agendaEnv, todosEnv, financeEnv] = await Promise.all([
     fetchJson<import("@/app/lib/contracts").MetricSeriesContract>(
       `/api/metrics?metric=sleep.duration_min&range=7d&domain=health`
     ),
@@ -63,6 +63,7 @@ export default async function HomePage() {
     fetchJson<BriefingContract>(`/api/briefing?date=${today}`),
     fetchJson<AgendaEvent[]>(`/api/agenda?date=${today}`),
     fetchJson<TodoContract[]>("/api/todos?status=open"),
+    fetchJson<import("@/app/lib/contracts").FinanceOverviewContract>("/api/finance"),
   ]);
 
   // Derive KPI values from the latest point in each series
@@ -122,6 +123,22 @@ export default async function HomePage() {
       trend: todosOverdue > 0 ? "down" : "flat",
     },
   ];
+
+  // Net worth KPI (first currency) once finance has synced accounts
+  const primaryNetWorth = financeEnv.data?.netWorth[0];
+  if (primaryNetWorth) {
+    kpis.push(
+      buildKpi(
+        "Net worth",
+        "finance.net_worth",
+        primaryNetWorth.amountMinor / 100,
+        primaryNetWorth.currency,
+        new Date().toISOString(),
+        false,
+        true
+      )
+    );
+  }
 
   const now = new Date();
   const dateLabel = now.toLocaleDateString(undefined, {

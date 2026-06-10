@@ -225,6 +225,30 @@ describe("FinanceStore", () => {
     expect(spending.find((s) => s.categoryId === "groceries")!.amountMinor).toBe(8245);
   });
 
+  it("listTransactions returns newest first and respects limit/account filters", async () => {
+    await seedFromPayload();
+    const all = store.listTransactions();
+    expect(all).toHaveLength(3);
+    const dates = all.map((t) => t.postedAt ?? t.pendingAt);
+    expect([...dates].sort().reverse()).toEqual(dates); // newest first
+    const limited = store.listTransactions({ limit: 1 });
+    expect(limited).toHaveLength(1);
+    expect(limited[0]!.id).toBe(all[0]!.id);
+    const byAccount = store.listTransactions({ accountId: all[0]!.accountId });
+    expect(byAccount.every((t) => t.accountId === all[0]!.accountId)).toBe(true);
+  });
+
+  it("latestBalances returns one latest snapshot per account", async () => {
+    await seedFromPayload();
+    const balances = store.latestBalances();
+    const accountIds = balances.map((b) => b.accountId);
+    expect(new Set(accountIds).size).toBe(accountIds.length); // one per account
+    expect(balances.length).toBe(store.listAccounts().length);
+    // Σ latest balances (sign-authoritative) must agree with netWorth()
+    const total = balances.reduce((sum, b) => sum + b.amountMinor, 0);
+    expect(store.netWorth()).toEqual([{ currency: "USD", amountMinor: total }]);
+  });
+
   it("runFinanceSync emits a per-currency net-worth metric point", async () => {
     await seedFromPayload();
     const metrics = new MetricStore(db);

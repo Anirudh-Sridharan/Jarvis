@@ -59,6 +59,36 @@ export default function TodoList({ initialEnvelope }: TodoListProps) {
     }
   }, []);
 
+  const snoozeTodo = useCallback(async (id: string) => {
+    const tomorrow = new Date(Date.now() + 86_400_000);
+    const due = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+    try {
+      const res = await fetch("/api/todos", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action: "snooze", due }),
+      });
+      const envelope = (await res.json()) as WidgetEnvelope<TodoContract>;
+      if (envelope.data) {
+        setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, due } : t)));
+      }
+    } catch {
+      // keep current due on failure
+    }
+  }, []);
+
+  const deleteTodo = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/todos?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const envelope = (await res.json()) as WidgetEnvelope<{ id: string }>;
+      if (envelope.data) {
+        setTodos((prev) => prev.filter((t) => t.id !== id));
+      }
+    } catch {
+      // keep the item on failure
+    }
+  }, []);
+
   const open = todos.filter((t) => t.status === "open");
   const isNow = (due?: string) => (due ? isOverdue(due) : false);
 
@@ -113,6 +143,24 @@ export default function TodoList({ initialEnvelope }: TodoListProps) {
                   {new Date(t.due).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                 </span>
               )}
+              <span className="todo-list__actions">
+                <button
+                  className="todo-list__action"
+                  onClick={() => void snoozeTodo(t.id)}
+                  title="Snooze to tomorrow"
+                  aria-label={`Snooze: ${t.text}`}
+                >
+                  z
+                </button>
+                <button
+                  className="todo-list__action todo-list__action--danger"
+                  onClick={() => void deleteTodo(t.id)}
+                  title="Delete"
+                  aria-label={`Delete: ${t.text}`}
+                >
+                  &times;
+                </button>
+              </span>
             </li>
           ))}
         </ul>

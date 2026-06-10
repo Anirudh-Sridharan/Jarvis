@@ -6,6 +6,17 @@ interface KpiCardProps {
 
 function formatValue(value: number | null, unit: string): string {
   if (value === null) return "--";
+  if (/^[A-Z]{3}$/.test(unit)) {
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: unit,
+        maximumFractionDigits: 0,
+      }).format(value);
+    } catch {
+      // fall through to the generic formatter
+    }
+  }
   if (unit === "min") {
     const h = Math.floor(value / 60);
     const m = Math.round(value % 60);

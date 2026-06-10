@@ -128,6 +128,106 @@ export interface ProfileContract {
   updatedAt: string;
 }
 
+// ── Connectors (feature 9) ────────────────────────────────────────────────────
+
+export interface SyncRunContract {
+  id: string;
+  source: string;
+  status: "running" | "ok" | "partial" | "error";
+  trigger: string;
+  startedAt: string;
+  finishedAt?: string;
+  pointsWritten: number;
+  error?: string;
+}
+
+export type ConnectorTokenState =
+  | "connected"
+  | "expired_refreshable"
+  | "expired_reconsent"
+  | "not_connected"
+  | "n/a";
+
+export interface ConnectorStatusContract {
+  id: string;
+  label: string;
+  desc: string;
+  auth: "oauth" | "pat" | "push" | "token";
+  scheduleLabel: string;
+  token: ConnectorTokenState;
+  tokenExpiresInMin?: number;
+  /** Whether POST /api/connectors/sync can run this source on demand. */
+  syncable: boolean;
+  /** CLI command to (re)connect the source, shown when not connected. */
+  connectCmd?: string;
+  lastSync: SyncRunContract | null;
+  recentRuns: SyncRunContract[];
+  /** Latest data timestamp for sources without sync runs (push / finance). */
+  lastDataAt?: string;
+}
+
+export interface SyncNowResult {
+  source: string;
+  ok: boolean;
+  output: string;
+}
+
+// ── Finance (feature 11) ──────────────────────────────────────────────────────
+
+export interface AccountContract {
+  id: string;
+  name: string;
+  institution: string;
+  type: "checking" | "savings" | "credit" | "investment" | "loan" | "cash" | "other";
+  currency: string;
+  isAsset: boolean;
+  balanceMinor: number | null;
+  balanceAsOf: string | null;
+  lastSyncedAt: string;
+  status: "active" | "disconnected" | "reauth_required";
+}
+
+export interface TransactionContract {
+  id: string;
+  accountName: string;
+  amountMinor: number;
+  currency: string;
+  description: string;
+  date: string; // posted (pending fallback) ISO
+  status: "pending" | "posted";
+  categoryId: string;
+  categoryName: string;
+  categoryColor: string;
+}
+
+export interface CategorySpendContract {
+  categoryId: string;
+  name: string;
+  color: string;
+  amountMinor: number;
+}
+
+export interface CashflowMonthContract {
+  month: string; // YYYY-MM
+  incomeMinor: number;
+  expensesMinor: number;
+}
+
+export interface FinanceOverviewContract {
+  netWorth: Array<{ currency: string; amountMinor: number }>;
+  accounts: AccountContract[];
+  spending30d: CategorySpendContract[];
+  cashflow: CashflowMonthContract[];
+}
+
+// ── Calendar free time (feature 12) ───────────────────────────────────────────
+
+export interface FreeSlotContract {
+  start: string; // ISO
+  end: string;   // ISO
+  durationMin: number;
+}
+
 // ── Live status (SSE) ─────────────────────────────────────────────────────────
 
 export interface LiveStatus {

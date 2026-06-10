@@ -1,19 +1,20 @@
 /**
  * Work page — feature 13.
- * GitHub activity chart + interactive TODO list.
+ * GitHub activity + Gmail email volume charts + interactive TODO list.
  */
 
-import type { WidgetEnvelope, MetricSeriesContract, TodoContract } from "@/app/lib/contracts";
+import type { WidgetEnvelope, MetricSeriesContract, TodoContract, KpiValue } from "@/app/lib/contracts";
 import MetricChart from "@/app/components/MetricChart";
+import KpiCard from "@/app/components/KpiCard";
 import TodoList from "@/app/components/TodoList";
 import { EmptyState, ErrorState } from "@/app/components/WidgetStates";
 
 const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
 
-async function fetchSeries(metric: string): Promise<WidgetEnvelope<MetricSeriesContract>> {
+async function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
   try {
     const res = await fetch(
-      `${BASE}/api/metrics?metric=${encodeURIComponent(metric)}&range=30d&domain=work`,
+      `${BASE}/api/metrics?metric=${encodeURIComponent(metric)}&range=${range}&domain=work`,
       { cache: "no-store" }
     );
     return (await res.json()) as WidgetEnvelope<MetricSeriesContract>;
@@ -41,66 +42,108 @@ async function fetchTodos(): Promise<WidgetEnvelope<TodoContract[]>> {
   }
 }
 
+function ChartSection({
+  envelope,
+  label,
+  emptyMessage,
+  ctaLabel,
+  color,
+}: {
+  envelope: WidgetEnvelope<MetricSeriesContract>;
+  label: string;
+  emptyMessage: string;
+  ctaLabel: string;
+  color: string;
+}) {
+  if (envelope.state === "error") {
+    return <ErrorState title={label} message={envelope.error?.message} />;
+  }
+  if (envelope.state === "empty" || !envelope.data) {
+    return (
+      <EmptyState
+        title={label}
+        message={emptyMessage}
+        ctaLabel={ctaLabel}
+        ctaHref="/settings/integrations"
+      />
+    );
+  }
+  return (
+    <div className="card">
+      <MetricChart
+        points={envelope.data.points}
+        label={label}
+        unit={envelope.data.unit}
+        kind="bar"
+        color={color}
+        downsampled={envelope.data.downsampled}
+      />
+    </div>
+  );
+}
+
 export default async function WorkPage() {
-  const [commitsEnv, prsEnv, todosEnv] = await Promise.all([
-    fetchSeries("commits"),
-    fetchSeries("pr_merged"),
+  const [commitsEnv, prsEnv, receivedEnv, sentEnv, unreadEnv, todosEnv] = await Promise.all([
+    fetchSeries("github.commits"),
+    fetchSeries("github.prs_merged"),
+    fetchSeries("gmail.received"),
+    fetchSeries("gmail.sent"),
+    fetchSeries("gmail.unread_count", "7d"),
     fetchTodos(),
   ]);
+
+  const unreadLatest = unreadEnv.data?.points?.at(-1)?.value ?? null;
+  const unreadKpi: KpiValue = {
+    metricId: "gmail.unread_count",
+    label: "Unread emails",
+    value: unreadLatest,
+    unit: "count",
+    asOf: unreadEnv.data?.asOf ?? new Date().toISOString(),
+    stale: unreadEnv.data?.stale ?? false,
+    sourceConnected: unreadEnv.state !== "empty",
+  };
 
   return (
     <div className="page">
       <div className="page-header">
         <h1 className="page-title">Work</h1>
-        <p className="text-dim text-sm">GitHub activity (30d) + todos</p>
+        <p className="text-dim text-sm">GitHub + Gmail activity (30d) &middot; todos</p>
+      </div>
+
+      <div className="kpi-row">
+        <KpiCard kpi={unreadKpi} />
       </div>
 
       <div className="work-grid">
-        {/* GitHub activity charts */}
         <div className="work-grid__charts">
-          {commitsEnv.state === "error" ? (
-            <ErrorState title="Commits" message={commitsEnv.error?.message} />
-          ) : commitsEnv.state === "empty" || !commitsEnv.data ? (
-            <EmptyState
-              title="Commits"
-              message="No GitHub activity yet."
-              ctaLabel="Connect GitHub"
-              ctaHref="/settings/integrations"
-            />
-          ) : (
-            <div className="card">
-              <MetricChart
-                points={commitsEnv.data.points}
-                label="Daily Commits"
-                unit={commitsEnv.data.unit}
-                kind="bar"
-                color="#60a5fa"
-                downsampled={commitsEnv.data.downsampled}
-              />
-            </div>
-          )}
-
-          {prsEnv.state === "error" ? (
-            <ErrorState title="PRs Merged" message={prsEnv.error?.message} />
-          ) : prsEnv.state === "empty" || !prsEnv.data ? (
-            <EmptyState
-              title="PRs Merged"
-              message="No pull request data yet."
-              ctaLabel="Connect GitHub"
-              ctaHref="/settings/integrations"
-            />
-          ) : (
-            <div className="card">
-              <MetricChart
-                points={prsEnv.data.points}
-                label="PRs Merged"
-                unit={prsEnv.data.unit}
-                kind="bar"
-                color="#3b82f6"
-                downsampled={prsEnv.data.downsampled}
-              />
-            </div>
-          )}
+          <ChartSection
+            envelope={commitsEnv}
+            label="Daily Commits"
+            emptyMessage="No GitHub activity yet."
+            ctaLabel="Connect GitHub"
+            color="#60a5fa"
+          />
+          <ChartSection
+            envelope={prsEnv}
+            label="PRs Merged"
+            emptyMessage="No pull request data yet."
+            ctaLabel="Connect GitHub"
+            color="#3b82f6"
+          />
+          <ChartSection
+            envelope={receivedEnv}
+            label="Emails Received"
+            emptyMessage="No Gmail data yet."
+            ctaLabel="Connect Gmail"
+            color="#93c5fd"
+          />
+          <ChartSection
+            envelope={sentEnv}
+            label="Emails Sent"
+            emptyMessage="No Gmail data yet."
+            ctaLabel="Connect Gmail"
+            color="#2563eb"
+          />
         </div>
 
         {/* Todos */}

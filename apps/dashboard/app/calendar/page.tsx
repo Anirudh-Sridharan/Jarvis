@@ -3,16 +3,16 @@
  * Today's agenda + upcoming events from CalendarMirror.
  */
 
-import type { WidgetEnvelope, AgendaEvent } from "@/app/lib/contracts";
+import type { WidgetEnvelope, AgendaEvent, FreeSlotContract } from "@/app/lib/contracts";
 import { localDateStr } from "@/app/lib/dates";
 import AgendaList from "@/app/components/AgendaList";
 
 const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
 
-async function fetchAgenda(date: string): Promise<WidgetEnvelope<AgendaEvent[]>> {
+async function fetchJson<T>(path: string): Promise<WidgetEnvelope<T>> {
   try {
-    const res = await fetch(`${BASE}/api/agenda?date=${date}`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<AgendaEvent[]>;
+    const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+    return (await res.json()) as WidgetEnvelope<T>;
   } catch {
     return {
       data: null,
@@ -23,6 +23,40 @@ async function fetchAgenda(date: string): Promise<WidgetEnvelope<AgendaEvent[]>>
   }
 }
 
+const fetchAgenda = (date: string) => fetchJson<AgendaEvent[]>(`/api/agenda?date=${date}`);
+
+function localTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
+function FreeTimeCard({ envelope }: { envelope: WidgetEnvelope<FreeSlotContract[]> }) {
+  if (envelope.state === "error") return null;
+  const slots = envelope.data ?? [];
+  return (
+    <div className="card">
+      <div className="card__title">Free Time Today</div>
+      {slots.length === 0 ? (
+        <p className="text-dim">No free slots left in work hours.</p>
+      ) : (
+        <ul className="freeslot-list">
+          {slots.map((s) => (
+            <li key={s.start} className="freeslot-list__item">
+              <span className="freeslot-list__range">
+                {localTime(s.start)} – {localTime(s.end)}
+              </span>
+              <span className="text-dim text-sm">{s.durationMin} min</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default async function CalendarPage() {
   const today = localDateStr();
 
@@ -31,9 +65,10 @@ export default async function CalendarPage() {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = localDateStr(tomorrow);
 
-  const [todayEnv, tomorrowEnv] = await Promise.all([
+  const [todayEnv, tomorrowEnv, freeEnv] = await Promise.all([
     fetchAgenda(today),
     fetchAgenda(tomorrowStr),
+    fetchJson<FreeSlotContract[]>(`/api/freetime?date=${today}&duration=30`),
   ]);
 
   return (
@@ -51,6 +86,10 @@ export default async function CalendarPage() {
         <section>
           <h2 className="section-title">Tomorrow</h2>
           <AgendaList envelope={tomorrowEnv} />
+        </section>
+        <section>
+          <h2 className="section-title">Open Slots</h2>
+          <FreeTimeCard envelope={freeEnv} />
         </section>
       </div>
     </div>

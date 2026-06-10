@@ -71,12 +71,18 @@ function MetricSection({
 }
 
 export default async function HealthPage() {
-  const [sleepEnv, hrvEnv, rhrEnv, recoveryEnv] = await Promise.all([
-    fetchSeries("sleep.duration_min", "30d"),
-    fetchSeries("hrv", "30d"),
-    fetchSeries("rhr", "30d"),
-    fetchSeries("recovery", "30d"),
-  ]);
+  // "restingHr" is the id both Whoop and Apple Health normalize to
+  const [sleepEnv, hrvEnv, rhrEnv, recoveryEnv, stepsEnv, energyEnv, weightEnv, spo2Env] =
+    await Promise.all([
+      fetchSeries("sleep.duration_min", "30d"),
+      fetchSeries("hrv", "30d"),
+      fetchSeries("restingHr", "30d"),
+      fetchSeries("recovery", "30d"),
+      fetchSeries("steps", "30d"),
+      fetchSeries("activeEnergy", "30d"),
+      fetchSeries("weight", "90d"),
+      fetchSeries("spo2", "30d"),
+    ]);
 
   return (
     <div className="page">
@@ -90,6 +96,10 @@ export default async function HealthPage() {
         <MetricSection envelope={recoveryEnv} label="Recovery Score" kind="line" color="#3b82f6" />
         <MetricSection envelope={hrvEnv} label="HRV" kind="line" color="#93c5fd" />
         <MetricSection envelope={rhrEnv} label="Resting Heart Rate" kind="line" color="#38bdf8" />
+        <MetricSection envelope={stepsEnv} label="Steps" kind="bar" color="#2563eb" />
+        <MetricSection envelope={energyEnv} label="Active Energy" kind="bar" color="#60a5fa" />
+        <MetricSection envelope={weightEnv} label="Weight (90d)" kind="line" color="#93c5fd" />
+        <MetricSection envelope={spo2Env} label="Blood Oxygen" kind="line" color="#38bdf8" />
       </div>
     </div>
   );
