@@ -150,6 +150,7 @@ export {
   clearOAuthState,
 } from "./framework/oauth.js";
 export { mapGoogleApiError } from "./framework/googleApi.js";
+export { httpError, httpErrorDetail } from "./framework/httpError.js";
 export {
   getOAuthProvider,
   getRefreshConfig,

@@ -17,6 +17,7 @@ import type { HttpClient, HttpResponse, TokenStore } from "../types.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
 import { mapGoogleApiError } from "../framework/googleApi.js";
+import { httpError } from "../framework/httpError.js";
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -87,7 +88,7 @@ export async function searchEmail(
     headers: { Authorization: `Bearer ${token}` },
   });
   if (listRes.status !== 200) {
-    throw new Error(`Gmail messages.list failed: HTTP ${listRes.status}`);
+    throw httpError("Gmail messages.list failed", listRes);
   }
 
   const data = listRes.body as { messages?: Array<{ id: string; threadId: string }> };
@@ -144,7 +145,7 @@ export async function getEmailThread(
     headers: { Authorization: `Bearer ${token}` },
   });
   if (res.status !== 200) {
-    throw new Error(`Gmail threads.get failed: HTTP ${res.status}`);
+    throw httpError("Gmail threads.get failed", res);
   }
 
   const data = res.body as { id?: string; messages?: RawGmailMessage[] };

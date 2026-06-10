@@ -25,6 +25,7 @@ import type {
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
+import { httpError } from "../framework/httpError.js";
 
 const ADAPTER_VERSION = "1";
 const WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v2";
@@ -108,7 +109,7 @@ async function fetchAllPages<T>(
     // silently skipping one collection would permanently lose its window.
     // Throwing makes the Scheduler record an error run without advancing.
     if (res.status !== 200) {
-      throw new Error(`Whoop ${collection} sync failed: HTTP ${res.status}`);
+      throw httpError(`Whoop ${collection} sync failed`, res);
     }
 
     const data = res.body as { records?: T[]; next_token?: string | null };

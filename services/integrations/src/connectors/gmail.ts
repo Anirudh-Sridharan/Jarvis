@@ -22,6 +22,7 @@ import type {
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
+import { httpError } from "../framework/httpError.js";
 
 const ADAPTER_VERSION = "1";
 const MAX_PAGES = 10;
@@ -62,7 +63,7 @@ export const gmailConnector: Connector = {
       // A failed page-level list fetch must fail the run: the cursor would
       // otherwise advance past messages we never saw.
       if (receivedRes.status !== 200) {
-        throw new Error(`Gmail messages.list failed: HTTP ${receivedRes.status}`);
+        throw httpError("Gmail messages.list failed", receivedRes);
       }
 
       const data = receivedRes.body as {

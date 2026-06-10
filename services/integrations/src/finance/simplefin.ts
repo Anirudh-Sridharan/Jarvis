@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { HttpClient } from "../types.js";
 import type { Account, AccountBalance, Transaction } from "./types.js";
+import { httpError } from "../framework/httpError.js";
 
 // SimpleFIN raw payload (subset we consume)
 export interface RawSimpleFinAccount {
@@ -50,7 +51,7 @@ export class SimpleFinClient {
       url: `${this.accessUrl.replace(/\/$/, "")}/accounts?start-date=${startEpoch}`,
     });
     if (res.status !== 200) {
-      throw new Error(`SimpleFIN fetch failed: HTTP ${res.status}`);
+      throw httpError("SimpleFIN fetch failed", res);
     }
     return res.body as SimpleFinPayload;
   }

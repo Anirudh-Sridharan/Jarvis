@@ -37,6 +37,7 @@ import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
 import { mapGoogleApiError } from "../framework/googleApi.js";
+import { httpError } from "../framework/httpError.js";
 import type { DatabaseSync } from "node:sqlite";
 import { toJson, fromJson } from "../db/database.js";
 
@@ -98,7 +99,7 @@ export const googleCalendarConnector: Connector = {
         }
 
         if (res.status !== 200) {
-          throw new Error(`Calendar sync failed: HTTP ${res.status}`);
+          throw httpError("Calendar sync failed", res);
         }
 
         const data = res.body as {

@@ -145,11 +145,17 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
         });
         const env = (await res.json()) as WidgetEnvelope<SyncNowResult>;
         const ok = env.data?.ok ?? false;
-        const lastLine =
-          env.data?.output.split("\n").filter(Boolean).slice(-2).join(" · ") ??
-          env.error?.message ??
-          "no output";
-        setSyncMsg((m) => ({ ...m, [source]: { ok, text: lastLine } }));
+        // Surface the CLI's meaningful lines, not npm's lifecycle noise.
+        const meaningful = env.data?.output
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !/^(npm (error|warn)|>)/.test(l))
+          .slice(-2)
+          .join(" · ");
+        setSyncMsg((m) => ({
+          ...m,
+          [source]: { ok, text: meaningful || env.error?.message || "no output" },
+        }));
         await refresh();
       } catch (e) {
         setSyncMsg((m) => ({
