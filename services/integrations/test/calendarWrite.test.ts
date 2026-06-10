@@ -131,3 +131,30 @@ describe("executeEventWrite: create", () => {
     expect(http.callCount(/\/calendars\//)).toBe(0);
   });
 });
+
+describe("executeEventWrite: validation", () => {
+  it.each([
+    ["create missing times", createReq({ patch: { summary: "No times" } })],
+    [
+      "create end before start",
+      createReq({
+        patch: {
+          summary: "Backwards",
+          start: { dateTime: "2026-06-12T16:00:00Z", timeZone: "UTC" },
+          end: { dateTime: "2026-06-12T15:00:00Z", timeZone: "UTC" },
+        },
+      }),
+    ],
+    ["update missing eventId", createReq({ op: "update", eventId: undefined })],
+    [
+      "delete missing eventId",
+      { requestId: "r", op: "delete" as const, calendarId: "primary", reason: "t" },
+    ],
+  ])("%s → ok:false code 400 and no HTTP calls", async (_name, req) => {
+    const { deps, http } = makeDeps();
+    const result = await executeEventWrite(req as EventWriteRequest, deps);
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(400);
+    expect(http.calls.length).toBe(0);
+  });
+});
