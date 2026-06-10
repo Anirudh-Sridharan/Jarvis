@@ -542,3 +542,46 @@ describe("VoiceOrchestrator — FakeTtsEngine sentence recording", () => {
     }
   });
 });
+
+describe("VoiceOrchestrator — multi-segment turns accumulate finals", () => {
+  it("a mid-utterance pause (two STT finals in one turn) keeps both segments", async () => {
+    const wake = new FakeWakeWordSource();
+    const stt = new FakeSttEngine();
+    const tts = new FakeTtsEngine();
+    const core = new FakeCoreClient();
+
+    // The sidecar emits one final PER VAD SEGMENT: a pause longer than its
+    // silence hangover but shorter than the turn threshold splits one user
+    // turn into two finals. The orchestrator must concatenate them.
+    stt.setScript([
+      { type: "speech_start" },
+      { type: "partial", text: "Remind me to call mum", stability: 0.7 },
+      { type: "final", text: "Remind me to call mum", confidence: 0.95 },
+      { type: "speech_end", silenceMs: 50 }, // below threshold: turn continues
+      { type: "speech_start" },
+      { type: "partial", text: "tomorrow at nine.", stability: 0.7 },
+      { type: "final", text: "tomorrow at nine.", confidence: 0.95 },
+      { type: "speech_end", silenceMs: 900 }, // turn ends
+    ]);
+    core.tokenScript = ["Done."];
+
+    const orchestrator = createVoiceOrchestrator(
+      { wakeWord: wake, stt, tts, core },
+      { minCharsPerChunk: 1, silenceThresholdMs: 100, forceEndMs: 2000 },
+    );
+
+    const events: OrchestratorEvent[] = [];
+    orchestrator.on((e) => events.push(e));
+    orchestrator.start();
+    wake.fire({ id: "session-multi" });
+
+    const turnEvent = await waitForEvent(events, (e) => e.type === "turn_complete");
+    await orchestrator.stop();
+
+    if (turnEvent.type === "turn_complete") {
+      expect(turnEvent.turn.userText).toBe("Remind me to call mum tomorrow at nine.");
+    }
+    // core /chat received the FULL utterance, not just the last segment
+    expect(core.chatCalls[0]).toBe("Remind me to call mum tomorrow at nine.");
+  });
+});

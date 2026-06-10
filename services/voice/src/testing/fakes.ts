@@ -185,6 +185,8 @@ export class FakeTtsEngine implements TtsEngine {
 
 export class FakeCoreClient implements CoreClient {
   public warmupCalls = 0;
+  /** Messages passed to chatStream, in order. */
+  public chatCalls: string[] = [];
   public warmupResult: WarmupResult = { ok: true, state: "ready" };
   public tokenScript: string[] = [];
   /** If non-null, warmup() rejects with this error. */
@@ -199,10 +201,11 @@ export class FakeCoreClient implements CoreClient {
   }
 
   async *chatStream(
-    _message: string,
+    message: string,
     _conversationId?: string,
     signal?: AbortSignal,
   ): AsyncGenerator<string> {
+    this.chatCalls.push(message);
     let count = 0;
     for (const token of this.tokenScript) {
       if (signal?.aborted) return;

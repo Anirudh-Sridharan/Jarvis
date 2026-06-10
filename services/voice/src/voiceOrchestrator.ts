@@ -223,6 +223,13 @@ export class VoiceOrchestrator {
     this.turnDetector.reset();
 
     let transcript = "";
+    // Finals already committed this turn. The STT engine emits one `final`
+    // PER VAD SEGMENT (a pause longer than its silence hangover ends a
+    // segment and clears its buffer) — but the turn detector may not end the
+    // turn until later, so a single user turn can span several finals.
+    // Overwriting instead of accumulating would discard everything said
+    // before a mid-utterance pause.
+    let committed = "";
     // silenceStart tracks wall-clock time since the last speech_end.
     let silenceStart: number | null = null;
     // The last reported silence from the STT engine (speech_end carries this).
@@ -231,6 +238,7 @@ export class VoiceOrchestrator {
 
     const resetTurnTracking = (): void => {
       transcript = "";
+      committed = "";
       silenceStart = null;
       reportedSilenceMs = 0;
       eosAt = null;
@@ -343,12 +351,15 @@ export class VoiceOrchestrator {
         }
 
         if (event.type === "partial") {
-          transcript = event.text;
+          // Partials are cumulative within the CURRENT segment only; prepend
+          // the finals already committed this turn.
+          transcript = committed ? `${committed} ${event.text}` : event.text;
           this.emit({ type: "partial_transcript", text: transcript });
         }
 
         if (event.type === "final") {
-          transcript = event.text;
+          committed = committed ? `${committed} ${event.text}` : event.text;
+          transcript = committed;
           eosAt = eosAt ?? Date.now();
           this.emit({ type: "final_transcript", text: transcript });
         }
