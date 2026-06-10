@@ -8,6 +8,8 @@
  *   4. dispatch to the chosen provider, stream content deltas
  *   5. on local runtime error mid-generation BEFORE first token, retry on HF once
  *      (oom-fallback); idle timer reset on completion
+ *   6. on HF runtime error BEFORE first token, retry on the local model once
+ *      (cloud-unavailable fallback: depleted credits/402, network, 5xx)
  *
  * Emits a unified InferenceStreamChunk stream (status/token/done/error).
  */
@@ -196,6 +198,46 @@ export class InferenceGateway {
             return;
           } catch (hfErr) {
             yield { type: "error", message: `Cloud fallback failed: ${errMsg(hfErr)}` };
+            return;
+          }
+        }
+      }
+      // Runtime failure on the HF path BEFORE any token -> retry once locally
+      // (cloud-unavailable fallback: depleted credits (402), network down, 5xx).
+      // The local 4B model is weaker, but a degraded answer beats a dead turn;
+      // telemetry records fallbackActive so the quality drop is visible.
+      if (target === "hf" && !firstTokenSeen && !signal?.aborted) {
+        const localEntry = this.tryDefault("local");
+        if (localEntry) {
+          yield { type: "status", state: "error" };
+          try {
+            const mmState = this.modelManager.getState();
+            if (mmState !== "ready" && mmState !== "generating") {
+              yield { type: "status", state: "loading" };
+            }
+            await this.modelManager.ensureReady(localEntry.id, localEntry.modelRef);
+            this.modelManager.beginRequest();
+            localRequestOpen = true;
+            this.modelManager.setFallbackActive(true);
+            yield { type: "status", state: "ready" };
+            for await (const text of this.mlx.streamChat({
+              modelRef: localEntry.modelRef,
+              messages: req.messages,
+              tools: req.tools,
+              maxTokens: req.maxTokens,
+              signal,
+            })) {
+              timer.recordToken();
+              yield { type: "token", text };
+            }
+            timer.finish({ modelId: localEntry.id, target: "local", fallbackActive: true });
+            yield { type: "done" };
+            return;
+          } catch (localErr) {
+            yield {
+              type: "error",
+              message: `HF failed (${errMsg(err)}); local fallback also failed: ${errMsg(localErr)}`,
+            };
             return;
           }
         }
