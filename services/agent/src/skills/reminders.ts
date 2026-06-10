@@ -14,7 +14,7 @@ import type { Skill, SkillCtx } from "./registry.js";
 import type { SkillResult } from "../types.js";
 import { registerToolMeta } from "../safety/policy.js";
 
-registerToolMeta("todo_create", { sideEffects: "internal_write", reversible: true });
+registerToolMeta("todo_add", { sideEffects: "internal_write", reversible: true });
 registerToolMeta("todo_list", { sideEffects: "read_only", reversible: true });
 registerToolMeta("todo_complete", { sideEffects: "internal_write", reversible: true });
 
@@ -39,7 +39,7 @@ export const remindersSkill: Skill = {
   id: "reminders.todo",
   name: "Reminders & Todos",
   description: "Create, list, and complete reminders and todos. Local store only.",
-  allowedTools: ["todo_create", "todo_list", "todo_complete"],
+  allowedTools: ["todo_add", "todo_list", "todo_complete"],
   outward: false,
   approvalPolicy: "never",
 
@@ -139,11 +139,10 @@ export const remindersSkill: Skill = {
     }
 
     try {
-      const todo = await ctx.tool("todo_create", {
-        title: args.text,
+      const todo = await ctx.tool("todo_add", {
+        text: args.text,
         due: args.due,
         recurrence: args.recurrence,
-        createdAt: ctx.clock.isoNow(),
       });
 
       return {

@@ -95,11 +95,12 @@ const SendEmailSchema = z.object({
   to: z.array(z.string().email()).min(1),
   subject: z.string().min(1),
   body: z.string(),
-  threadId: z.string().optional(),
+  cc: z.array(z.string().email()).optional(),
+  thread_id: z.string().optional(),
 });
 
 export class FakeSendEmailTool implements Tool {
-  readonly name = "send_email";
+  readonly name = "email_send";
   readonly description = "Send an email (side-effecting, requires approval)";
   readonly schema = SendEmailSchema;
   readonly readOnly = false;
@@ -115,59 +116,80 @@ export class FakeSendEmailTool implements Tool {
 // ── FakeTools: search + label_thread + get_thread + search_threads + send_email
 
 const SearchThreadsSchema = z.object({
-  q: z.string(),
+  query: z.string(),
+  max_results: z.number().int().optional(),
 });
 
 export class FakeSearchThreadsTool implements Tool {
-  readonly name = "search_threads";
-  readonly description = "Search email threads";
+  readonly name = "email_search";
+  readonly description = "Search email messages";
   readonly schema = SearchThreadsSchema;
   readonly readOnly = true;
   callLog: string[] = [];
   returnIds: string[] = ["thread-1", "thread-2", "thread-3"];
 
   async run(args: unknown): Promise<unknown> {
-    const { q } = SearchThreadsSchema.parse(args);
-    this.callLog.push(q);
-    return this.returnIds;
+    const { query } = SearchThreadsSchema.parse(args);
+    this.callLog.push(query);
+    return {
+      hits: this.returnIds.map((id) => ({
+        messageId: `m-${id}`,
+        threadId: id,
+        subject: `Subject for ${id}`,
+        from: "sender@example.com",
+        date: "2026-06-10T09:00:00Z",
+      })),
+      count: this.returnIds.length,
+    };
   }
 }
 
-const GetThreadSchema = z.object({ id: z.string() });
+const GetThreadSchema = z.object({ thread_id: z.string() });
 
 export class FakeGetThreadTool implements Tool {
-  readonly name = "get_thread";
+  readonly name = "email_get";
   readonly description = "Get email thread content";
   readonly schema = GetThreadSchema;
   readonly readOnly = true;
 
   async run(args: unknown): Promise<unknown> {
-    const { id } = GetThreadSchema.parse(args);
+    const { thread_id } = GetThreadSchema.parse(args);
     return {
-      id,
-      subject: `Subject for ${id}`,
-      from: "sender@example.com",
-      body: `Body of thread ${id}. Please reply.`,
+      id: thread_id,
+      messages: [
+        {
+          id: `m-${thread_id}`,
+          threadId: thread_id,
+          from: "sender@example.com",
+          to: "me@example.com",
+          subject: `Subject for ${thread_id}`,
+          date: "2026-06-10T09:00:00Z",
+          body: `Body of thread ${thread_id}. Please reply.`,
+        },
+      ],
     };
   }
 }
 
-const LabelThreadSchema = z.object({
-  id: z.string(),
-  label: z.string(),
+const EmailDraftSchema = z.object({
+  to: z.array(z.string().email()).min(1),
+  subject: z.string().min(1),
+  body: z.string(),
+  cc: z.array(z.string().email()).optional(),
+  thread_id: z.string().optional(),
 });
 
-export class FakeLabelThreadTool implements Tool {
-  readonly name = "label_thread";
-  readonly description = "Apply a label to an email thread";
-  readonly schema = LabelThreadSchema;
-  readonly readOnly = true;
-  labelLog: Array<{ id: string; label: string }> = [];
+export class FakeEmailDraftTool implements Tool {
+  readonly name = "email_draft";
+  readonly description = "Create a Gmail draft (not sent)";
+  readonly schema = EmailDraftSchema;
+  readonly readOnly = false;
+  drafts: Array<z.infer<typeof EmailDraftSchema>> = [];
 
   async run(args: unknown): Promise<unknown> {
-    const parsed = LabelThreadSchema.parse(args);
-    this.labelLog.push(parsed);
-    return { ok: true };
+    const parsed = EmailDraftSchema.parse(args);
+    this.drafts.push(parsed);
+    return { ok: true, draftId: `draft-${this.drafts.length}` };
   }
 }
 
@@ -182,20 +204,23 @@ const FreeBusySchema = z.object({
 });
 
 export class FakeCalendarFreeBusyTool implements Tool {
-  readonly name = "calendar_free_busy";
-  readonly description = "Query free/busy calendar slots";
+  readonly name = "calendar_find_time";
+  readonly description = "Find free time slots in a calendar window";
   readonly schema = FreeBusySchema;
   readonly readOnly = true;
 
   async run(args: unknown): Promise<unknown> {
     const { window_start, duration_minutes } = FreeBusySchema.parse(args);
-    return [
-      {
-        start: new Date(window_start).toISOString(),
-        end: new Date(new Date(window_start).getTime() + duration_minutes * 60000).toISOString(),
-        available: true,
-      },
-    ];
+    return {
+      slots: [
+        {
+          start: new Date(window_start).toISOString(),
+          end: new Date(new Date(window_start).getTime() + duration_minutes * 60000).toISOString(),
+          state: "free",
+        },
+      ],
+      count: 1,
+    };
   }
 }
 
@@ -239,14 +264,13 @@ export class FakeCalendarDeleteTool implements Tool {
 // ── Fake todo tools ───────────────────────────────────────────────────────────
 
 const TodoCreateSchema = z.object({
-  title: z.string(),
+  text: z.string(),
   due: z.string().optional(),
   recurrence: z.string().optional(),
-  createdAt: z.string().optional(),
 });
 
 export class FakeTodoCreateTool implements Tool {
-  readonly name = "todo_create";
+  readonly name = "todo_add";
   readonly description = "Create a todo item";
   readonly schema = TodoCreateSchema;
   readonly readOnly = false;

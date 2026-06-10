@@ -207,7 +207,7 @@ describe("ReAct loop — tool-output injection taint", () => {
     const tmpDir = makeTempDir();
     try {
       // todo_create is internal_write: normally AUTO-ALLOWED with no approval.
-      registerToolMeta("todo_create", {
+      registerToolMeta("todo_add", {
         sideEffects: "internal_write",
         reversible: true,
       });
@@ -220,7 +220,7 @@ describe("ReAct loop — tool-output injection taint", () => {
 
       const llm = new FakeLlm().setScript([
         '{"tool": "fetch_page", "args": {"url": "https://evil.example"}}',
-        '{"tool": "todo_create", "args": {"title": "wire money"}}',
+        '{"tool": "todo_add", "args": {"text": "wire money"}}',
         "That was rejected, stop here.", // reflection after rejection
         '{"tool": "__done__", "args": {"result": "stopped"}}',
       ]);
@@ -266,7 +266,7 @@ describe("ReAct loop — tool-output injection taint", () => {
   it("blocked-severity marker (model control tokens) in tool output → next non-readOnly action is blocked", async () => {
     const tmpDir = makeTempDir();
     try {
-      registerToolMeta("todo_create", {
+      registerToolMeta("todo_add", {
         sideEffects: "internal_write",
         reversible: true,
       });
@@ -279,7 +279,7 @@ describe("ReAct loop — tool-output injection taint", () => {
 
       const llm = new FakeLlm().setScript([
         '{"tool": "fetch_page", "args": {"url": "https://evil.example"}}',
-        '{"tool": "todo_create", "args": {"title": "anything"}}',
+        '{"tool": "todo_add", "args": {"text": "anything"}}',
       ]);
 
       const clock = new FixedClock(Date.now());
@@ -315,7 +315,7 @@ describe("ReAct loop — tool-output injection taint", () => {
   it("untainted run: internal_write tool stays auto-allowed (no false escalation)", async () => {
     const tmpDir = makeTempDir();
     try {
-      registerToolMeta("todo_create", {
+      registerToolMeta("todo_add", {
         sideEffects: "internal_write",
         reversible: true,
       });
@@ -325,7 +325,7 @@ describe("ReAct loop — tool-output injection taint", () => {
 
       const llm = new FakeLlm().setScript([
         '{"tool": "search", "args": {"query": "groceries"}}',
-        '{"tool": "todo_create", "args": {"title": "buy groceries"}}',
+        '{"tool": "todo_add", "args": {"text": "buy groceries"}}',
         '{"tool": "__done__", "args": {"result": "added"}}',
       ]);
 

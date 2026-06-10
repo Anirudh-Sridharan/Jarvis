@@ -122,10 +122,10 @@ describe("validateAndRetry harness", () => {
 
   it("retries after schema validation failure → succeeds on 2nd try", async () => {
     const llm = new FakeLlm().setScript([
-      // attempt 1: missing required 'to' field for send_email
-      '{"tool": "send_email", "args": {"subject": "Hi", "body": "Hello"}}',
+      // attempt 1: missing required 'to' field for email_send
+      '{"tool": "email_send", "args": {"subject": "Hi", "body": "Hello"}}',
       // attempt 2: complete valid args
-      '{"tool": "send_email", "args": {"to": ["bob@test.com"], "subject": "Hi", "body": "Hello"}}',
+      '{"tool": "email_send", "args": {"to": ["bob@test.com"], "subject": "Hi", "body": "Hello"}}',
     ]);
 
     const result = await validateAndRetry({
@@ -137,7 +137,7 @@ describe("validateAndRetry harness", () => {
 
     expect("aborted" in result).toBe(false);
     if (!("aborted" in result)) {
-      expect(result.toolName).toBe("send_email");
+      expect(result.toolName).toBe("email_send");
       expect((result.args as { to: string[] }).to).toContain("bob@test.com");
       expect(result.attempts).toBe(2);
     }

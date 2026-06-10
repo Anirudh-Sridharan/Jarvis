@@ -14,24 +14,22 @@ import { ToolApprovalDeniedError } from "./registry.js";
 import type { SkillResult, SkillAction } from "../types.js";
 import { registerToolMeta } from "../safety/policy.js";
 
-// Register calendar write tools as requiring approval
+// Register calendar tool risk metadata (names match core's live registry)
 registerToolMeta("calendar_create_event", {
   sideEffects: "calendar_write",
   reversible: true,
 });
-registerToolMeta("calendar_update_event", {
+registerToolMeta("calendar_move_event", {
   sideEffects: "calendar_write",
   reversible: true,
 });
+// TODO(core): calendar_delete_event is declared here but not wired in core's
+// registry yet — the delete action errors with "Tool not found" until then.
 registerToolMeta("calendar_delete_event", {
   sideEffects: "calendar_write",
   reversible: false,
 });
-registerToolMeta("calendar_list_events", {
-  sideEffects: "read_only",
-  reversible: true,
-});
-registerToolMeta("calendar_free_busy", {
+registerToolMeta("calendar_find_time", {
   sideEffects: "read_only",
   reversible: true,
 });
@@ -73,10 +71,9 @@ export const calendarSkill: Skill = {
   description:
     "Find available time, schedule, move, or delete calendar events.",
   allowedTools: [
-    "calendar_list_events",
-    "calendar_free_busy",
+    "calendar_find_time",
     "calendar_create_event",
-    "calendar_update_event",
+    "calendar_move_event",
     "calendar_delete_event",
   ],
   outward: true,
@@ -102,13 +99,14 @@ export const calendarSkill: Skill = {
       // Read-only, no approval
       let slots: unknown;
       try {
-        slots = await ctx.tool("calendar_free_busy", {
+        const res = (await ctx.tool("calendar_find_time", {
           window_start: args.window_start,
           window_end: args.window_end,
           duration_minutes: args.duration_minutes,
           attendees: args.attendees ?? [],
           timezone: args.timezone,
-        });
+        })) as { slots?: unknown[] };
+        slots = res.slots ?? res;
       } catch (err) {
         return {
           skillId: "calendar.manage",
@@ -136,12 +134,26 @@ export const calendarSkill: Skill = {
       args.action === "schedule"
         ? "calendar_create_event"
         : args.action === "move"
-          ? "calendar_update_event"
+          ? "calendar_move_event"
           : "calendar_delete_event";
+    // Map skill args onto the live tools' schemas.
+    const toolArgs =
+      args.action === "schedule"
+        ? {
+            title: args.title,
+            start: args.start,
+            end: args.end,
+            attendees: args.attendees,
+            description: args.description,
+            location: args.location,
+          }
+        : args.action === "move"
+          ? { event_id: args.eventId, new_start: args.new_start, new_end: args.new_end }
+          : { eventId: args.eventId, reason: args.reason };
 
     let result: unknown;
     try {
-      result = await ctx.tool(toolName, args, {
+      result = await ctx.tool(toolName, toolArgs, {
         reasoning: `Calendar ${args.action} requested`,
       });
     } catch (err) {

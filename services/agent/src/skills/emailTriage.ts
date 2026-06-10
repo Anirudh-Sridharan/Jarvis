@@ -1,14 +1,15 @@
 /**
  * Email triage skill (feature 18).
  *
- * Pipeline:
- *   1. READ: search_threads → get_thread (no approval, read-only)
+ * Pipeline (tool names match core's live registry):
+ *   1. READ: email_search → email_get (no approval, read-only)
  *   2. SYNTHESIZE: AI categorize + draft reply (enum-guarded)
- *   3. LABEL: label_thread with Jarvis category (reversible, no approval)
- *   4. DRAFT: create_draft (not sent; no approval)
- *   5. If needs_reply + draft: submit to approval gate before sending
+ *   3. SEND: needs_reply drafts go to email_send — gated by approval
+ *   4. On denial, the reply is staged as a Gmail draft via email_draft
+ *      (internal_write, not sent) so the user can review and send manually.
  *
- * The send step always requires approval (outward_comm).
+ * TODO(labels): Gmail labeling is not wired in core yet; the label step was
+ * removed until an email_label tool exists.
  */
 
 import { z } from "zod";
@@ -36,13 +37,7 @@ export const emailTriageSkill: Skill = {
   name: "Email Triage",
   description:
     "Summarize inbox, categorize threads, draft replies, request approval before sending.",
-  allowedTools: [
-    "search_threads",
-    "get_thread",
-    "label_thread",
-    "create_draft",
-    "send_email",
-  ],
+  allowedTools: ["email_search", "email_get", "email_draft", "email_send"],
   outward: false,
   approvalPolicy: "conditional",
 
@@ -50,11 +45,13 @@ export const emailTriageSkill: Skill = {
     const { window, maxThreads } = TriageArgs.parse(rawArgs);
 
     // ── 1. READ ──────────────────────────────────────────────────────────────
-    let threadIds: unknown[];
+    let ids: string[];
     try {
-      threadIds = (await ctx.tool("search_threads", {
-        q: `in:inbox ${window} -category:promotions`,
-      })) as unknown[];
+      const res = (await ctx.tool("email_search", {
+        query: `in:inbox ${window} -category:promotions`,
+        max_results: maxThreads,
+      })) as { hits?: Array<{ threadId: string }> };
+      ids = [...new Set((res.hits ?? []).map((h) => h.threadId))].slice(0, maxThreads);
     } catch {
       return {
         skillId: "email.triage",
@@ -66,13 +63,10 @@ export const emailTriageSkill: Skill = {
       };
     }
 
-    if (!Array.isArray(threadIds)) threadIds = [];
-    const ids = (threadIds as string[]).slice(0, maxThreads);
-
     const threads: unknown[] = [];
     for (const id of ids) {
       try {
-        const thread = await ctx.tool("get_thread", { id });
+        const thread = await ctx.tool("email_get", { thread_id: id });
         threads.push(thread);
       } catch {
         // skip inaccessible threads
@@ -98,16 +92,6 @@ export const emailTriageSkill: Skill = {
     const artifacts: unknown[] = [];
 
     for (const t of triaged) {
-      // Label (reversible; no approval)
-      try {
-        await ctx.tool("label_thread", {
-          id: t.threadId,
-          label: `Jarvis/${t.category}`,
-        });
-      } catch {
-        // non-fatal
-      }
-
       artifacts.push({
         threadId: t.threadId,
         category: t.category,
@@ -115,19 +99,19 @@ export const emailTriageSkill: Skill = {
         draft: t.draft,
       });
 
-      // ── 5. SEND (if needs_reply) — ctx.tool gates non-readOnly tools
+      // ── 3. SEND (if needs_reply) — ctx.tool gates non-readOnly tools
       //       structurally (policy + approval), so the send is paused for the
       //       user before execution. Provenance marks the draft as derived
       //       from external content (the thread) for taint escalation.
       if (t.category === "needs_reply" && t.draft) {
         try {
           await ctx.tool(
-            "send_email",
+            "email_send",
             {
               to: t.draft.to,
               subject: t.draft.subject,
               body: t.draft.body,
-              threadId: t.draft.threadId,
+              thread_id: t.draft.threadId,
             },
             {
               reasoning: `Reply to thread ${t.threadId}: ${t.summary}`,
@@ -144,14 +128,25 @@ export const emailTriageSkill: Skill = {
           });
         } catch (err) {
           if (err instanceof ToolApprovalDeniedError) {
+            // ── 4. Stage as a Gmail draft instead (internal_write, not sent)
+            try {
+              await ctx.tool("email_draft", {
+                to: t.draft.to,
+                subject: t.draft.subject,
+                body: t.draft.body,
+                thread_id: t.draft.threadId,
+              });
+            } catch {
+              // draft staging is best-effort
+            }
             actions.push({
               type: "email.send",
               status: "skipped",
               target: t.draft.to.join(","),
               reason:
-                err.outcome === "blocked"
+                (err.outcome === "blocked"
                   ? "blocked: " + err.reasons.join("; ")
-                  : err.outcome,
+                  : err.outcome) + " (draft staged)",
             });
           } else {
             actions.push({

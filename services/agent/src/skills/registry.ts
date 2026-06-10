@@ -125,7 +125,7 @@ export class SkillRegistry {
     approvalService: ApprovalService,
     auditLog: AuditLog,
     clock: Clock,
-    forSkill?: Pick<Skill, "id" | "allowedTools">,
+    forSkill: Pick<Skill, "id" | "allowedTools">,
   ): SkillCtx {
     return {
       llm,
@@ -139,7 +139,7 @@ export class SkillRegistry {
         opts?: ToolCallOpts,
       ): Promise<unknown> {
         // 1. allowedTools enforcement
-        if (forSkill && !forSkill.allowedTools.includes(name)) {
+        if (!forSkill.allowedTools.includes(name)) {
           throw new ToolNotAllowedError(name, forSkill.id);
         }
 
@@ -155,12 +155,12 @@ export class SkillRegistry {
           const actionId = randomUUID();
           const action: ProposedAction = {
             id: actionId,
-            runId: forSkill?.id ?? "skill",
+            runId: forSkill.id,
             tool: name,
             args: (validated ?? {}) as Record<string, unknown>,
             reasoning:
               opts?.reasoning ??
-              `Skill ${forSkill?.id ?? "(anonymous)"} invoked ${name}`,
+              `Skill ${forSkill.id} invoked ${name}`,
             provenance: {
               derivedFromExternal: opts?.provenance?.derivedFromExternal ?? false,
               sources: opts?.provenance?.sources ?? [],

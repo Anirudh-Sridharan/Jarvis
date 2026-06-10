@@ -28,7 +28,7 @@ import {
   FakeLlm,
   FakeSearchThreadsTool,
   FakeGetThreadTool,
-  FakeLabelThreadTool,
+  FakeEmailDraftTool,
   FakeSendEmailTool,
   FakeCalendarFreeBusyTool,
   FakeCalendarCreateTool,
@@ -67,12 +67,13 @@ describe("emailTriage skill", () => {
 
   it("triages threads, labels them, and requests approval before send", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_send", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_draft", { sideEffects: "internal_write", reversible: true });
 
     const searchThreads = new FakeSearchThreadsTool();
     searchThreads.returnIds = ["t-1", "t-2"];
     const getThread = new FakeGetThreadTool();
-    const labelThread = new FakeLabelThreadTool();
+    const labelThread = new FakeEmailDraftTool();
     const sendEmail = new FakeSendEmailTool();
 
     const tools = makeToolRegistry([searchThreads, getThread, labelThread, sendEmail]);
@@ -110,14 +111,15 @@ describe("emailTriage skill", () => {
 
   it("skips send when approval is rejected", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_send", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_draft", { sideEffects: "internal_write", reversible: true });
 
     const searchThreads = new FakeSearchThreadsTool();
     searchThreads.returnIds = ["t-1"];
     const tools = makeToolRegistry([
       searchThreads,
       new FakeGetThreadTool(),
-      new FakeLabelThreadTool(),
+      new FakeEmailDraftTool(),
       new FakeSendEmailTool(),
     ]);
 
@@ -216,7 +218,7 @@ describe("reminders skill", () => {
 
   it("creates a todo (no approval needed)", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("todo_create", { sideEffects: "internal_write", reversible: true });
+    registerToolMeta("todo_add", { sideEffects: "internal_write", reversible: true });
 
     const createTool = new FakeTodoCreateTool();
     const listTool = new FakeTodoListTool();
@@ -237,7 +239,7 @@ describe("reminders skill", () => {
 
     expect(result.status).toBe("ok");
     expect(createTool.todos.length).toBe(1);
-    expect(createTool.todos[0]!.title).toBe("Renew car insurance");
+    expect(createTool.todos[0]!.text).toBe("Renew car insurance");
     expect(requests.length).toBe(0); // no approval needed for local store
   });
 
@@ -278,7 +280,7 @@ describe("calendar skill", () => {
 
   it("find_time is read-only, no approval needed", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("calendar_free_busy", { sideEffects: "read_only", reversible: true });
+    registerToolMeta("calendar_find_time", { sideEffects: "read_only", reversible: true });
 
     const tools = makeToolRegistry([new FakeCalendarFreeBusyTool()]);
     const llm = new FakeLlm();
@@ -354,11 +356,11 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
     // Skill is only allowed read tools — send_email is NOT in its list
     const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
       id: "limited.skill",
-      allowedTools: ["search_threads", "get_thread"],
+      allowedTools: ["email_search", "email_get"],
     });
 
     await expect(
-      ctx.tool("send_email", {
+      ctx.tool("email_send", {
         to: ["victim@example.com"],
         subject: "exfil",
         body: "secret data",
@@ -371,7 +373,8 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
   it("non-readOnly tool is gated: rejection blocks execution", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_send", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_draft", { sideEffects: "internal_write", reversible: true });
 
     const sendEmail = new FakeSendEmailTool();
     const tools = makeToolRegistry([sendEmail]);
@@ -383,12 +386,12 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
     const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
       id: "mailer.skill",
-      allowedTools: ["send_email"],
+      allowedTools: ["email_send"],
     });
 
     // The skill does NOT voluntarily request approval — the ctx must.
     await expect(
-      ctx.tool("send_email", {
+      ctx.tool("email_send", {
         to: ["alice@example.com"],
         subject: "Hi",
         body: "Hello",
@@ -402,7 +405,8 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
   it("non-readOnly tool is gated: approval allows execution", async () => {
     tmpDir = makeTempDir();
-    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_send", { sideEffects: "outward_comm", reversible: false });
+    registerToolMeta("email_draft", { sideEffects: "internal_write", reversible: true });
 
     const sendEmail = new FakeSendEmailTool();
     const tools = makeToolRegistry([sendEmail]);
@@ -414,10 +418,10 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
     const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
       id: "mailer.skill",
-      allowedTools: ["send_email"],
+      allowedTools: ["email_send"],
     });
 
-    const result = await ctx.tool("send_email", {
+    const result = await ctx.tool("email_send", {
       to: ["alice@example.com"],
       subject: "Hi",
       body: "Hello",
@@ -440,12 +444,12 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
     const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
       id: "mailer.skill",
-      allowedTools: ["send_email"],
+      allowedTools: ["email_send"],
     });
 
     // 'to' must be an array of emails — invalid args must throw (ZodError)
     await expect(
-      ctx.tool("send_email", { to: "not-an-array", subject: "Hi", body: "x" }),
+      ctx.tool("email_send", { to: "not-an-array", subject: "Hi", body: "x" }),
     ).rejects.toThrow();
 
     expect(sendEmail.sentEmails.length).toBe(0);
@@ -464,10 +468,10 @@ describe("SkillCtx structural safety gate (ctx.tool)", () => {
 
     const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
       id: "reader.skill",
-      allowedTools: ["get_thread"],
+      allowedTools: ["email_get"],
     });
 
-    const result = await ctx.tool("get_thread", { id: "t-1" });
+    const result = await ctx.tool("email_get", { thread_id: "t-1" });
     expect(result).toMatchObject({ id: "t-1" });
     expect(requests.length).toBe(0);
   });
