@@ -13,8 +13,10 @@ metric store, memory store, and the inference/agent services over loopback HTTP 
 no auth provider (single user, bound to `127.0.0.1`). **Stack: Next.js App Router + Tremor
 (KPI cards + charts) + Recharts (custom viz) + optional shadcn/ui primitives.** Server Components
 fetch data; Client Components handle interactivity, live SSE for model/voice status and chat
-streaming. Finance (11) renders as a **v2 placeholder**. The dashboard is read-mostly: writes
-go back to services as user actions (run briefing, approve action, toggle capture, switch model).
+streaming. Finance (11) is **live** (SimpleFIN slice via the shared FinanceStore). The dashboard
+is read-mostly: writes go back to services as user actions (run briefing, approve action, toggle
+capture, switch model); connector OAuth consent and manual syncs are delegated to the connect CLI
+via BFF routes (`/api/connectors/connect`, `/api/connectors/sync`) so credentials stay on core's path.
 
 ## Data flow  *(REQUIRED)*
 **Inputs:** metric store (via feature 9 data-integration framework — the canonical read API for
@@ -77,14 +79,16 @@ export interface LiveStatus {                      // SSE payload
 **Information architecture (routes/pages):**
 - `/` **Home overview** — KPI grid + agenda + chat panel (see mockup below). Default landing.
 - `/health` **Health** — sleep/recovery/strain/HRV/steps charts, weekly trends (feature 10).
-- `/finance` **Finance** — **v2 placeholder** card grid ("Coming in v2"), no live data (11).
+- `/finance` **Finance** — **live** (11): net worth per currency + trend, accounts grouped by
+  type with latest balances, 30d spending by category, income vs expenses, recent transactions.
 - `/calendar` **Calendar** — today/week agenda, time-blocking view, conflicts (12).
 - `/work` **Work** — shipped-today counter, todos due, project board, focus stats (13).
 - `/memory` **Memory Explorer** — search/browse memories, capture-source toggles (3/4).
 - `/chat` **Chat** — full-screen conversational core, streaming (feature 2).
 - `/briefing` **Daily Briefing** — rendered digest + "run now" (feature 15).
 - `/settings` (layout with sub-tabs):
-  - `/settings/integrations` — connect status + reconnect per source (9).
+  - `/settings/integrations` — **live** (9): per-source token state (Keychain, read-only),
+    sync-run history, Connect/Reconnect (OAuth consent via connect CLI) and Sync-now buttons.
   - `/settings/models` — load/unload, switch profile, VRAM/tps (1).
   - `/settings/approvals` — approval queue + audit log (17).
   - `/settings/consolidation` — consolidation status + history (6).
@@ -94,7 +98,7 @@ export interface LiveStatus {                      // SSE payload
 - **empty** — "No data yet — connect <source>" with CTA to `/settings/integrations`.
 - **error** — inline error card with retry button; never blanks the page.
 - **stale** — data shown dimmed with an amber **"T+1 / as of <date>"** badge.
-- **placeholder** — Finance v2: greyed cards, "Planned for v2" ribbon, no fetch.
+- **placeholder** — reserved for not-yet-built panels (approvals history, consolidation detail).
 - **disconnected** — KPI shows last-known value + red "source disconnected" chip.
 
 **Navigation:** persistent left sidebar (icons + labels, collapsible), top bar with global search,
@@ -125,8 +129,9 @@ live **model status pill** (loaded/VRAM/tps), **voice status** dot, and **approv
    `downsampled: true` shows a subtle "sampled" hint on the chart.
 6. **Source-connected gating.** A KPI renders its value even if disconnected (last known) but flags
    it; an empty source (never connected) shows the empty CTA instead.
-7. **Finance placeholder.** `/finance` and any Finance KPI short-circuit to `state:"placeholder"`
-   with zero network calls.
+7. **Finance empty-until-synced.** `/finance` reads FinanceStore via the BFF; until the first
+   SimpleFIN sync lands accounts it renders `state:"empty"` with a setup CTA (SIMPLEFIN_ACCESS_URL
+   + sync), never fake zeros.
 8. **Action safety.** Approve/reject and load/unload route through feature 17's gate; the UI shows
    a confirm + diff before POST and reflects the resulting audit entry.
 9. **Live merge.** SSE `LiveStatus` updates patch client state only (status pill, badges, chat
@@ -139,7 +144,7 @@ live **model status pill** (loaded/VRAM/tps), **voice status** dot, and **approv
 | 1 | **Stale T+1 data** | Amber "as of last night / T+1" badge; value dimmed, not hidden. |
 | 2 | **Source disconnected** | Show last-known value + red chip + link to reconnect (`/settings/integrations`). |
 | 3 | **No data yet** (never connected) | Empty-state card with connect CTA; no fake zeros. |
-| 4 | **Finance v2 placeholder** | Greyed cards, "Planned for v2" ribbon, no fetch, no errors. |
+| 4 | **Finance not yet synced** | Empty-state card with SimpleFIN setup CTA; no fake zeros, no errors. |
 | 5 | **Model unloaded** | Status pill shows "Model unloaded"; chat input disabled with "Load model" CTA. |
 | 6 | **Large series** (>500 pts) | Server LTTB downsample; chart shows "sampled" hint. |
 | 7 | **Offline / all services down** | Global banner "Jarvis services unreachable"; cached RSC shown read-only. |
@@ -154,7 +159,7 @@ live **model status pill** (loaded/VRAM/tps), **voice status** dot, and **approv
 
 ## Dependencies  *(REQUIRED)*
 - `features/9-data-integration-framework.md` — canonical metric store read API (all series/KPIs).
-- `features/10-health-tracking.md`, `features/11-finance-tracking.md` (v2 placeholder),
+- `features/10-health-tracking.md`, `features/11-finance-metrics.md` (live, SimpleFIN slice),
   `features/12-calendar-integration.md`, `features/13-work-and-todo.md` — domain data sources.
 - `features/2-conversational-chat-core.md` — chat panel + SSE token stream.
 - `features/3-memory-capture-and-ingestion.md` — capture-source toggles.
@@ -173,7 +178,7 @@ apps/dashboard/
 │  ├─ layout.tsx                 # root: sidebar + topbar + LiveStatusProvider
 │  ├─ page.tsx                   # Home overview (RSC)
 │  ├─ health/page.tsx
-│  ├─ finance/page.tsx           # v2 placeholder
+│  ├─ finance/page.tsx           # live finance (net worth/accounts/spending/txns)
 │  ├─ calendar/page.tsx
 │  ├─ work/page.tsx
 │  ├─ memory/page.tsx
@@ -224,7 +229,7 @@ graph TD
   BFF --> RSC --> CLI
   CLI -- POST actions --> BFF --> APR
   Home["/ Home"] --> Health["/health"]
-  Home --> Finance["/finance v2"]
+  Home --> Finance["/finance"]
   Home --> Calendar["/calendar"]
   Home --> Work["/work"]
   Home --> Memory["/memory"]

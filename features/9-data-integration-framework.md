@@ -42,6 +42,9 @@ See **Logic / rules** for full TS definitions of `Connector`, `MetricPoint`, `Me
 
 **Settings → Integrations screen** (shared with feature 3's source list — one list, two consumers):
 - Each source row: icon, name, **status badge** (`disconnected` / `connected` / `error` / `needs-reconsent`), **last-sync** timestamp (relative), next scheduled run, and a **Connect / Reconnect / Sync now** button.
+  **Implemented** in `/settings/integrations`: token state is read from the Keychain (read-only),
+  run history from `sync_runs`; Connect/Reconnect launches the connect CLI's loopback consent flow
+  and Sync-now runs `npm run connect -- sync <source>` (whoop|gcal|gmail|github|simplefin).
 - Connect flow: OAuth sources open the system browser → loopback redirect → token stored; PAT sources show a paste field; Apple Health shows setup instructions + the local push endpoint URL/token.
 - A small per-source toggle controls whether it feeds **Memory (feat 3)**, **Metrics (feat 9)**, or both — the registry is shared, the sinks are independent.
 

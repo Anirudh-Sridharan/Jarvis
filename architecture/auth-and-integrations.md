@@ -164,6 +164,20 @@ export async function getWhoopAccessToken(): Promise<string> {
 
 ---
 
+### Launching consent from the dashboard
+
+`/settings/integrations` Connect/Reconnect buttons POST `/api/connectors/connect`, which spawns
+`npm run connect -- <source>` at the repo root: the CLI owns the loopback listener, `.env` client
+creds, and Keychain persistence; the BFF only parses the printed authorize URL so the UI can show
+a fallback link, then polls token state. Same trust boundary as running the CLI by hand.
+
+### Gotcha: enable the API, not just consent
+
+OAuth consent and API enablement are separate switches. If the Google Cloud project has the
+Calendar/Gmail **API disabled**, consent succeeds ("connected" token) but every call 403s with
+"API has not been used in project … or it is disabled" + an enable link. Enable the API in the
+console, wait a few minutes to propagate (early calls may even return empty 200s), then re-sync.
+
 ## 4. Webhooks / push endpoints
 
 Jarvis runs a small **local HTTP server** (bound to `127.0.0.1`) for push delivery. The

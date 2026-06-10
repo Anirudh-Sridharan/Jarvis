@@ -1,9 +1,9 @@
 # Finance Metrics
-> Priority/build order: 11  ·  Tier: deep  ·  Status: v2 (deferred — spec only, not in v1 build)
+> Priority/build order: 11  ·  Tier: deep  ·  Status: **implemented** (SimpleFIN slice: store,
+> sync, categorization, dashboard surface). Live use needs `SIMPLEFIN_ACCESS_URL` in `.env`;
+> sync via `npm run connect -- sync simplefin` or the dashboard Sync-now button.
 
 ## Summary
-
-v2 / deferred — specced now, built after v1.
 
 Finance Metrics turns read-only banking data into the dashboard's wealth picture: account balances, net worth over time, categorized transactions, spending by category, income vs. expenses, and cash flow. The data source is **SimpleFIN Bridge** (~$15/yr, read-only relay, ~daily refresh) and/or a self-hosted **Actual Budget / Firefly III** instance — never Plaid, never write access. All ingestion runs through the shared connector framework (feature 9), so finance is "just another connector" that normalizes its raw payload into the canonical `Transaction` / `AccountBalance` shapes and emits finance `MetricSeries` for the dashboard (feature 14) and the daily briefing (feature 15).
 
