@@ -184,6 +184,47 @@ describe("ApprovalService", () => {
     expect(manualSink.requests.length).toBe(1);
   });
 
+  it("a standing grant NEVER auto-allows an injection-tainted action", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    // Establish an always-allow same_recipient grant via a clean action
+    const clean = makeAction("send_email", { to: "alice@example.com", subject: "Hi" });
+    const evalPromise = service.evaluateAndMaybeRequest(clean, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+    service.approve(manualSink.requests[0]!.id, "test-user", auditLog, {
+      tool: "send_email",
+      match: "same_recipient",
+      bound: { to: "alice@example.com" },
+    });
+    await evalPromise;
+
+    // Tainted action to the SAME recipient: grant must be ignored
+    const tainted = makeAction("send_email", {
+      to: "alice@example.com",
+      subject: "Re: invoice",
+    });
+    tainted.provenance = {
+      derivedFromExternal: true,
+      sources: ["email:msg-evil"],
+      injectionFlags: ["instruction-override"],
+    };
+
+    const taintedEval = service.evaluateAndMaybeRequest(tainted, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+
+    // A NEW approval request was created (grant did not short-circuit)
+    expect(manualSink.requests.length).toBe(2);
+    service.reject(manualSink.requests[1]!.id, "test-user", auditLog);
+    const { decision } = await taintedEval;
+    expect(decision.outcome).not.toBe("auto_allow");
+  });
+
   it("exact_args grant does NOT cover an action with extra args (bcc smuggling)", async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
     registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });

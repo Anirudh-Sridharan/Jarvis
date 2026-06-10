@@ -126,8 +126,14 @@ export class ApprovalService {
       return { decision };
     }
 
-    // Check always-allow grants
-    const grant = this.matchGrant(action);
+    // Check always-allow grants — but NEVER for tainted actions. A standing
+    // grant reflects trust in a (tool, recipient/args) pair the user reviewed
+    // earlier; an action derived from external content with injection markers
+    // is a different trust situation and must reach a human regardless.
+    const tainted =
+      action.provenance.derivedFromExternal ||
+      (action.provenance.injectionFlags?.length ?? 0) > 0;
+    const grant = tainted ? undefined : this.matchGrant(action);
     if (grant) {
       auditLog.append({
         kind: "decided",
