@@ -70,7 +70,8 @@ describe("normalizeCalendarEvent", () => {
     expect(event.id).toBe("evt001");
     expect(event.summary).toBe("Standup");
     expect(event.allDay).toBe(false);
-    expect(event.start.dateTime).toBe("2026-06-09T10:00:00Z");
+    // normalizeCalendarEvent canonicalizes dateTimes to UTC ISO (millis included)
+    expect(event.start.dateTime).toBe("2026-06-09T10:00:00.000Z");
     expect(event.attendees).toHaveLength(1);
     expect(event.attendees[0]?.response).toBe("accepted");
     expect(event.attendees[0]?.self).toBe(true);

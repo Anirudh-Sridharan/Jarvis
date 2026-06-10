@@ -158,6 +158,19 @@ interface RawGoogleEvent {
 
 // ── Normalizer ────────────────────────────────────────────────────────────────
 
+/**
+ * Normalize an RFC3339 dateTime to UTC ISO ("Z"). Google returns dateTimes in
+ * the calendar's local offset; the mirror compares start_json.dateTime as a
+ * STRING (json_extract range filters), so all stored dateTimes MUST share one
+ * representation or lexicographic order diverges from instant order — which
+ * silently drops events from conflict-detection and agenda windows.
+ */
+function toUtcIso(dateTime: string | undefined): string | undefined {
+  if (!dateTime) return undefined;
+  const ms = Date.parse(dateTime);
+  return Number.isNaN(ms) ? dateTime : new Date(ms).toISOString();
+}
+
 export function normalizeCalendarEvent(
   calendarId: string,
   raw: RawGoogleEvent
@@ -167,12 +180,12 @@ export function normalizeCalendarEvent(
   const endRaw = raw.end ?? {};
 
   const start: EventTime = {
-    dateTime: startRaw.dateTime,
+    dateTime: toUtcIso(startRaw.dateTime),
     date: startRaw.date,
     timeZone: startRaw.timeZone ?? "UTC",
   };
   const end: EventTime = {
-    dateTime: endRaw.dateTime,
+    dateTime: toUtcIso(endRaw.dateTime),
     date: endRaw.date,
     timeZone: endRaw.timeZone ?? "UTC",
   };
@@ -202,7 +215,7 @@ export function normalizeCalendarEvent(
     recurringEventId: raw.recurringEventId,
     originalStartTime: raw.originalStartTime
       ? {
-          dateTime: raw.originalStartTime.dateTime,
+          dateTime: toUtcIso(raw.originalStartTime.dateTime),
           date: raw.originalStartTime.date,
           timeZone: raw.originalStartTime.timeZone ?? "UTC",
         }

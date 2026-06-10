@@ -383,3 +383,37 @@ describe("createIntegrations: bound calendar.executeWrite", () => {
     }
   });
 });
+
+describe("executeEventWrite: offset-normalized conflicts", () => {
+  it("detects a conflict with a synced event stored in a non-UTC offset", async () => {
+    const { deps, http, mirror } = makeDeps();
+    // Simulate what sync does: normalize a Google event carrying a +02:00
+    // offset, then mirror it. 23:30+02:00 == 21:30Z, inside the proposed slot.
+    const { normalizeCalendarEvent } = await import("../src/connectors/googleCalendar.js");
+    const synced = normalizeCalendarEvent("primary", {
+      id: "evt-offset",
+      etag: '"e1"',
+      status: "confirmed",
+      summary: "Late call",
+      start: { dateTime: "2026-06-12T23:30:00+02:00", timeZone: "Europe/Berlin" },
+      end: { dateTime: "2026-06-13T00:30:00+02:00", timeZone: "Europe/Berlin" },
+    });
+    expect(synced.start.dateTime).toBe("2026-06-12T21:30:00.000Z"); // normalized
+    mirror.upsertEvent(synced);
+
+    const result = await executeEventWrite(
+      createReq({
+        patch: {
+          summary: "Overlapping",
+          start: { dateTime: "2026-06-12T21:00:00Z", timeZone: "UTC" },
+          end: { dateTime: "2026-06-12T22:00:00Z", timeZone: "UTC" },
+        },
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(409);
+    expect(http.calls.length).toBe(0);
+  });
+});
