@@ -61,7 +61,13 @@ const PROVIDERS: Record<OAuthSourceId, OAuthProviderConfig> = {
     displayName: "Google Calendar",
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    // calendar.events is required for the live write path (executeEventWrite);
+    // calendar.readonly keeps full read access to all calendars. Users who
+    // consented before the write path landed must re-run `npm run connect -- gcal`.
+    scopes: [
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.readonly",
+    ],
     clientIdEnv: "GCAL_CLIENT_ID",
     clientSecretEnv: "GCAL_CLIENT_SECRET",
     pkce: true,
