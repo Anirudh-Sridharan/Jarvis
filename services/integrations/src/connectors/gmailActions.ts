@@ -64,6 +64,122 @@ export interface EmailSendResult {
   error?: { code: number; reason: string; retryable: boolean };
 }
 
+// ── Read: search / thread ─────────────────────────────────────────────────────
+
+/**
+ * Search messages with a Gmail query string. Returns lightweight hits
+ * (metadata only). Read tools THROW on failure — the agent ReAct loop turns
+ * tool errors into observations. Per-hit metadata misses are tolerated
+ * (skipped), matching the sync connector's behavior.
+ */
+export async function searchEmail(
+  query: string,
+  maxResults: number,
+  deps: GmailDeps,
+): Promise<EmailSearchHit[]> {
+  const token = await getAccessToken("gmail", deps.tokenStore, deps.http, getRefreshConfig("gmail"));
+
+  const params = new URLSearchParams({ q: query, maxResults: String(maxResults) });
+  const listRes = await deps.http.request({
+    method: "GET",
+    url: `${GMAIL_BASE}/messages?${params}`,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (listRes.status !== 200) {
+    throw new Error(`Gmail messages.list failed: HTTP ${listRes.status}`);
+  }
+
+  const data = listRes.body as { messages?: Array<{ id: string; threadId: string }> };
+  const hits: EmailSearchHit[] = [];
+  for (const msg of data.messages ?? []) {
+    const metaRes = await deps.http.request({
+      method: "GET",
+      url: `${GMAIL_BASE}/messages/${msg.id}?format=metadata&metadataHeaders=Subject,From,Date`,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (metaRes.status !== 200) continue; // tolerate per-message misses
+    const meta = metaRes.body as RawGmailMessage;
+    const headers = meta.payload?.headers ?? [];
+    hits.push({
+      messageId: msg.id,
+      threadId: msg.threadId,
+      subject: headerValue(headers, "subject") ?? "(no subject)",
+      from: headerValue(headers, "from") ?? "",
+      date: headerValue(headers, "date") ?? "",
+    });
+  }
+  return hits;
+}
+
+/**
+ * Fetch a full thread and extract each message's text/plain body.
+ * Bodies are returned transiently — nothing is persisted.
+ */
+export async function getEmailThread(
+  threadId: string,
+  deps: GmailDeps,
+): Promise<EmailThread> {
+  const token = await getAccessToken("gmail", deps.tokenStore, deps.http, getRefreshConfig("gmail"));
+
+  const res = await deps.http.request({
+    method: "GET",
+    url: `${GMAIL_BASE}/threads/${encodeURIComponent(threadId)}?format=full`,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status !== 200) {
+    throw new Error(`Gmail threads.get failed: HTTP ${res.status}`);
+  }
+
+  const data = res.body as { id?: string; messages?: RawGmailMessage[] };
+  const messages: EmailMessage[] = (data.messages ?? []).map((m) => {
+    const headers = m.payload?.headers ?? [];
+    return {
+      id: m.id ?? "",
+      threadId: m.threadId ?? threadId,
+      from: headerValue(headers, "from") ?? "",
+      to: headerValue(headers, "to") ?? "",
+      subject: headerValue(headers, "subject") ?? "(no subject)",
+      date: headerValue(headers, "date") ?? "",
+      body: extractPlainTextBody(m.payload) ?? "",
+    };
+  });
+  return { id: data.id ?? threadId, messages };
+}
+
+interface RawGmailHeader {
+  name?: string;
+  value?: string;
+}
+
+interface RawGmailPart {
+  mimeType?: string;
+  body?: { data?: string };
+  parts?: RawGmailPart[];
+}
+
+interface RawGmailMessage {
+  id?: string;
+  threadId?: string;
+  payload?: RawGmailPart & { headers?: RawGmailHeader[] };
+}
+
+function headerValue(headers: RawGmailHeader[], name: string): string | undefined {
+  return headers.find((h) => h.name?.toLowerCase() === name)?.value;
+}
+
+/** Depth-first walk of MIME parts for the first text/plain body. */
+function extractPlainTextBody(part: RawGmailPart | undefined): string | undefined {
+  if (!part) return undefined;
+  if (part.mimeType === "text/plain" && part.body?.data) {
+    return Buffer.from(part.body.data, "base64url").toString("utf8");
+  }
+  for (const child of part.parts ?? []) {
+    const found = extractPlainTextBody(child);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 // ── Write: send / draft ───────────────────────────────────────────────────────
 
 /** Send an email. Caller must have cleared the approval gate (outward_comm). */

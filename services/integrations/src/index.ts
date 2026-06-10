@@ -30,8 +30,18 @@ import {
   detectConflicts,
   executeEventWrite,
 } from "./connectors/googleCalendar.js";
-import { sendEmail, createEmailDraft } from "./connectors/gmailActions.js";
-import type { EmailSendRequest, EmailSendResult } from "./connectors/gmailActions.js";
+import {
+  sendEmail,
+  createEmailDraft,
+  searchEmail,
+  getEmailThread,
+} from "./connectors/gmailActions.js";
+import type {
+  EmailSendRequest,
+  EmailSendResult,
+  EmailSearchHit,
+  EmailThread,
+} from "./connectors/gmailActions.js";
 import { whoopConnector } from "./connectors/whoop.js";
 import { appleHealthConnector, createPushEndpointHandler } from "./connectors/appleHealth.js";
 import { googleCalendarConnector } from "./connectors/googleCalendar.js";
@@ -116,6 +126,8 @@ export {
 export {
   sendEmail,
   createEmailDraft,
+  searchEmail,
+  getEmailThread,
   buildRfc2822,
 } from "./connectors/gmailActions.js";
 export type {
@@ -173,6 +185,8 @@ export interface IntegrationsSystem {
   };
   /** Live Gmail actions, bound to the injected http/tokenStore. */
   email: {
+    search: (query: string, maxResults?: number) => Promise<EmailSearchHit[]>;
+    getThread: (threadId: string) => Promise<EmailThread>;
     send: (req: EmailSendRequest) => Promise<EmailSendResult>;
     createDraft: (req: EmailSendRequest) => Promise<EmailSendResult>;
   };
@@ -225,6 +239,10 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
         }),
     },
     email: {
+      search: (query, maxResults = 10) =>
+        searchEmail(query, maxResults, { http: config.http, tokenStore: config.tokenStore }),
+      getThread: (threadId) =>
+        getEmailThread(threadId, { http: config.http, tokenStore: config.tokenStore }),
       send: (req) =>
         sendEmail(req, { http: config.http, tokenStore: config.tokenStore }),
       createDraft: (req) =>

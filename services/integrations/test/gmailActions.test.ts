@@ -13,6 +13,8 @@ import {
   sendEmail,
   createEmailDraft,
   buildRfc2822,
+  searchEmail,
+  getEmailThread,
   type GmailDeps,
   type EmailSendRequest,
 } from "../src/connectors/gmailActions.js";
@@ -152,5 +154,131 @@ describe("buildRfc2822", () => {
   it("leaves ASCII subjects unencoded", () => {
     const msg = buildRfc2822(sendReq());
     expect(msg).toContain("Subject: Quarterly sync\r\n");
+  });
+});
+
+describe("searchEmail", () => {
+  it("lists with q + maxResults, fetches metadata per hit, tolerates a miss", async () => {
+    const { deps, http } = makeDeps();
+    http.add(/\/messages\?/, {
+      status: 200,
+      headers: {},
+      body: {
+        messages: [
+          { id: "m1", threadId: "t1" },
+          { id: "m2", threadId: "t2" },
+        ],
+      },
+    });
+    http.add("/messages/m1?", {
+      status: 200,
+      headers: {},
+      body: {
+        id: "m1",
+        payload: {
+          headers: [
+            { name: "Subject", value: "Invoice #42" },
+            { name: "From", value: "alice@example.com" },
+            { name: "Date", value: "Wed, 10 Jun 2026 09:00:00 +0000" },
+          ],
+        },
+      },
+    });
+    http.add("/messages/m2?", { status: 404, headers: {}, body: {} });
+
+    const hits = await searchEmail("from:alice", 10, deps);
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toEqual({
+      messageId: "m1",
+      threadId: "t1",
+      subject: "Invoice #42",
+      from: "alice@example.com",
+      date: "Wed, 10 Jun 2026 09:00:00 +0000",
+    });
+    const list = http.calls[0]!.req;
+    expect(list.url).toContain("q=from%3Aalice");
+    expect(list.url).toContain("maxResults=10");
+    expect(list.headers?.["Authorization"]).toBe("Bearer test_access_token");
+  });
+
+  it("throws when the list call fails", async () => {
+    const { deps, http } = makeDeps();
+    http.add(/\/messages\?/, { status: 500, headers: {}, body: {} });
+    await expect(searchEmail("anything", 5, deps)).rejects.toThrow("HTTP 500");
+  });
+});
+
+describe("getEmailThread", () => {
+  it("extracts text/plain bodies from nested multipart payloads", async () => {
+    const { deps, http } = makeDeps();
+    const plain = Buffer.from("The plain body", "utf8").toString("base64url");
+    http.add("/threads/t1?", {
+      status: 200,
+      headers: {},
+      body: {
+        id: "t1",
+        messages: [
+          {
+            id: "m1",
+            threadId: "t1",
+            payload: {
+              mimeType: "multipart/alternative",
+              headers: [
+                { name: "From", value: "alice@example.com" },
+                { name: "To", value: "me@example.com" },
+                { name: "Subject", value: "Hello" },
+                { name: "Date", value: "Wed, 10 Jun 2026 09:00:00 +0000" },
+              ],
+              parts: [
+                { mimeType: "text/html", body: { data: "ignored" } },
+                {
+                  mimeType: "multipart/mixed",
+                  parts: [{ mimeType: "text/plain", body: { data: plain } }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const thread = await getEmailThread("t1", deps);
+
+    expect(thread.id).toBe("t1");
+    expect(thread.messages).toHaveLength(1);
+    expect(thread.messages[0]!.body).toBe("The plain body");
+    expect(thread.messages[0]!.from).toBe("alice@example.com");
+    expect(thread.messages[0]!.subject).toBe("Hello");
+  });
+
+  it("returns empty body when no text/plain part exists", async () => {
+    const { deps, http } = makeDeps();
+    http.add("/threads/t2?", {
+      status: 200,
+      headers: {},
+      body: {
+        id: "t2",
+        messages: [
+          {
+            id: "m9",
+            payload: {
+              mimeType: "text/html",
+              headers: [{ name: "Subject", value: "HTML only" }],
+              body: { data: "aGk" },
+            },
+          },
+        ],
+      },
+    });
+
+    const thread = await getEmailThread("t2", deps);
+    expect(thread.messages[0]!.body).toBe("");
+  });
+
+  it("throws when the thread fetch fails", async () => {
+    const { deps, http } = makeDeps();
+    http.add("/threads/missing?", { status: 404, headers: {}, body: {} });
+    await expect(getEmailThread("missing", deps)).rejects.toThrow("HTTP 404");
   });
 });
