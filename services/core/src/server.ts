@@ -36,6 +36,9 @@ import { createSqliteConversationStore } from "./chat/sqliteConversationStore.js
 import { getAgentSystem } from "./agent/agentSystem.js";
 import { bootstrapLiveAgent } from "./agent/liveBootstrap.js";
 import { getMemorySystem } from "./memory/memorySystem.js";
+import { DatabaseSync } from "node:sqlite";
+import { setTelemetrySink } from "./inference/telemetry.js";
+import { TelemetrySink, createTelemetrySink } from "./inference/telemetrySink.js";
 import { ConsolidationScheduler } from "./memory/consolidationScheduler.js";
 import type { WakeEvent } from "@jarvis/voice";
 import {
@@ -58,6 +61,12 @@ const store = process.env["VITEST"]
 // and the assistant has no cross-session memory (it can't remember your name
 // after a restart). Returns null and degrades gracefully if memory can't init.
 const memory = getMemorySystem(gateway);
+// Telemetry sink: routing + per-turn TTFT/tps persisted for GET /telemetry.
+// In-memory DB under vitest so tests never touch ~/.jarvis/data.
+const telemetrySink = process.env["VITEST"]
+  ? new TelemetrySink(new DatabaseSync(":memory:"))
+  : createTelemetrySink(process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data"));
+setTelemetrySink(telemetrySink);
 const chatCore = new ChatCore(gateway, store, memory);
 // Background consolidation: promotes captured turns into the retrievable graph
 // so recall works without a manual step (retrieval only sees consolidated
@@ -83,6 +92,16 @@ app.use(
 );
 
 app.get("/healthz", (c) => c.json({ ok: true }));
+
+app.get("/telemetry", (c) => {
+  const limit = Number(c.req.query("limit") ?? 50);
+  const sinceHours = Number(c.req.query("sinceHours") ?? 24);
+  return c.json({
+    ok: true,
+    summary: telemetrySink.summary(Number.isFinite(sinceHours) ? sinceHours : 24),
+    recent: telemetrySink.recent(Number.isFinite(limit) ? Math.min(limit, 200) : 50),
+  });
+});
 
 app.get("/status", (c) => {
   const s = gateway.status();

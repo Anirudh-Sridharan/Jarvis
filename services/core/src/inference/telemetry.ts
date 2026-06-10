@@ -1,12 +1,21 @@
 /**
  * Telemetry (feature 1): TTFT / tokens-per-second / routing + fallback logging.
  *
- * Phase 1 logs to stderr in a structured, greppable form. Later this feeds the
- * life-metrics dashboard.
- *
- * TODO(phase3: feature dashboard) emit these as structured events to a metrics sink.
+ * Logs to stderr in a structured, greppable form AND forwards to the
+ * TelemetrySink when one is wired (server startup) — the sink persists to
+ * SQLite and feeds GET /telemetry for the dashboard.
  */
 import type { RoutingDecision } from "./types.js";
+
+/** Sink forwarding — avoids threading the sink through router/gateway ctors. */
+interface ForwardSink {
+  recordRouting(d: RoutingDecision): void;
+  recordTurn(m: TurnMetrics): void;
+}
+let activeSink: ForwardSink | null = null;
+export function setTelemetrySink(sink: ForwardSink | null): void {
+  activeSink = sink;
+}
 
 function ts(): string {
   return new Date().toISOString();
@@ -16,6 +25,11 @@ export function logRouting(d: RoutingDecision): void {
   console.error(
     `[telemetry ${ts()}] routing target=${d.target} model=${d.modelId} reason=${d.reason} estTokens=${d.estPromptTokens}`,
   );
+  try {
+    activeSink?.recordRouting(d);
+  } catch {
+    /* telemetry must never break inference */
+  }
 }
 
 export interface TurnMetrics {
@@ -32,6 +46,11 @@ export function logTurn(m: TurnMetrics): void {
   console.error(
     `[telemetry ${ts()}] turn target=${m.target} model=${m.modelId} ttft=${m.ttftMs}ms tokens=${m.tokens} tps=${tps} fallback=${m.fallbackActive}`,
   );
+  try {
+    activeSink?.recordTurn(m);
+  } catch {
+    /* telemetry must never break inference */
+  }
 }
 
 /** Tracks time-to-first-token + token count across a single stream. */
