@@ -7,33 +7,13 @@
  * Source is allowlisted; output is the CLI's stdout/stderr tail.
  */
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { execFile } from "node:child_process";
 import { NextRequest, NextResponse } from "next/server";
+import { findRepoRoot } from "@/app/lib/repoRoot";
 import type { WidgetEnvelope, SyncNowResult } from "@/app/lib/contracts";
 
 const SYNCABLE = new Set(["whoop", "gcal", "gmail", "github", "simplefin"]);
 const SYNC_TIMEOUT_MS = 180_000;
-
-/** Monorepo root = nearest ancestor package.json declaring workspaces. */
-function findRepoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    try {
-      const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as {
-        workspaces?: unknown;
-      };
-      if (pkg.workspaces) return dir;
-    } catch {
-      // keep walking
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return process.cwd();
-}
 
 function runConnectSync(source: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {

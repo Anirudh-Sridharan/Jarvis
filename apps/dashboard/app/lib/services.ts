@@ -16,6 +16,7 @@ import "server-only";
 
 import os from "node:os";
 import path from "node:path";
+import { findRepoRoot } from "./repoRoot";
 import { createIntegrations } from "@jarvis/integrations";
 import type { IntegrationsSystem } from "@jarvis/integrations";
 import { createMemorySystem } from "@jarvis/memory";
@@ -57,9 +58,24 @@ const noOpMemoryLlm = {
 
 // ── Data dir resolution ───────────────────────────────────────────────────────
 
+/**
+ * Match core's resolution exactly or the dashboard reads a different (empty)
+ * database than the one core/the connect CLI write. Core loads the repo .env
+ * and resolves JARVIS_DATA_DIR from its own cwd (services/core) — so load the
+ * same .env here, and resolve a relative value against services/core too.
+ */
 function getDataDir(): string {
+  if (!process.env.JARVIS_DATA_DIR) {
+    try {
+      process.loadEnvFile(path.join(findRepoRoot(), ".env"));
+    } catch {
+      // no repo .env — fall through to defaults
+    }
+  }
   const env = process.env.JARVIS_DATA_DIR;
-  if (env) return env;
+  if (env) {
+    return path.isAbsolute(env) ? env : path.resolve(findRepoRoot(), "services/core", env);
+  }
   return path.join(os.homedir(), ".jarvis", "data");
 }
 

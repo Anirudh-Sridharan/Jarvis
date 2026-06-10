@@ -11,33 +11,13 @@
  * token state flip.
  */
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { spawn } from "node:child_process";
 import { NextRequest, NextResponse } from "next/server";
+import { findRepoRoot } from "@/app/lib/repoRoot";
 import type { WidgetEnvelope, ConnectStartResult } from "@/app/lib/contracts";
 
 const OAUTH_SOURCES = new Set(["whoop", "gcal", "gmail"]);
 const URL_WAIT_MS = 10_000;
-
-/** Monorepo root = nearest ancestor package.json declaring workspaces. */
-function findRepoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    try {
-      const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as {
-        workspaces?: unknown;
-      };
-      if (pkg.workspaces) return dir;
-    } catch {
-      // keep walking
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return process.cwd();
-}
 
 /**
  * Spawn the consent flow and resolve as soon as its stdout prints the

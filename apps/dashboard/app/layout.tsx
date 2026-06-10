@@ -31,7 +31,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${shareTechMono.variable} ${firaCode.variable}`}>
-      <body>
+      {/* suppressHydrationWarning: browser extensions (e.g. Grammarly) inject
+          data-* attributes into <body> before React hydrates — benign, but noisy. */}
+      <body suppressHydrationWarning>
         <div className="shell">
           <header className="topbar">
             <div className="topbar__brand">

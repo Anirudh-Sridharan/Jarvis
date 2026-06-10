@@ -149,7 +149,7 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
         const meaningful = env.data?.output
           .split("\n")
           .map((l) => l.trim())
-          .filter((l) => l && !/^(npm (error|warn)|>)/.test(l))
+          .filter((l) => l && !/^(npm (error|warn)|>|\(node:|\(Use `)/.test(l))
           .slice(-2)
           .join(" · ");
         setSyncMsg((m) => ({
