@@ -78,16 +78,24 @@ log = logging.getLogger("voice_server")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("VOICE_SIDECAR_PORT", "8089"))
 
-# URL the wake word listener POSTs WakeEvents to (the TS orchestrator).
-VOICE_ORCHESTRATOR_URL = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.0.1:3000/api/voice/wake")
+# URL the wake word listener POSTs WakeEvents to (core's voice session).
+VOICE_ORCHESTRATOR_URL = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.0.1:8080/voice/wake")
 
 # faster-whisper model size.  "small.int8" is the recommended default.
 # Set to "base.en" for lower RAM / faster cold-start on English-only sessions.
 STT_MODEL_SIZE = os.environ.get("STT_MODEL_SIZE", "small")
 
-# Kokoro voice/lang.
-TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
-TTS_LANG = os.environ.get("TTS_LANG", "en-us")
+# Kokoro voice/lang. Jarvis defaults to a British male voice (bm_fable);
+# other British options: bm_george, bm_lewis, bf_emma, bf_isabella.
+# American voices (af_*/am_*) need TTS_LANG=en-us — voice prefix and lang
+# pipeline must agree (b* ↔ en-gb, a* ↔ en-us).
+TTS_VOICE = os.environ.get("TTS_VOICE", "bm_fable")
+TTS_LANG = os.environ.get("TTS_LANG", "en-gb")
+
+# Kokoro's KPipeline takes single-letter lang codes; map the friendly names
+# explicitly so we don't depend on the library's alias table.
+_KOKORO_LANG_CODES = {"en-us": "a", "en-gb": "b", "a": "a", "b": "b"}
+TTS_LANG_CODE = _KOKORO_LANG_CODES.get(TTS_LANG.lower(), TTS_LANG)
 
 # Silero VAD threshold (0..1); lower = more sensitive.
 VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
@@ -160,15 +168,26 @@ class STTManager:
         self._model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8")
 
         log.info("Loading Silero VAD …")
-        # silero-vad ships as a PyTorch Hub model.
-        vad_model, vad_utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            onnx=False,
-        )
-        self._vad_model = vad_model
-        self._vad_utils = vad_utils
+        try:
+            # Preferred: the silero-vad pip package (in requirements.txt) —
+            # bundles the model, no network fetch, no interactive prompt.
+            from silero_vad import load_silero_vad  # type: ignore[import]
+
+            self._vad_model = load_silero_vad(onnx=False)
+            self._vad_utils = None  # streaming path runs the model directly
+        except ImportError:
+            # Fallback: PyTorch Hub. trust_repo=True is REQUIRED headless —
+            # without it torch.hub prompts "Do you trust this repository?"
+            # on stdin and the load dies with "EOF when reading a line".
+            vad_model, vad_utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                force_reload=False,
+                onnx=False,
+                trust_repo=True,
+            )
+            self._vad_model = vad_model
+            self._vad_utils = vad_utils
         log.info("STT + VAD ready.")
 
     async def unload(self) -> None:
@@ -236,8 +255,8 @@ class TTSManager:
         # kokoro >= 0.9 ships KPipeline as the recommended high-level entry point.
         from kokoro import KPipeline  # type: ignore[import]
 
-        log.info("Loading Kokoro TTS pipeline (lang=%s) …", TTS_LANG)
-        self._pipeline = KPipeline(lang_code=TTS_LANG)
+        log.info("Loading Kokoro TTS pipeline (lang=%s → %s) …", TTS_LANG, TTS_LANG_CODE)
+        self._pipeline = KPipeline(lang_code=TTS_LANG_CODE)
         log.info("Kokoro TTS ready.")
 
     async def unload(self) -> None:

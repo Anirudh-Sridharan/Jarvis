@@ -9,7 +9,7 @@ Usage (the FastAPI app drives this via ``WakeWordListener.run()``):
     from wakeword import WakeWordListener
     listener = WakeWordListener(
         model_name="hey_jarvis",
-        orchestrator_url="http://127.0.0.1:3000/api/voice/wake",
+        orchestrator_url="http://127.0.0.1:8080/voice/wake",
         threshold=0.5,
     )
     await listener.run()   # runs until cancelled
@@ -236,7 +236,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
     model = os.environ.get("WAKE_WORD_MODEL", "hey_jarvis")
-    url = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.0.1:3000/api/voice/wake")
+    url = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.0.1:8080/voice/wake")
     threshold = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
 
     listener = WakeWordListener(model_name=model, orchestrator_url=url, threshold=threshold)

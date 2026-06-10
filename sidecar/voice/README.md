@@ -43,7 +43,7 @@ uv python install 3.12
 |-----------|-------|-----------------|-------------|
 | STT | faster-whisper `small` (int8) | Auto on first `/stt/stream` call | ~150 MB |
 | VAD | Silero VAD | Auto via `torch.hub` | ~5 MB |
-| TTS | Kokoro (`af_heart` voice) | Auto on first `/tts` call | ~350 MB |
+| TTS | Kokoro (`bm_fable` British voice) | Auto on first `/tts` call | ~350 MB |
 | Wake word | openWakeWord `hey_jarvis` | Auto on `POST /wake/enable` | ~5 MB |
 
 Also install `portaudio` (needed by PyAudio for the wake word mic):
@@ -73,10 +73,10 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `VOICE_SIDECAR_PORT` | `8089` | Listen port (loopback). |
-| `VOICE_ORCHESTRATOR_URL` | `http://127.0.0.1:3000/api/voice/wake` | Where wake events are POSTed. |
+| `VOICE_ORCHESTRATOR_URL` | `http://127.0.0.1:8080/voice/wake` | Where wake events are POSTed. |
 | `STT_MODEL_SIZE` | `small` | faster-whisper model size (`tiny`, `base`, `small`, `medium`). |
-| `TTS_VOICE` | `af_heart` | Kokoro voice ID. |
-| `TTS_LANG` | `en-us` | Kokoro language code. |
+| `TTS_VOICE` | `bm_fable` | Kokoro voice ID (British male; see also `bm_george`, `bf_emma`). |
+| `TTS_LANG` | `en-gb` | Kokoro language (`en-gb` British / `en-us` American — must match voice prefix). |
 | `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openWakeWord model name or file path. |
 | `WAKE_THRESHOLD` | `0.5` | openWakeWord detection confidence threshold. |
@@ -131,7 +131,7 @@ streaming partials on Apple Silicon, use Parakeet-TDT/MLX (see `stt.py` →
 {
   "text": "The text to synthesize.",
   "request_id": "<optional uuid>",
-  "voice": "af_heart",
+  "voice": "bm_fable",
   "speed": 1.0
 }
 ```
@@ -176,7 +176,7 @@ When a "Hey Jarvis" detection is confirmed, the sidecar POSTs:
   "device_id": "0"
 }
 ```
-to `VOICE_ORCHESTRATOR_URL` (default `http://127.0.0.1:3000/api/voice/wake`).
+to `VOICE_ORCHESTRATOR_URL` (default `http://127.0.0.1:8080/voice/wake`).
 
 ### `POST /unload`
 

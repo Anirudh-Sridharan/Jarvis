@@ -90,9 +90,9 @@ python -m pip install -r requirements.txt --quiet
 echo ""
 echo "Starting Jarvis Voice sidecar on 127.0.0.1:${PORT}"
 echo "  STT model   : ${STT_MODEL_SIZE:-small} (faster-whisper int8)"
-echo "  TTS voice   : ${TTS_VOICE:-af_heart} (Kokoro)"
+echo "  TTS voice   : ${TTS_VOICE:-bm_fable} (Kokoro, British English)"
 echo "  Wake model  : ${WAKE_WORD_MODEL:-hey_jarvis} (openWakeWord)"
-echo "  Orchestrator: ${VOICE_ORCHESTRATOR_URL:-http://127.0.0.1:3000/api/voice/wake}"
+echo "  Orchestrator: ${VOICE_ORCHESTRATOR_URL:-http://127.0.0.1:8080/voice/wake}"
 echo ""
 exec uvicorn voice_server:app \
   --host 127.0.0.1 \
