@@ -36,6 +36,7 @@ import type {
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
+import { mapGoogleApiError } from "../framework/googleApi.js";
 import type { DatabaseSync } from "node:sqlite";
 import { toJson, fromJson } from "../db/database.js";
 
@@ -646,16 +647,11 @@ function mapApiError(
   res: HttpResponse,
   conflicts: FreeBusySlot[],
 ): WriteResult {
-  const retryable = res.status === 429 || res.status >= 500;
-  const reason =
-    res.status === 412
-      ? "etag mismatch (event changed since last sync) — re-sync and retry with a fresh etag"
-      : `Google Calendar API error: HTTP ${res.status}`;
   return {
     requestId: req.requestId,
     ok: false,
     op: req.op,
-    error: { code: res.status, reason, retryable },
+    error: mapGoogleApiError(res, "Google Calendar", "gcal"),
     ...(conflicts.length > 0 ? { conflicts } : {}),
   };
 }

@@ -16,6 +16,7 @@
 import type { HttpClient, HttpResponse, TokenStore } from "../types.js";
 import { getAccessToken } from "../framework/oauth.js";
 import { getRefreshConfig } from "../framework/providers.js";
+import { mapGoogleApiError } from "../framework/googleApi.js";
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -229,7 +230,7 @@ async function executeMessageWrite(
   });
 
   if (res.status !== 200 && res.status !== 201) {
-    return { ok: false, error: mapGmailError(res) };
+    return { ok: false, error: mapGoogleApiError(res, "Gmail", "gmail") };
   }
 
   if (mode === "send") {
@@ -270,7 +271,3 @@ function encodeBase64Url(s: string): string {
   return Buffer.from(s, "utf8").toString("base64url");
 }
 
-function mapGmailError(res: HttpResponse): NonNullable<EmailSendResult["error"]> {
-  const retryable = res.status === 429 || res.status >= 500;
-  return { code: res.status, reason: `Gmail API error: HTTP ${res.status}`, retryable };
-}

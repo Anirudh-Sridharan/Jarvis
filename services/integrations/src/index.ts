@@ -149,6 +149,7 @@ export {
   getAccessToken,
   clearOAuthState,
 } from "./framework/oauth.js";
+export { mapGoogleApiError } from "./framework/googleApi.js";
 export {
   getOAuthProvider,
   getRefreshConfig,
