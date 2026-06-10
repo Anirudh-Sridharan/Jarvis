@@ -232,3 +232,106 @@ describe("executeEventWrite: conflicts", () => {
     expect(http.calls.length).toBe(0);
   });
 });
+
+describe("executeEventWrite: update", () => {
+  it("PATCHes the event with If-Match and reconciles the response", async () => {
+    const { deps, http, mirror } = makeDeps();
+    http.add(/\/events\/evt-existing$/, {
+      status: 200,
+      headers: {},
+      body: googleEventResponse({ id: "evt-existing", etag: '"etag-v2"', summary: "Moved" }),
+    });
+
+    const result = await executeEventWrite(
+      createReq({
+        op: "update",
+        eventId: "evt-existing",
+        ifMatchEtag: '"etag-existing"',
+        patch: {
+          start: { dateTime: "2026-06-12T15:00:00Z", timeZone: "UTC" },
+          end: { dateTime: "2026-06-12T15:30:00Z", timeZone: "UTC" },
+        },
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+    const patch = http.calls.find((c) => c.req.method === "PATCH");
+    expect(patch).toBeDefined();
+    expect(patch!.req.headers?.["If-Match"]).toBe('"etag-existing"');
+
+    const mirrored = mirror.getEvents("primary", "2026-06-12T00:00:00Z", "2026-06-13T00:00:00Z");
+    expect(mirrored.find((e) => e.id === "evt-existing")?.etag).toBe('"etag-v2"');
+  });
+});
+
+describe("executeEventWrite: delete", () => {
+  it("DELETEs the event and tombstones the mirror on 204", async () => {
+    const { deps, http, mirror } = makeDeps();
+    mirror.upsertEvent(mirrorEvent());
+    http.add(/\/events\/evt-existing$/, { status: 204, headers: {}, body: {} });
+
+    const result = await executeEventWrite(
+      { requestId: "req-d", op: "delete", calendarId: "primary", eventId: "evt-existing", reason: "t" },
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(http.calls.find((c) => c.req.method === "DELETE")).toBeDefined();
+    const mirrored = mirror.getEvents("primary", "2026-06-12T00:00:00Z", "2026-06-13T00:00:00Z");
+    expect(mirrored.find((e) => e.id === "evt-existing")).toBeUndefined();
+  });
+
+  it("treats 410 (already gone) as success", async () => {
+    const { deps, http, mirror } = makeDeps();
+    mirror.upsertEvent(mirrorEvent());
+    http.add(/\/events\/evt-existing$/, { status: 410, headers: {}, body: {} });
+
+    const result = await executeEventWrite(
+      { requestId: "req-d2", op: "delete", calendarId: "primary", eventId: "evt-existing", reason: "t" },
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("executeEventWrite: error mapping", () => {
+  it.each([
+    [429, true],
+    [500, true],
+    [503, true],
+    [403, false],
+    [404, false],
+  ])("HTTP %i → ok:false retryable=%s, mirror untouched", async (status, retryable) => {
+    const { deps, http, mirror } = makeDeps();
+    http.add(/\/calendars\/primary\/events$/, { status, headers: {}, body: {} });
+
+    const result = await executeEventWrite(createReq(), deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(status);
+    expect(result.error?.retryable).toBe(retryable);
+    expect(mirror.getEvents("primary", "2026-06-12T00:00:00Z", "2026-06-13T00:00:00Z")).toEqual([]);
+  });
+
+  it("412 etag mismatch → not retryable, reason mentions etag", async () => {
+    const { deps, http } = makeDeps();
+    http.add(/\/events\/evt-existing$/, { status: 412, headers: {}, body: {} });
+
+    const result = await executeEventWrite(
+      createReq({
+        op: "update",
+        eventId: "evt-existing",
+        ifMatchEtag: '"stale"',
+        patch: { summary: "rename only" },
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(412);
+    expect(result.error?.retryable).toBe(false);
+    expect(result.error?.reason).toContain("etag");
+  });
+});
