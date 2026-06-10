@@ -22,6 +22,13 @@ type ConsolidationResult = Awaited<
   ReturnType<MemorySystem["consolidation"]["run"]>
 >;
 
+/** Outcome of runNow(): busy and failed are distinct — a failure must not
+ * masquerade as "busy" (the /consolidate endpoint maps these to HTTP codes). */
+export type RunNowResult =
+  | { status: "busy" }
+  | { status: "failed"; error: string }
+  | { status: "ok"; result: ConsolidationResult };
+
 export interface ConsolidationSchedulerOptions {
   /** Poll interval in ms. Default 60_000 (1 min). */
   intervalMs?: number;
@@ -100,12 +107,12 @@ export class ConsolidationScheduler {
 
   /**
    * Run consolidation now (used by the manual /consolidate endpoint too).
-   * Returns the result, or null if a run is already in flight.
+   * Returns { status: "busy" } if a run is already in flight,
+   * { status: "failed", error } if the run threw, or
+   * { status: "ok", result } on success.
    */
-  async runNow(
-    trigger: "scheduler" | "manual",
-  ): Promise<ConsolidationResult | null> {
-    if (this.running) return null;
+  async runNow(trigger: "scheduler" | "manual"): Promise<RunNowResult> {
+    if (this.running) return { status: "busy" };
     this.running = true;
     try {
       const res = await this.memory.consolidation.run(trigger);
@@ -114,12 +121,11 @@ export class ConsolidationScheduler {
         `[consolidation] ${trigger} run: processed=${c?.recordsProcessed ?? "?"} factsExtracted=${c?.factsExtracted ?? "?"}`,
       );
       this.prevPending = 0;
-      return res;
+      return { status: "ok", result: res };
     } catch (err) {
-      this.log(
-        `[consolidation] run failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return null;
+      const error = err instanceof Error ? err.message : String(err);
+      this.log(`[consolidation] run failed: ${error}`);
+      return { status: "failed", error };
     } finally {
       this.running = false;
     }
