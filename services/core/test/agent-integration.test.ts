@@ -29,6 +29,16 @@ import {
 import { createAgentSystem, registerToolMeta } from "@jarvis/agent";
 import type { Tool, ToolRegistry } from "@jarvis/agent";
 
+import { createIntegrations } from "@jarvis/integrations";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  makeTokens,
+  FixedClock as IntegrationsFixedClock,
+  FakeLlm as IntegrationsFakeLlm,
+} from "@jarvis/integrations/testing";
+import { makeCalendarCreateEventTool } from "../src/agent/tools/calendarTools.js";
+
 import {
   ApprovalQueue,
   setAgentSystem,
@@ -747,5 +757,88 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
 
     expect(run.status).toMatch(/done|running/);
     expect(assembleBriefingSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe("agent-integration: approved calendar_create_event hits the live write path", () => {
+  let tmpDir: string;
+  let integrationsDir: string;
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    if (integrationsDir) rmSync(integrationsDir, { recursive: true, force: true });
+    resetAgentSystem();
+  });
+
+  it("executes the Google API POST after approval and returns the canonical event", async () => {
+    tmpDir = makeTempDir();
+    integrationsDir = makeTempDir();
+
+    const http = new FakeHttp();
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gcal", makeTokens());
+    http.add(/\/calendars\/primary\/events$/, {
+      status: 200,
+      headers: {},
+      body: {
+        id: "evt-agent-1",
+        etag: '"etag-agent"',
+        status: "confirmed",
+        summary: "Sync with Pat",
+        start: { dateTime: "2026-06-12T15:00:00Z", timeZone: "UTC" },
+        end: { dateTime: "2026-06-12T15:30:00Z", timeZone: "UTC" },
+        created: "2026-06-10T00:00:00Z",
+        updated: "2026-06-10T00:00:00Z",
+      },
+    });
+
+    const integrations = createIntegrations({
+      http,
+      clock: new IntegrationsFixedClock(),
+      tokenStore,
+      llm: new IntegrationsFakeLlm(),
+      dataDir: integrationsDir,
+    });
+
+    const calTool = makeCalendarCreateEventTool(integrations);
+    const llm = new FakeLlm().setScript([
+      JSON.stringify({
+        tool: "calendar_create_event",
+        args: {
+          title: "Sync with Pat",
+          start: "2026-06-12T15:00:00Z",
+          end: "2026-06-12T15:30:00Z",
+        },
+      }),
+      JSON.stringify({ tool: "__done__", args: { result: "scheduled" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "scheduled" } }),
+    ]);
+
+    const tools = makeToolRegistry([calTool]);
+    const clock = new FixedClock(Date.now());
+    const { sink, requests } = makeAutoApproveSink("test-user");
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: sink,
+    });
+
+    const result = await agentSystem.agent.run("schedule a sync with Pat", { source: "manual" });
+
+    // Gate fired, then the REAL write executed
+    expect(requests.length).toBeGreaterThanOrEqual(1);
+    expect(["done", "error"]).toContain(result.run.status);
+    expect(http.callCount(/\/calendars\/primary\/events$/)).toBe(1);
+
+    // Canonical event landed in the mirror
+    const mirrored = integrations.calendar.mirror.getEvents(
+      "primary",
+      "2026-06-12T00:00:00Z",
+      "2026-06-13T00:00:00Z",
+    );
+    expect(mirrored.map((e) => e.id)).toContain("evt-agent-1");
   });
 });

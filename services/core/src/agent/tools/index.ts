@@ -5,8 +5,8 @@
  * Tool summary:
  *   Calendar (via @jarvis/integrations):
  *     calendar_find_time    readOnly:true
- *     calendar_create_event readOnly:false  → GATED (calendar_write)
- *     calendar_move_event   readOnly:false  → GATED (calendar_write)
+ *     calendar_create_event readOnly:false  → GATED (calendar_write) → live Google API
+ *     calendar_move_event   readOnly:false  → GATED (calendar_write) → live Google API
  *
  *   Todos (via @jarvis/integrations):
  *     todo_add              readOnly:false  → auto_allow (internal_write)

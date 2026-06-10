@@ -1,14 +1,14 @@
 /**
  * Calendar tools — bridge @jarvis/agent Tool interface to @jarvis/integrations calendar.
  *
- * calendar_find_time  — read-only: find free slots in a window
+ * calendar_find_time    — read-only: find free slots in a window
  * calendar_create_event — write: gated by approval (readOnly:false)
  * calendar_move_event   — write: gated by approval (readOnly:false)
  *
- * TODO(phase5: feature17): calendar_create_event and calendar_move_event currently
- * call the integrations.calendar.createEvent stub which returns 501. In phase 5
- * the approval gate is wired in the agent loop itself (via readOnly:false) and
- * the live Google Calendar API call will be made after approval.
+ * Writes call integrations.calendar.executeWrite — the live Google Calendar
+ * write engine bound to the injected HttpClient/TokenStore (feature 12 write
+ * path). The approval gate fires in the agent ReAct loop BEFORE tool.run(),
+ * so by the time executeWrite runs the action is user-approved (feature 17).
  */
 
 import { z } from "zod";
@@ -77,34 +77,26 @@ export function makeCalendarCreateEventTool(
   return {
     name: "calendar_create_event",
     description:
-      "Create a calendar event. Requires approval (write operation). TODO(phase5: feature17): live Google API call wired after approval gate.",
+      "Create a Google Calendar event. Requires approval (write operation). Returns the canonical created event, or conflicts if the slot is taken.",
     schema: CreateEventSchema,
     readOnly: false, // triggers approval gate in agent loop
 
     async run(rawArgs: unknown): Promise<unknown> {
       const args = CreateEventSchema.parse(rawArgs);
-      // TODO(phase5: feature17): replace stub with live createEvent call via OAuth
-      // For now the integrations.calendar.createEvent stub returns 501.
-      const result = await integrations.calendar.createEvent(
-        {
-          requestId: `agent-create-${Date.now()}`,
-          op: "create",
-          calendarId: "primary",
-          patch: {
-            summary: args.title,
-            description: args.description,
-            location: args.location,
-            start: { dateTime: args.start, timeZone: "UTC" },
-            end: { dateTime: args.end, timeZone: "UTC" },
-            attendees: args.attendees?.map((email) => ({ email })),
-          },
-          reason: "Agent-created event (approved by user)",
+      return integrations.calendar.executeWrite({
+        requestId: `agent-create-${Date.now()}`,
+        op: "create",
+        calendarId: "primary",
+        patch: {
+          summary: args.title,
+          description: args.description,
+          location: args.location,
+          start: { dateTime: args.start, timeZone: "UTC" },
+          end: { dateTime: args.end, timeZone: "UTC" },
+          attendees: args.attendees?.map((email) => ({ email })),
         },
-        // http and tokenStore not available here — stub handles this
-        null as never,
-        null as never,
-      );
-      return result;
+        reason: "Agent-created event (approved by user)",
+      });
     },
   };
 }
@@ -130,29 +122,23 @@ export function makeCalendarMoveEventTool(
   return {
     name: "calendar_move_event",
     description:
-      "Move/reschedule a calendar event. Requires approval (write operation). TODO(phase5: feature17): live Google API call wired after approval gate.",
+      "Move/reschedule a Google Calendar event. Requires approval (write operation). Returns the canonical updated event, or conflicts if the new slot is taken.",
     schema: MoveEventSchema,
     readOnly: false, // triggers approval gate in agent loop
 
     async run(rawArgs: unknown): Promise<unknown> {
       const args = MoveEventSchema.parse(rawArgs);
-      // TODO(phase5: feature17): replace stub with live updateEvent call via OAuth
-      const result = await integrations.calendar.createEvent(
-        {
-          requestId: `agent-move-${Date.now()}`,
-          op: "update",
-          calendarId: "primary",
-          eventId: args.event_id,
-          patch: {
-            start: { dateTime: args.new_start, timeZone: "UTC" },
-            end: { dateTime: args.new_end, timeZone: "UTC" },
-          },
-          reason: args.reason ?? "Agent-rescheduled event (approved by user)",
+      return integrations.calendar.executeWrite({
+        requestId: `agent-move-${Date.now()}`,
+        op: "update",
+        calendarId: "primary",
+        eventId: args.event_id,
+        patch: {
+          start: { dateTime: args.new_start, timeZone: "UTC" },
+          end: { dateTime: args.new_end, timeZone: "UTC" },
         },
-        null as never,
-        null as never,
-      );
-      return result;
+        reason: args.reason ?? "Agent-rescheduled event (approved by user)",
+      });
     },
   };
 }
