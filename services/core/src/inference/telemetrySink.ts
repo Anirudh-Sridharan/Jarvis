@@ -59,6 +59,10 @@ export class TelemetrySink {
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(SCHEMA);
+    // Retention: telemetry is operational data, not memory — keep 30 days so
+    // the table (and the 15s dashboard poll's scans) never grow unbounded.
+    const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    db.prepare(`DELETE FROM telemetry_turns WHERE ts < ?`).run(cutoff);
   }
 
   recordRouting(d: RoutingDecision): void {

@@ -8,8 +8,11 @@
  *
  * Converters:
  *   - calendar events (now−7d .. now+14d), re-captured when etag/times change
- *   - daily health digest (sleep / recovery / HRV) for the last 2 days
- *   - daily work digest (commits / emails) for the last 2 days
+ *   - daily health digest (sleep / recovery / HRV) for YESTERDAY (a completed
+ *     day) — captured ONCE per day (dedup content is the day, not the values,
+ *     so intra-day metric drift doesn't spawn contradictory near-duplicates
+ *     that bloat consolidation)
+ *   - daily work digest (commits / emails), same once-per-day rule
  */
 
 import type { MemorySystem } from "@jarvis/memory";
@@ -67,9 +70,12 @@ export async function runIngestPass(deps: IngestDeps): Promise<IngestPassResult>
     tally(result.inserted);
   }
 
-  // ── Daily digests for yesterday and today ──
-  for (const dayOffset of [1, 0]) {
-    const day = new Date(now.getTime() - dayOffset * DAY_MS).toISOString().slice(0, 10);
+  // ── Daily digest for YESTERDAY (completed day, values stable) ──
+  // Captured once per day: the dedup content is the day string, so later
+  // passes with slightly different values dedup instead of stacking
+  // contradictory records (consolidation pays one LLM call per record).
+  {
+    const day = new Date(now.getTime() - 1 * DAY_MS).toISOString().slice(0, 10);
     const range = { from: `${day}T00:00:00Z`, to: `${day}T23:59:59Z` };
 
     // Health: sleep / recovery / HRV
@@ -90,7 +96,7 @@ export async function runIngestPass(deps: IngestDeps): Promise<IngestPassResult>
         text,
         timestamp: `${day}T12:00:00Z`,
         payload: { day, sleepMin: sleep, recovery, hrv },
-        content: text,
+        content: `health-digest-${day}`, // day-keyed: capture once, ignore drift
       });
       tally(result.inserted);
     }
@@ -112,7 +118,7 @@ export async function runIngestPass(deps: IngestDeps): Promise<IngestPassResult>
         text,
         timestamp: `${day}T12:00:00Z`,
         payload: { day, commits, emailsReceived: received, emailsSent: sent },
-        content: text,
+        content: `work-digest-${day}`, // day-keyed: capture once, ignore drift
       });
       tally(result.inserted);
     }

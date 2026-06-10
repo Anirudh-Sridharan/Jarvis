@@ -101,12 +101,12 @@ function seedMetrics(): void {
     adapterVersion: "1",
   });
   integrations.metrics.upsertSeries([
-    mk("sleep.duration_min", "whoop", 465, "2026-06-10T07:00:00Z"),
-    mk("recovery", "whoop", 72, "2026-06-10T07:00:00Z"),
-    mk("hrv", "whoop", 45, "2026-06-10T07:00:00Z"),
-    mk("github.commits", "github", 7, "2026-06-10T09:00:00Z"),
-    mk("gmail.received", "gmail", 21, "2026-06-10T00:00:00Z"),
-    mk("gmail.sent", "gmail", 4, "2026-06-10T00:00:00Z"),
+    mk("sleep.duration_min", "whoop", 465, "2026-06-09T07:00:00Z"),
+    mk("recovery", "whoop", 72, "2026-06-09T07:00:00Z"),
+    mk("hrv", "whoop", 45, "2026-06-09T07:00:00Z"),
+    mk("github.commits", "github", 7, "2026-06-09T09:00:00Z"),
+    mk("gmail.received", "gmail", 21, "2026-06-09T00:00:00Z"),
+    mk("gmail.sent", "gmail", 4, "2026-06-09T00:00:00Z"),
   ]);
 }
 
@@ -135,9 +135,9 @@ describe("runIngestPass", () => {
 
     expect(result.captured).toBe(2);
     const health = captured.find((c) => c.type === "health_metric")!;
-    expect(health.text).toBe("Health 2026-06-10: slept 7.8h; recovery 72%; HRV 45ms");
+    expect(health.text).toBe("Health 2026-06-09: slept 7.8h; recovery 72%; HRV 45ms");
     const work = captured.find((c) => c.type === "code_activity")!;
-    expect(work.text).toBe("Work activity 2026-06-10: 7 commits; 21 emails received, 4 sent");
+    expect(work.text).toBe("Work activity 2026-06-09: 7 commits; 21 emails received, 4 sent");
   });
 
   it("is idempotent — second pass yields only duplicates", async () => {
@@ -184,5 +184,33 @@ describe("runIngestPass", () => {
     const result = await runIngestPass({ memory, integrations, now: () => NOW });
     expect(result.captured).toBe(0);
     expect(result.duplicates).toBe(0);
+  });
+});
+
+describe("runIngestPass: digest churn guard", () => {
+  it("intra-day value drift does NOT spawn duplicate digests (day-keyed dedup)", async () => {
+    seedMetrics();
+    const { memory } = makeFakeMemory();
+    const first = await runIngestPass({ memory, integrations, now: () => NOW });
+    expect(first.captured).toBe(2);
+
+    // More commits land for yesterday (late sync) — values change
+    integrations.metrics.upsertSeries([
+      {
+        id: makeMetricId({ source: "github", metric: "github.commits", ts: "2026-06-09T15:00:00Z", dims: {} }),
+        source: "github" as never,
+        metric: "github.commits",
+        value: 5,
+        unit: "count",
+        ts: "2026-06-09T15:00:00Z",
+        dims: {},
+        ingestedAt: NOW.toISOString(),
+        adapterVersion: "1",
+      },
+    ]);
+
+    const second = await runIngestPass({ memory, integrations, now: () => NOW });
+    expect(second.captured).toBe(0); // day-keyed content: no contradictory re-capture
+    expect(second.duplicates).toBe(2);
   });
 });

@@ -15,6 +15,15 @@ import type { Tool } from "@jarvis/agent";
 import { registerToolMeta } from "@jarvis/agent";
 import type { IntegrationsSystem } from "@jarvis/integrations";
 
+/** Parse a due string; date-only ("YYYY-MM-DD") becomes LOCAL midnight so
+ * day comparisons happen in the user's timezone (same guard as the
+ * dashboard's lib/dates.ts isOverdue). */
+function parseDueLocal(due: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return new Date(due);
+}
+
 // ── todo_add ──────────────────────────────────────────────────────────────────
 
 const TodoAddSchema = z.object({
@@ -81,11 +90,14 @@ export function makeTodoListTool(
       if (filter === "today") {
         // Open todos due no later than the end of the current local day
         // (includes already-overdue items — they're still "for today").
+        // Date-only due strings ("YYYY-MM-DD") must NOT go through
+        // new Date(str): that parses as UTC midnight, which in negative-UTC
+        // timezones makes TOMORROW's todos <= local end-of-today.
         const endOfToday = new Date();
         endOfToday.setHours(23, 59, 59, 999);
         return integrations.todos
           .listTodos({ status: "open" })
-          .filter((t) => t.due != null && new Date(t.due) <= endOfToday);
+          .filter((t) => t.due != null && parseDueLocal(t.due) <= endOfToday);
       }
 
       const status =
