@@ -16,6 +16,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Scheduler } from "../src/proactive/scheduler.js";
+import { ApprovalService } from "../src/safety/approval.js";
+import { AuditLog } from "../src/safety/audit.js";
+import { Checkpointer } from "../src/core/checkpointer.js";
 import {
   FakeLlm,
   FakeSearchTool,
@@ -23,10 +26,25 @@ import {
   makeAutoApproveSink,
   FixedClock,
 } from "../src/testing/fakes.js";
-import type { ScheduledJob, TriggerContext, JobResult } from "../src/types.js";
+import type {
+  ScheduledJob,
+  TriggerContext,
+  JobResult,
+  ApprovalSink,
+  Clock,
+} from "../src/types.js";
 
 function makeTempDir() {
   return mkdtempSync(join(tmpdir(), "sched-test-"));
+}
+
+/** Shared safety/persistence instances, as createAgentSystem would inject. */
+function makeSchedulerDeps(dataDir: string, clock: Clock, sink: ApprovalSink) {
+  return {
+    auditLog: new AuditLog(dataDir, clock),
+    approvalService: new ApprovalService(sink, clock),
+    checkpointer: new Checkpointer(dataDir),
+  };
 }
 
 function makeFakeJobResult(summary = "done"): JobResult {
@@ -52,7 +70,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const job: ScheduledJob = {
@@ -102,7 +120,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const job: ScheduledJob = {
@@ -162,7 +180,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
       parseCronNext,
     });
 
@@ -219,7 +237,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const job: ScheduledJob = {
@@ -276,7 +294,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const job: ScheduledJob = {
@@ -327,7 +345,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const trigger = scheduler.addTrigger({
@@ -364,7 +382,7 @@ describe("Scheduler", () => {
       clock,
       llm,
       tools,
-      approvalSink: sink,
+      ...makeSchedulerDeps(tmpDir, clock, sink),
     });
 
     const job: ScheduledJob = {

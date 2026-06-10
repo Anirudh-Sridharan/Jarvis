@@ -52,6 +52,48 @@ describe("embedding pipeline - embeddings persisted", () => {
     expect(row!.embed_state).toBe("done");
   });
 
+  it("persists the immediate-embed vector into the embeddings table", async () => {
+    const { capture, db } = makeSystem();
+
+    const { record } = await capture.captureNote({
+      text: "Embeddings must actually be written, not discarded",
+      noteId: "embed-persist-1",
+    });
+
+    const row = db
+      .prepare(`SELECT node_kind, embedding, dim FROM embeddings WHERE node_id = ?`)
+      .get(record.id) as { node_kind: string; embedding: string; dim: number } | null;
+
+    expect(row).not.toBeNull();
+    expect(row!.node_kind).toBe("experience");
+    expect(row!.dim).toBe(256); // FakeEmbedder dimension
+    const vec = JSON.parse(row!.embedding) as number[];
+    expect(vec).toHaveLength(256);
+  });
+
+  it("leaves embed_state pending when the embedder returns no vector", async () => {
+    const { db } = makeSystem();
+    const emptyEmbedder = { embed: async (_t: string[]) => [] as number[][] };
+    const { MemoryStore } = await import("../src/store/memoryStore.js");
+    const { CaptureService } = await import("../src/capture/capture.js");
+    const store = new MemoryStore(db, emptyEmbedder);
+    const capture = new CaptureService(store, emptyEmbedder);
+
+    const { record } = await capture.captureNote({
+      text: "No vector came back for this one",
+      noteId: "embed-empty-1",
+    });
+
+    const row = db
+      .prepare(`SELECT embed_state FROM experience_records WHERE id = ?`)
+      .get(record.id) as { embed_state: string };
+    expect(row.embed_state).toBe("pending"); // NOT falsely marked done
+    const embRow = db
+      .prepare(`SELECT node_id FROM embeddings WHERE node_id = ?`)
+      .get(record.id);
+    expect(embRow).toBeUndefined();
+  });
+
   it("flags long notes as deferred (embed_state = deferred)", async () => {
     const { capture, db } = makeSystem();
 
@@ -161,6 +203,26 @@ describe("embedding pipeline - deferred embed batch in consolidation", () => {
       .prepare(`SELECT embed_state FROM experience_records WHERE id = ?`)
       .get(record.id) as { embed_state: string };
     expect(after.embed_state).toBe("done");
+  });
+
+  it("persists the deferred vector into the embeddings table and counts it", async () => {
+    const { capture, consolidation, db } = makeSystem();
+
+    const longText = "C".repeat(2049);
+    const { record } = await capture.captureNote({
+      text: longText,
+      noteId: "deferred-persist-1",
+    });
+
+    const result = await consolidation.run("manual");
+    expect(result.run.counts.embeddingsWritten).toBe(1);
+
+    const row = db
+      .prepare(`SELECT node_kind, dim FROM embeddings WHERE node_id = ?`)
+      .get(record.id) as { node_kind: string; dim: number } | null;
+    expect(row).not.toBeNull();
+    expect(row!.node_kind).toBe("experience");
+    expect(row!.dim).toBe(256);
   });
 
   it("non-deferred records keep embed_state = done after consolidation", async () => {

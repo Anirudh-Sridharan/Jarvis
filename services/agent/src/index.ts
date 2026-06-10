@@ -76,7 +76,7 @@ export {
   MAX_VALIDATION_RETRIES,
 } from "./core/harness.js";
 export type { HarnessResult, HarnessSuccess, HarnessAbort } from "./core/harness.js";
-export { runReactLoop, scanForInjection, MAX_STEPS } from "./core/reactLoop.js";
+export { runReactLoop, MAX_STEPS } from "./core/reactLoop.js";
 export { producePlan, parsePlan, replan, isTrivialGoal } from "./core/planner.js";
 
 // ── Safety exports ────────────────────────────────────────────────────────────
@@ -100,8 +100,12 @@ export {
 
 // ── Skills exports ────────────────────────────────────────────────────────────
 
-export { SkillRegistry } from "./skills/registry.js";
-export type { Skill, SkillCtx } from "./skills/registry.js";
+export {
+  SkillRegistry,
+  ToolNotAllowedError,
+  ToolApprovalDeniedError,
+} from "./skills/registry.js";
+export type { Skill, SkillCtx, ToolCallOpts } from "./skills/registry.js";
 export { emailTriageSkill } from "./skills/emailTriage.js";
 export { calendarSkill } from "./skills/calendarSkill.js";
 export { webResearchSkill, verifyCitations } from "./skills/webResearch.js";
@@ -160,7 +164,7 @@ export interface AgentSystem {
 export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
   const { llm, tools, clock, dataDir, approvalSink } = config;
 
-  const auditLog = new AuditLog(dataDir);
+  const auditLog = new AuditLog(dataDir, clock);
   const approvalService = new ApprovalService(approvalSink, clock);
   const checkpointer = new Checkpointer(dataDir);
 
@@ -180,12 +184,18 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
   skills.register(webResearchSkill);
   skills.register(remindersSkill);
 
+  // The Scheduler shares the SAME auditLog/approvalService/checkpointer as the
+  // rest of the system: separate instances over the same SQLite files corrupt
+  // the cached audit chain tail (PRIMARY KEY conflicts) and create approval
+  // requests that system.approvals can never see.
   const triggers = new Scheduler({
     dataDir,
     clock,
     llm,
     tools,
-    approvalSink,
+    auditLog,
+    approvalService,
+    checkpointer,
     eventBus: config.eventBus,
     parseCronNext: config.parseCronNext,
   });

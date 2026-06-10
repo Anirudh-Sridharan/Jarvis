@@ -9,8 +9,8 @@
  */
 
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
 import type { Skill, SkillCtx } from "./registry.js";
+import { ToolApprovalDeniedError } from "./registry.js";
 import type { SkillResult, SkillAction } from "../types.js";
 import { registerToolMeta } from "../safety/policy.js";
 
@@ -130,8 +130,8 @@ export const calendarSkill: Skill = {
       };
     }
 
-    // Write operations → require approval
-    const actionId = randomUUID();
+    // Write operations → ctx.tool gates them structurally (calendar_write
+    // risk class → require_approval; delete → double-confirm metadata).
     const toolName =
       args.action === "schedule"
         ? "calendar_create_event"
@@ -139,75 +139,35 @@ export const calendarSkill: Skill = {
           ? "calendar_update_event"
           : "calendar_delete_event";
 
-    const proposedAction = {
-      id: actionId,
-      runId: actionId,
-      tool: toolName,
-      args: args as Record<string, unknown>,
-      reasoning: `Calendar ${args.action} requested`,
-      provenance: {
-        derivedFromExternal: false,
-        sources: [],
-        injectionFlags: [],
-      },
-      proposedAt: ctx.clock.isoNow(),
-    };
-
-    const { decision, requestId } =
-      await ctx.approvalService.evaluateAndMaybeRequest(
-        proposedAction,
-        ctx.auditLog,
-        ctx.clock,
-      );
-
-    if (decision.outcome === "block") {
-      return {
-        skillId: "calendar.manage",
-        status: "skipped",
-        summary: `Calendar ${args.action} blocked: ${decision.reasons.join("; ")}`,
-        artifacts: [],
-        actions: [
-          {
-            type: `calendar.${args.action}`,
-            status: "skipped",
-            reason: "blocked",
-          },
-        ],
-        citations: [],
-      };
-    }
-
-    if (decision.outcome === "require_approval" && requestId) {
-      const approval = await ctx.approvalService.waitForDecision(
-        actionId,
-        ctx.clock,
-        5000,
-      );
-
-      if (!approval || approval.status !== "approved") {
+    let result: unknown;
+    try {
+      result = await ctx.tool(toolName, args, {
+        reasoning: `Calendar ${args.action} requested`,
+      });
+    } catch (err) {
+      if (err instanceof ToolApprovalDeniedError) {
         const actions: SkillAction[] = [
           {
             type: `calendar.${args.action}`,
             status: "skipped",
-            reason: approval?.status ?? "timeout",
+            reason:
+              err.outcome === "blocked"
+                ? "blocked"
+                : err.outcome,
           },
         ];
         return {
           skillId: "calendar.manage",
           status: "skipped",
-          summary: `Calendar ${args.action} not approved`,
+          summary:
+            err.outcome === "blocked"
+              ? `Calendar ${args.action} blocked: ${err.reasons.join("; ")}`
+              : `Calendar ${args.action} not approved`,
           artifacts: [],
           actions,
           citations: [],
         };
       }
-    }
-
-    // Execute the calendar write
-    let result: unknown;
-    try {
-      result = await ctx.tool(toolName, args);
-    } catch (err) {
       return {
         skillId: "calendar.manage",
         status: "error",

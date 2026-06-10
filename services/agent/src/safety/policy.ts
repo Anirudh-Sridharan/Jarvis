@@ -21,8 +21,9 @@ import type {
   PolicyDecision,
   RiskClass,
   Outcome,
+  Clock,
 } from "../types.js";
-import { scanForInjectionMarkers } from "./injectionGuards.js";
+import { scanForInjectionMarkers, severityForFlags } from "./injectionGuards.js";
 
 // ── Tool metadata (registered at startup) ────────────────────────────────────
 
@@ -169,9 +170,11 @@ function extractBatchItems(args: Record<string, unknown>): number {
 export function classifyAndDecide(
   action: ProposedAction,
   toolMeta?: ToolMeta,
+  clock?: Clock,
 ): PolicyDecision {
   const reasons: string[] = [];
   const triggeredRules: string[] = [];
+  const decidedAt = clock ? clock.isoNow() : new Date().toISOString();
 
   // 1. Determine risk class (unknown capability → outward_comm as fail-safe)
   const riskClass: RiskClass = toolMeta?.sideEffects ?? "outward_comm";
@@ -180,9 +183,17 @@ export function classifyAndDecide(
     triggeredRules.push("unknown_capability");
   }
 
-  // 2. Injection / confused-deputy scan — overrides everything
+  // 2. Injection / confused-deputy scan — overrides everything.
+  //    Severity policy (see injectionGuards.severityForFlags):
+  //      - hard-block flags (model control tokens, hidden unicode) → block
+  //      - soft flags from external/untrusted content → require_approval
+  //      - soft flags NOT from external content → block (suspicious agent state)
   const injectionFlags = scanForInjectionMarkers(action);
-  if (injectionFlags.length > 0) {
+  const injectionSeverity = severityForFlags(
+    injectionFlags,
+    action.provenance.derivedFromExternal,
+  );
+  if (injectionSeverity === "block") {
     triggeredRules.push("injection_marker");
     return {
       actionId: action.id,
@@ -191,8 +202,14 @@ export function classifyAndDecide(
       reasons: ["injection markers detected: " + injectionFlags.join(", ")],
       triggeredRules,
       requiresDoubleConfirm: false,
-      decidedAt: new Date().toISOString(),
+      decidedAt,
     };
+  }
+  if (injectionSeverity === "require_approval") {
+    reasons.push(
+      "injection markers in external content: " + injectionFlags.join(", "),
+    );
+    triggeredRules.push("injection_marker");
   }
 
   // 3. Base outcome from decision table
@@ -205,6 +222,11 @@ export function classifyAndDecide(
     outcome = "require_approval";
     reasons.push(...dynamic.reasons);
     triggeredRules.push(...dynamic.rules);
+  }
+
+  // 4b. Injection escalation (can only RAISE friction)
+  if (injectionSeverity === "require_approval") {
+    outcome = "require_approval";
   }
 
   // 5. If base class requires approval and nothing overrides, require it
@@ -229,6 +251,6 @@ export function classifyAndDecide(
     reasons,
     triggeredRules,
     requiresDoubleConfirm,
-    decidedAt: new Date().toISOString(),
+    decidedAt,
   };
 }

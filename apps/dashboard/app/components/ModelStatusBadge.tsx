@@ -30,11 +30,11 @@ interface StatusResponse {
 }
 
 const LABELS: Record<ModelState, string> = {
-  unloaded: "model idle",
+  unloaded: "standby",
   loading: "waking up…",
-  ready: "ready",
-  generating: "thinking…",
-  error: "model error",
+  ready: "online",
+  generating: "processing…",
+  error: "model fault",
   unreachable: "core offline",
 };
 

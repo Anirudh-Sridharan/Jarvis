@@ -359,6 +359,42 @@ describe("ProfileService - forgetEntity", () => {
   });
 });
 
+describe("ProfileService - correctFact is failure-safe (insert before invalidate)", () => {
+  it("keeps the original fact live when inserting the replacement fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jarvis-profile-failsafe-"));
+    const db = openDatabase(dir);
+    // Embedder that fails — simulates the network embed call going down
+    const throwingEmbedder = {
+      embed: async (_texts: string[]): Promise<number[][]> => {
+        throw new Error("embedder down");
+      },
+    };
+    const store = new MemoryStore(db, throwingEmbedder);
+
+    // Seed with an explicit embedding so the seed itself doesn't need the embedder
+    const fact = await store.upsertFact({
+      subjectId: "self",
+      predicate: "prefers",
+      objectLiteral: "Vim",
+      text: "prefers: Vim",
+      validFrom: "2026-01-01T00:00:00Z",
+      embedding: [0.1, 0.2, 0.3],
+      provenance: { source: "chat", sourceId: "seed-1", confidence: 0.9 },
+    });
+
+    const svc = new ProfileService(store);
+    await expect(
+      svc.correctFact({ factId: fact.id, correction: "Emacs" }),
+    ).rejects.toThrow();
+
+    // The user's fact must NOT be gone: still live, no invalidation recorded
+    const original = store.getFactById(fact.id)!;
+    expect(original.validTo).toBeNull();
+    expect(original.invalidatedAt).toBeNull();
+    expect(original.invalidatedBy).toBeNull();
+  });
+});
+
 describe("ProfileService - ProfileFact shape", () => {
   it("each ProfileFact has id, value, confidence, source, updatedAt", async () => {
     const { store } = makeStore();

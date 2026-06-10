@@ -74,7 +74,7 @@ export default async function WorkPage() {
                 label="Daily Commits"
                 unit={commitsEnv.data.unit}
                 kind="bar"
-                color="#5eead4"
+                color="#60a5fa"
                 downsampled={commitsEnv.data.downsampled}
               />
             </div>
@@ -96,7 +96,7 @@ export default async function WorkPage() {
                 label="PRs Merged"
                 unit={prsEnv.data.unit}
                 kind="bar"
-                color="#4ade80"
+                color="#3b82f6"
                 downsampled={prsEnv.data.downsampled}
               />
             </div>

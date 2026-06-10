@@ -117,7 +117,12 @@ export class InferenceGateway {
 
     // --- Lifecycle gate (local only) -----------------------------------------
     if (target === "local") {
-      yield { type: "status", state: "loading" }; // surface "waking up…"
+      // Only surface "waking up…" when the model actually has to load —
+      // emitting it unconditionally makes the CLI print it on every turn.
+      const mmState = this.modelManager.getState();
+      if (mmState !== "ready" && mmState !== "generating") {
+        yield { type: "status", state: "loading" };
+      }
       try {
         await this.modelManager.ensureReady(entry.id, entry.modelRef);
         this.modelManager.setFallbackActive(false);

@@ -86,10 +86,10 @@ export default async function HealthPage() {
       </div>
 
       <div className="chart-grid">
-        <MetricSection envelope={sleepEnv} label="Sleep Duration" kind="bar" color="#5eead4" />
-        <MetricSection envelope={recoveryEnv} label="Recovery Score" kind="line" color="#4ade80" />
-        <MetricSection envelope={hrvEnv} label="HRV" kind="line" color="#a78bfa" />
-        <MetricSection envelope={rhrEnv} label="Resting Heart Rate" kind="line" color="#fb923c" />
+        <MetricSection envelope={sleepEnv} label="Sleep Duration" kind="bar" color="#60a5fa" />
+        <MetricSection envelope={recoveryEnv} label="Recovery Score" kind="line" color="#3b82f6" />
+        <MetricSection envelope={hrvEnv} label="HRV" kind="line" color="#93c5fd" />
+        <MetricSection envelope={rhrEnv} label="Resting Heart Rate" kind="line" color="#38bdf8" />
       </div>
     </div>
   );

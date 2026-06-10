@@ -24,9 +24,9 @@ import type {
   Clock,
 } from "../types.js";
 import { validateAndRetry, isAborted } from "./harness.js";
-import { classifyAndDecide } from "../safety/policy.js";
 import { ApprovalService } from "../safety/approval.js";
 import { AuditLog } from "../safety/audit.js";
+import { scanToolOutput } from "../safety/injectionGuards.js";
 
 export const MAX_STEPS = 25;
 
@@ -36,6 +36,8 @@ export interface ReactLoopOptions {
   approvalService: ApprovalService;
   auditLog: AuditLog;
   clock: Clock;
+  /** The actual agent run id — used for approval/audit records. */
+  runId: string;
   maxSteps?: number;
 }
 
@@ -55,6 +57,7 @@ export async function runReactLoop(
     approvalService,
     auditLog,
     clock,
+    runId,
     maxSteps = MAX_STEPS,
   } = opts;
 
@@ -115,16 +118,20 @@ export async function runReactLoop(
     // ── APPROVAL GATE ────────────────────────────────────────────────────────
     if (!tool.readOnly) {
       const actionId = randomUUID();
+      // Real provenance: if any earlier tool output contained injection
+      // markers, this action is tainted — the policy's injection/taint
+      // escalation (require_approval or block) must be able to fire.
+      const taintFlags = state.taint?.flags ?? [];
       const action = {
         id: actionId,
-        runId: state.goal, // simplified: use goal as runId in loop context
+        runId,
         tool: toolName,
         args: args as Record<string, unknown>,
         reasoning: stepDescription,
         provenance: {
-          derivedFromExternal: false,
-          sources: [],
-          injectionFlags: [],
+          derivedFromExternal: taintFlags.length > 0,
+          sources: state.taint?.sources ?? [],
+          injectionFlags: taintFlags,
         },
         proposedAt: clock.isoNow(),
       };
@@ -196,9 +203,17 @@ export async function runReactLoop(
       const result = await tool.run(args);
       const latencyMs = clock.now() - execStart;
 
-      // Basic injection scan on the result before feeding back to loop
+      // Injection scan on the result before feeding back to the loop.
+      // Any flags taint the rest of the run: subsequent ProposedActions carry
+      // them in provenance so the policy escalates/blocks (see APPROVAL GATE).
       const resultStr = JSON.stringify(result);
-      const injectionFlags = scanForInjection(resultStr);
+      const injectionFlags = scanToolOutput(resultStr);
+      if (injectionFlags.length > 0) {
+        state.taint = {
+          flags: [...new Set([...(state.taint?.flags ?? []), ...injectionFlags])],
+          sources: [...new Set([...(state.taint?.sources ?? []), toolName])],
+        };
+      }
 
       obs = {
         id: randomUUID(),
@@ -276,40 +291,4 @@ async function reflect(
     `Briefly critique what went wrong and propose a corrected next action (1-2 sentences).`;
 
   return llm.complete({ prompt });
-}
-
-/**
- * Basic deterministic injection marker scan on tool output.
- * Returns matched flag identifiers.
- */
-export function scanForInjection(content: string): string[] {
-  const flags: string[] = [];
-  const lower = content.toLowerCase();
-
-  const patterns: [string, string][] = [
-    ["ignore previous instructions", "ignore-prev-instructions"],
-    ["ignore all previous", "ignore-all-prev"],
-    ["disregard the above", "disregard-above"],
-    ["system:", "system-override"],
-    ["[system]", "system-bracket"],
-    ["<|im_start|>", "hermes-injection"],
-    ["<|system|>", "system-token"],
-    ["act as if", "act-as-if"],
-    ["you are now", "persona-override"],
-    ["forget everything", "forget-everything"],
-    ["new instructions", "new-instructions"],
-  ];
-
-  for (const [pattern, flag] of patterns) {
-    if (lower.includes(pattern)) {
-      flags.push(flag);
-    }
-  }
-
-  // base64-like long strings in what should be simple fields
-  if (/[A-Za-z0-9+/]{100,}={0,2}/.test(content)) {
-    flags.push("base64-blob");
-  }
-
-  return flags;
 }

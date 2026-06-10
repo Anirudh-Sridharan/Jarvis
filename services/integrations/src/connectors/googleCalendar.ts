@@ -33,17 +33,12 @@ import type {
 } from "../types.js";
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
+import { getRefreshConfig } from "../framework/providers.js";
 import type { DatabaseSync } from "node:sqlite";
 import { toJson, fromJson } from "../db/database.js";
 
 const ADAPTER_VERSION = "1";
 const RESYNC_WINDOW_DAYS = 30;
-
-const GCAL_OAUTH_CONFIG = {
-  tokenUrl: "https://oauth2.googleapis.com/token",
-  clientId: process.env["GCAL_CLIENT_ID"] ?? "gcal_client",
-  clientSecret: process.env["GCAL_CLIENT_SECRET"] ?? "gcal_secret",
-};
 
 export const googleCalendarConnector: Connector = {
   id: "gcal",
@@ -56,7 +51,7 @@ export const googleCalendarConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const token = await getAccessToken("gcal", tokenStore, http, GCAL_OAUTH_CONFIG);
+    const token = await getAccessToken("gcal", tokenStore, http, getRefreshConfig("gcal"));
     const calendarId = "primary";
 
     // The cursor stores the syncToken in highWater
@@ -221,19 +216,22 @@ export function normalizeCalendarEvent(
   };
 }
 
-function eventToMetricPoint(event: CalendarEvent): MetricPoint {
-  // Use start date as ts for event count bucketing
+export function eventToMetricPoint(event: CalendarEvent): MetricPoint {
+  // Use start date as ts for event count bucketing.
+  // dims include the event id: two events starting at the same instant must
+  // NOT collide into one point (concurrent meetings would undercount).
   const ts =
     event.start.dateTime ?? `${event.start.date ?? ""}T00:00:00Z`;
   const now = new Date().toISOString();
+  const dims = { calendarId: event.calendarId, eventId: event.id };
   return {
-    id: makeMetricId({ source: "gcal", metric: "calendar.event_count", ts, dims: { calendarId: event.calendarId } }),
+    id: makeMetricId({ source: "gcal", metric: "calendar.event_count", ts, dims }),
     source: "gcal",
     metric: "calendar.event_count",
     value: 1,
     unit: "count",
     ts,
-    dims: { calendarId: event.calendarId },
+    dims,
     ingestedAt: now,
     adapterVersion: ADAPTER_VERSION,
   };
@@ -385,10 +383,16 @@ function rowToEvent(row: Record<string, unknown>): CalendarEvent {
 
 // ── Free/busy + conflict detection ───────────────────────────────────────────
 
-/** Compute busy intervals from a list of confirmed timed events. */
+/**
+ * Compute busy intervals from a list of confirmed timed events.
+ * Events missing either dateTime are skipped — an `end: undefined` interval
+ * would silently break free-slot computation and conflict detection.
+ */
 export function busyIntervals(events: CalendarEvent[]): FreeBusySlot[] {
   return events
-    .filter((e) => !e.allDay && e.status === "confirmed" && e.start.dateTime)
+    .filter(
+      (e) => !e.allDay && e.status === "confirmed" && e.start.dateTime && e.end.dateTime
+    )
     .map((e) => ({
       start: e.start.dateTime!,
       end: e.end.dateTime!,
@@ -397,7 +401,20 @@ export function busyIntervals(events: CalendarEvent[]): FreeBusySlot[] {
     }));
 }
 
-/** Find free time slots in a window given busy intervals. */
+/** An instant carried as both epoch ms (for comparisons) and ISO (for output). */
+interface Instant {
+  ms: number;
+  iso: string;
+}
+
+/**
+ * Find free time slots in a window given busy intervals.
+ *
+ * All comparisons/sorting use epoch ms — lexicographic ISO-string comparison
+ * misorders timestamps with different UTC offsets (e.g. "+05:30" vs "Z").
+ * Free slots are clamped so they never extend past windowEnd or past the
+ * work-hours end (workHoursEnd, UTC, on the window-end day).
+ */
 export function findFreeTime(
   windowStart: string,
   windowEnd: string,
@@ -405,31 +422,44 @@ export function findFreeTime(
   events: CalendarEvent[],
   opts: { workHoursStart?: number; workHoursEnd?: number } = {}
 ): FreeBusySlot[] {
-  const busy = busyIntervals(events).sort((a, b) => a.start.localeCompare(b.start));
-  const free: FreeBusySlot[] = [];
-
   const workStart = opts.workHoursStart ?? 9;
   const workEnd = opts.workHoursEnd ?? 18;
 
-  let cursor = clampToWorkHour(windowStart, workStart);
+  const busy = busyIntervals(events)
+    .map((b) => ({ ...b, startMs: Date.parse(b.start), endMs: Date.parse(b.end) }))
+    .sort((a, b) => a.startMs - b.startMs);
+
+  const free: FreeBusySlot[] = [];
+
+  let cursor: Instant = clampToWorkHour(windowStart, workStart);
+
+  // Effective end: windowEnd, additionally clamped to work-hours end (UTC).
+  const windowEndMs = Date.parse(windowEnd);
+  const workEndCap = new Date(windowEndMs);
+  workEndCap.setUTCHours(workEnd, 0, 0, 0);
+  const effectiveEnd: Instant =
+    workEndCap.getTime() < windowEndMs
+      ? { ms: workEndCap.getTime(), iso: workEndCap.toISOString() }
+      : { ms: windowEndMs, iso: windowEnd };
 
   for (const b of busy) {
-    if (b.start <= cursor) {
-      cursor = b.end > cursor ? b.end : cursor;
+    if (b.startMs <= cursor.ms) {
+      if (b.endMs > cursor.ms) cursor = { ms: b.endMs, iso: b.end };
       continue;
     }
 
-    const slotEnd = earlierOf(b.start, windowEnd);
-    slotEnd; // used below
+    const slotEnd: Instant =
+      b.startMs < effectiveEnd.ms ? { ms: b.startMs, iso: b.start } : effectiveEnd;
 
-    if (msGap(cursor, b.start) >= durationMin * 60_000) {
-      free.push({ start: cursor, end: b.start, state: "free" });
+    if (slotEnd.ms - cursor.ms >= durationMin * 60_000) {
+      free.push({ start: cursor.iso, end: slotEnd.iso, state: "free" });
     }
-    cursor = b.end > cursor ? b.end : cursor;
+    if (b.endMs > cursor.ms) cursor = { ms: b.endMs, iso: b.end };
+    if (cursor.ms >= effectiveEnd.ms) return free;
   }
 
-  if (msGap(cursor, windowEnd) >= durationMin * 60_000) {
-    free.push({ start: cursor, end: windowEnd, state: "free" });
+  if (effectiveEnd.ms - cursor.ms >= durationMin * 60_000) {
+    free.push({ start: cursor.iso, end: effectiveEnd.iso, state: "free" });
   }
 
   return free;
@@ -441,25 +471,20 @@ export function detectConflicts(
   end: string,
   events: CalendarEvent[]
 ): FreeBusySlot[] {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
   return busyIntervals(events).filter(
-    (b) => b.start < end && b.end > start
+    (b) => Date.parse(b.start) < endMs && Date.parse(b.end) > startMs
   );
 }
 
-function clampToWorkHour(isoTs: string, hour: number): string {
+function clampToWorkHour(isoTs: string, hour: number): Instant {
   const d = new Date(isoTs);
   if (d.getUTCHours() < hour) {
     d.setUTCHours(hour, 0, 0, 0);
+    return { ms: d.getTime(), iso: d.toISOString() };
   }
-  return d.toISOString();
-}
-
-function earlierOf(a: string, b: string): string {
-  return a < b ? a : b;
-}
-
-function msGap(start: string, end: string): number {
-  return new Date(end).getTime() - new Date(start).getTime();
+  return { ms: d.getTime(), iso: isoTs };
 }
 
 // ── Write path (stub — TODO(phase5: feature 17)) ─────────────────────────────

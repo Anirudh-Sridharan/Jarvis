@@ -12,8 +12,8 @@
  */
 
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
 import type { Skill, SkillCtx } from "./registry.js";
+import { ToolApprovalDeniedError } from "./registry.js";
 import type { SkillResult, SkillAction, EmailDraft } from "../types.js";
 
 const CATEGORY_ENUM = ["needs_reply", "fyi", "newsletter", "spam"] as const;
@@ -115,83 +115,52 @@ export const emailTriageSkill: Skill = {
         draft: t.draft,
       });
 
-      // ── 5. APPROVAL + SEND (if needs_reply) ──────────────────────────────
+      // ── 5. SEND (if needs_reply) — ctx.tool gates non-readOnly tools
+      //       structurally (policy + approval), so the send is paused for the
+      //       user before execution. Provenance marks the draft as derived
+      //       from external content (the thread) for taint escalation.
       if (t.category === "needs_reply" && t.draft) {
-        const actionId = randomUUID();
-        const proposedAction = {
-          id: actionId,
-          runId: actionId,
-          tool: "send_email",
-          args: {
-            to: t.draft.to,
-            subject: t.draft.subject,
-            body: t.draft.body,
-            threadId: t.draft.threadId,
-          },
-          reasoning: `Reply to thread ${t.threadId}: ${t.summary}`,
-          provenance: {
-            derivedFromExternal: true,
-            sources: [t.threadId],
-            injectionFlags: [],
-          },
-          proposedAt: ctx.clock.isoNow(),
-        };
-
-        const { decision, requestId } =
-          await ctx.approvalService.evaluateAndMaybeRequest(
-            proposedAction,
-            ctx.auditLog,
-            ctx.clock,
-          );
-
-        if (decision.outcome === "block") {
-          actions.push({
-            type: "email.send",
-            status: "skipped",
-            target: t.draft.to.join(","),
-            reason: "blocked: " + decision.reasons.join("; "),
-          });
-          continue;
-        }
-
-        if (decision.outcome === "require_approval" && requestId) {
-          const approval = await ctx.approvalService.waitForDecision(
-            actionId,
-            ctx.clock,
-            5000, // short timeout in skill context
-          );
-
-          if (!approval || approval.status !== "approved") {
-            actions.push({
-              type: "email.send",
-              status: "skipped",
-              target: t.draft.to.join(","),
-              reason: approval?.status ?? "timeout",
-            });
-            continue;
-          }
-        }
-
-        // Send
         try {
-          await ctx.tool("send_email", {
-            to: t.draft.to,
-            subject: t.draft.subject,
-            body: t.draft.body,
-            threadId: t.draft.threadId,
-          });
+          await ctx.tool(
+            "send_email",
+            {
+              to: t.draft.to,
+              subject: t.draft.subject,
+              body: t.draft.body,
+              threadId: t.draft.threadId,
+            },
+            {
+              reasoning: `Reply to thread ${t.threadId}: ${t.summary}`,
+              provenance: {
+                derivedFromExternal: true,
+                sources: [t.threadId],
+              },
+            },
+          );
           actions.push({
             type: "email.send",
             status: "done",
             target: t.draft.to.join(","),
           });
         } catch (err) {
-          actions.push({
-            type: "email.send",
-            status: "failed",
-            target: t.draft.to.join(","),
-            reason: err instanceof Error ? err.message : String(err),
-          });
+          if (err instanceof ToolApprovalDeniedError) {
+            actions.push({
+              type: "email.send",
+              status: "skipped",
+              target: t.draft.to.join(","),
+              reason:
+                err.outcome === "blocked"
+                  ? "blocked: " + err.reasons.join("; ")
+                  : err.outcome,
+            });
+          } else {
+            actions.push({
+              type: "email.send",
+              status: "failed",
+              target: t.draft.to.join(","),
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       }
     }

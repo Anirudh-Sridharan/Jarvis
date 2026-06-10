@@ -15,6 +15,9 @@ import { z } from "zod";
 import type { Tool } from "@jarvis/agent";
 
 const MAX_FETCH_BYTES = 50_000;
+/** Hard cap on bytes pulled off the wire — stop streaming past this, never
+ * buffer a multi-GB (or slow-loris) body before slicing. */
+const MAX_READ_BYTES = 256 * 1024;
 
 // ── web_search ─────────────────────────────────────────────────────────────────
 
@@ -76,24 +79,24 @@ export const webFetchTool: Tool = {
   async run(rawArgs: unknown): Promise<unknown> {
     const args = WebFetchSchema.parse(rawArgs);
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), args.timeout_ms ?? 15_000);
+    // The timeout covers the WHOLE operation — headers AND body read. A server
+    // that returns headers fast then trickles the body (slow-loris) must not
+    // hold the agent loop hostage.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), args.timeout_ms ?? 15_000);
 
-      let response: Response;
-      try {
-        response = await fetch(args.url, {
-          signal: controller.signal,
-          headers: {
-            "User-Agent": "Jarvis/0.1 (personal AI assistant; read-only fetch)",
-            Accept: "text/html,text/plain,application/json",
-          },
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+    try {
+      const response = await fetch(args.url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Jarvis/0.1 (personal AI assistant; read-only fetch)",
+          Accept: "text/html,text/plain,application/json",
+        },
+      });
 
       if (!response.ok) {
+        // Don't read the error body; release the connection.
+        await response.body?.cancel().catch(() => {});
         return {
           ok: false,
           url: args.url,
@@ -103,9 +106,34 @@ export const webFetchTool: Tool = {
       }
 
       const contentType = response.headers.get("content-type") ?? "";
-      const text = await response.text();
-      const truncated = text.length > MAX_FETCH_BYTES;
-      const content = truncated ? text.slice(0, MAX_FETCH_BYTES) + "\n... [truncated]" : text;
+
+      // Stream-read the body up to MAX_READ_BYTES, then stop — never buffer an
+      // arbitrarily large body before slicing.
+      const decoder = new TextDecoder();
+      let text = "";
+      let bytesRead = 0;
+      let capped = false;
+      const body = response.body;
+      if (body) {
+        const reader = body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytesRead += value.byteLength;
+          text += decoder.decode(value, { stream: true });
+          if (bytesRead >= MAX_READ_BYTES) {
+            capped = true;
+            await reader.cancel().catch(() => {});
+            break;
+          }
+        }
+        text += decoder.decode();
+      }
+
+      const truncated = capped || text.length > MAX_FETCH_BYTES;
+      const content = truncated
+        ? text.slice(0, MAX_FETCH_BYTES) + "\n... [truncated]"
+        : text;
 
       return {
         ok: true,
@@ -114,7 +142,7 @@ export const webFetchTool: Tool = {
         contentType,
         content,
         truncated,
-        lengthBytes: text.length,
+        lengthBytes: bytesRead,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -123,6 +151,8 @@ export const webFetchTool: Tool = {
         url: args.url,
         error: message,
       };
+    } finally {
+      clearTimeout(timer);
     }
   },
 };

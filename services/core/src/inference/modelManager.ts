@@ -73,6 +73,11 @@ export class ModelManager {
       .load(modelRef)
       .then(() => {
         this.setState("ready");
+        // A load with no request behind it (e.g. POST /warmup) must still
+        // honor the ~10-min idle-unload invariant — endRequest() will never
+        // run, so arm the timer here. beginRequest() clears it immediately
+        // when a real request follows.
+        if (this.active === 0) this.armIdle();
       })
       .catch((err: unknown) => {
         this.setState("error"); // caller falls back to HF for this request

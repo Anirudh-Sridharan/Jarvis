@@ -109,16 +109,27 @@ async function main(): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "\nYou: " });
   rl.prompt();
 
+  // Guard against typing during a streaming turn: a second concurrent
+  // sendMessage would interleave output (and on a first turn, open two server
+  // conversations before conversationId is set).
+  let inFlight = false;
   rl.on("line", async (line) => {
     const message = line.trim();
     if (!message) {
       rl.prompt();
       return;
     }
+    if (inFlight) {
+      process.stdout.write("\n[busy] still answering — input dropped, wait for the response.\n");
+      return;
+    }
+    inFlight = true;
     try {
       await sendMessage(message);
     } catch (err) {
       console.error(`\n[error] ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      inFlight = false;
     }
     rl.prompt();
   });

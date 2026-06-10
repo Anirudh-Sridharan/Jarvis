@@ -4,15 +4,24 @@
  *   - normalizeWhoopSleep → correct MetricPoints (duration / stages / efficiency)
  *   - PENDING_SCORE records produce no MetricPoints
  *   - Naps excluded from night sleep metrics
+ *   - sync() hits v2 endpoints, follows next_token pagination, advances cursor
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
+  whoopConnector,
   normalizeWhoopRecovery,
   normalizeWhoopSleep,
   normalizeWhoopCycle,
 } from "../src/connectors/whoop.js";
-import { whoopRecoveryFixture, whoopSleepFixture } from "../src/testing/fakes.js";
+import { clearOAuthState } from "../src/framework/oauth.js";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  makeTokens,
+  whoopRecoveryFixture,
+  whoopSleepFixture,
+} from "../src/testing/fakes.js";
 
 describe("normalizeWhoopRecovery", () => {
   it("extracts recovery, hrv, restingHr from SCORED record", () => {
@@ -169,6 +178,28 @@ describe("normalizeWhoopCycle", () => {
     expect(points[0]?.unit).toBe("score");
   });
 
+  it("keeps a legitimate strain of 0 (rest day)", () => {
+    const fixture = {
+      id: 3,
+      start: "2026-06-09T00:00:00Z",
+      score_state: "SCORED" as const,
+      score: { strain: 0 },
+    };
+    const points = normalizeWhoopCycle(fixture);
+    expect(points).toHaveLength(1);
+    expect(points[0]?.value).toBe(0);
+  });
+
+  it("returns no points when strain is missing", () => {
+    const fixture = {
+      id: 4,
+      start: "2026-06-09T00:00:00Z",
+      score_state: "SCORED" as const,
+      score: {},
+    };
+    expect(normalizeWhoopCycle(fixture)).toHaveLength(0);
+  });
+
   it("returns no points for unscorable cycle", () => {
     const fixture = {
       id: 2,
@@ -178,5 +209,105 @@ describe("normalizeWhoopCycle", () => {
     };
     const points = normalizeWhoopCycle(fixture);
     expect(points).toHaveLength(0);
+  });
+});
+
+describe("whoopConnector.sync", () => {
+  let http: FakeHttp;
+  let tokenStore: MemoryTokenStore;
+
+  const emptyPage = { status: 200, headers: {}, body: { records: [], next_token: null } };
+
+  beforeEach(() => {
+    http = new FakeHttp();
+    tokenStore = new MemoryTokenStore();
+    tokenStore.seed("whoop", makeTokens({ expiresAt: Date.now() + 3600_000 }));
+    clearOAuthState();
+  });
+
+  afterEach(() => clearOAuthState());
+
+  it("hits the v2 developer endpoints", async () => {
+    http.add("/developer/v2/recovery", { status: 200, headers: {}, body: whoopRecoveryFixture() });
+    http.add("/developer/v2/activity/sleep", { status: 200, headers: {}, body: whoopSleepFixture() });
+    http.add("/developer/v2/cycle", emptyPage);
+
+    const result = await whoopConnector.sync(null, http, tokenStore);
+
+    expect(http.callCount("/developer/v2/recovery")).toBe(1);
+    expect(http.callCount("/developer/v2/activity/sleep")).toBe(1);
+    expect(http.callCount("/developer/v2/cycle")).toBe(1);
+    expect(http.calls.every((c) => !c.req.url.includes("/developer/v1/"))).toBe(true);
+    expect(result.points.length).toBeGreaterThan(0);
+  });
+
+  it("follows next_token pagination within a collection", async () => {
+    const page1 = {
+      status: 200,
+      headers: {},
+      body: { ...(whoopRecoveryFixture() as object), next_token: "page2" },
+    };
+    const page2 = { status: 200, headers: {}, body: whoopRecoveryFixture() };
+    http.add("/developer/v2/recovery", [page1, page2]);
+    http.add("/developer/v2/activity/sleep", emptyPage);
+    http.add("/developer/v2/cycle", emptyPage);
+
+    const result = await whoopConnector.sync(null, http, tokenStore);
+
+    expect(http.callCount("/developer/v2/recovery")).toBe(2);
+    const secondCall = http.calls.filter((c) => c.req.url.includes("recovery"))[1];
+    expect(secondCall?.req.url).toContain("nextToken=page2");
+    // 4 metric points per recovery record × 2 pages
+    expect(result.points.filter((p) => p.metric === "recovery")).toHaveLength(2);
+  });
+
+  it("advances the cursor to the latest record timestamp", async () => {
+    http.add("/developer/v2/recovery", { status: 200, headers: {}, body: whoopRecoveryFixture() });
+    http.add("/developer/v2/activity/sleep", emptyPage);
+    http.add("/developer/v2/cycle", emptyPage);
+
+    const result = await whoopConnector.sync(null, http, tokenStore);
+    expect(result.nextCursor).toBe("2026-06-09T07:00:00Z"); // fixture created_at
+  });
+
+  it("throws when a collection returns non-200 (cursor must not advance past a failed collection)", async () => {
+    // The shared cursor advances by the max ts across ALL collections, so a
+    // silently-skipped 429 collection would permanently lose its window.
+    // The sync must throw; the Scheduler records an error run and keeps the cursor.
+    http.add("/developer/v2/recovery", { status: 429, headers: {}, body: {} });
+    http.add("/developer/v2/activity/sleep", { status: 200, headers: {}, body: whoopSleepFixture() });
+    http.add("/developer/v2/cycle", emptyPage);
+
+    await expect(whoopConnector.sync(null, http, tokenStore)).rejects.toThrow(
+      /recovery sync failed: HTTP 429/
+    );
+  });
+
+  it("throws on a mid-collection failure too (500 on sleep)", async () => {
+    http.add("/developer/v2/recovery", emptyPage);
+    http.add("/developer/v2/activity/sleep", { status: 500, headers: {}, body: {} });
+    http.add("/developer/v2/cycle", emptyPage);
+
+    await expect(whoopConnector.sync(null, http, tokenStore)).rejects.toThrow(
+      /activity\/sleep sync failed: HTTP 500/
+    );
+  });
+
+  it("passes the incoming cursor as the start window", async () => {
+    http.add("/developer/v2/recovery", emptyPage);
+    http.add("/developer/v2/activity/sleep", emptyPage);
+    http.add("/developer/v2/cycle", emptyPage);
+
+    const cursor = {
+      source: "whoop" as const,
+      stream: "whoop.sync",
+      highWater: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-08T00:00:00Z",
+    };
+    const result = await whoopConnector.sync(cursor, http, tokenStore);
+
+    const firstCall = http.calls[0];
+    expect(firstCall?.req.url).toContain(encodeURIComponent("2026-06-01T00:00:00.000Z"));
+    expect(result.nextCursor).toBeNull(); // nothing new → cursor unchanged
   });
 });

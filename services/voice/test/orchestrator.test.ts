@@ -184,7 +184,7 @@ describe("VoiceOrchestrator — full happy-path turn", () => {
 });
 
 describe("VoiceOrchestrator — barge-in mid-speech", () => {
-  it("barge-in during speaking cancels TTS and transitions to listening", async () => {
+  it("barge-in during speaking cancels TTS mid-speech and transitions to listening", async () => {
     const wake = new FakeWakeWordSource();
     const stt = new FakeSttEngine();
     const tts = new FakeTtsEngine();
@@ -218,14 +218,33 @@ describe("VoiceOrchestrator — barge-in mid-speech", () => {
     orchestrator.start();
     wake.fire();
 
-    // Wait for at least one barge_in or turn_complete event
-    await new Promise<void>((r) => setTimeout(r, 800));
-    await orchestrator.stop();
+    // The barge-in MUST fire: the STT event loop keeps consuming events while
+    // the turn is in flight, so the trailing speech_start is evaluated during
+    // thinking/speaking.
+    const bargeEvent = await waitForEvent(events, (e) => e.type === "barge_in");
+    expect(bargeEvent.type).toBe("barge_in");
 
-    // TTS cancel should have been called if barge-in fired during speaking
-    // (may or may not have happened depending on timing — check state only)
-    // The important thing is no crash and the orchestrator reached a valid state
-    expect(["idle", "listening", "waking"]).toContain(orchestrator.state);
+    // Let the cancelled turn pipeline unwind
+    await new Promise<void>((r) => setTimeout(r, 100));
+
+    // TTS was actually cancelled mid-speech
+    expect(tts.cancelCount).toBeGreaterThanOrEqual(1);
+    expect(tts.calls.length).toBeGreaterThanOrEqual(1);
+    expect(tts.calls[0]?.wasCancelled).toBe(true);
+
+    // The reply was cut off — the tail of the scripted reply was never spoken
+    const spoken = tts.calls.flatMap((c) => c.sentences).join(" ");
+    expect(spoken).not.toContain("dragon");
+
+    // Barge-in transitions back to listening; the interrupted turn is
+    // reported with bargedIn = true.
+    expect(orchestrator.state).toBe("listening");
+    const turns = events.filter((e) => e.type === "turn_complete");
+    for (const t of turns) {
+      if (t.type === "turn_complete") expect(t.turn.bargedIn).toBe(true);
+    }
+
+    await orchestrator.stop();
   });
 });
 
@@ -259,7 +278,12 @@ describe("VoiceOrchestrator — duplicate wake deduplication", () => {
 });
 
 describe("VoiceOrchestrator — warmup failure", () => {
-  it("emits error event and recovers on warmup failure", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("enters error state, does NOT start listening, and recovers to idle", async () => {
+    vi.useFakeTimers();
     const wake = new FakeWakeWordSource();
     const stt = new FakeSttEngine();
     const tts = new FakeTtsEngine();
@@ -274,19 +298,36 @@ describe("VoiceOrchestrator — warmup failure", () => {
     );
 
     const errors: OrchestratorEvent[] = [];
+    const stateChanges: string[] = [];
     orchestrator.on((e) => {
       if (e.type === "error") errors.push(e);
+      if (e.type === "state_change") stateChanges.push(e.state);
     });
     orchestrator.start();
     wake.fire();
 
-    await new Promise<void>((r) => setTimeout(r, 500));
-    await orchestrator.stop();
+    // Let the warmup rejection propagate
+    await vi.advanceTimersByTimeAsync(10);
 
     expect(errors.length).toBeGreaterThanOrEqual(1);
     if (errors[0]?.type === "error") {
       expect(errors[0].message).toContain("Warmup failed");
     }
+
+    // Machine took the error path — and did NOT proceed to listening
+    expect(stateChanges).toContain("error");
+    expect(stateChanges).not.toContain("listening");
+    expect(orchestrator.state).toBe("error");
+
+    // The STT loop was never started
+    expect(stt.streamCount).toBe(0);
+    expect(stt.isStreaming).toBe(false);
+
+    // Scheduled RECOVER returns the machine to idle
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(orchestrator.state).toBe("idle");
+
+    await orchestrator.stop();
   });
 });
 
@@ -314,6 +355,156 @@ describe("VoiceOrchestrator — stop cleanup", () => {
     orchestrator.start();
     await orchestrator.stop();
     // No crash = pass
+  });
+});
+
+describe("VoiceOrchestrator — silence-timeout end-of-turn", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("completes the turn when the engine goes quiet after a below-threshold speech_end", async () => {
+    vi.useFakeTimers();
+    const wake = new FakeWakeWordSource();
+    const stt = new FakeSttEngine();
+    const tts = new FakeTtsEngine();
+    const core = new FakeCoreClient();
+
+    // speech_end reports 100ms of silence — BELOW the 800ms threshold — and
+    // then the engine emits nothing more (stream held open, like a real VAD
+    // that stays quiet). Without the silence timer the turn would never end.
+    stt.holdOpenAfterScript = true;
+    stt.setScript([
+      { type: "speech_start" },
+      { type: "partial", text: "Hello there.", stability: 0.8 },
+      { type: "final", text: "Hello there.", confidence: 0.95 },
+      { type: "speech_end", silenceMs: 100 },
+    ]);
+    core.tokenScript = ["Hi!"];
+
+    const orchestrator = createVoiceOrchestrator(
+      { wakeWord: wake, stt, tts, core },
+      { minCharsPerChunk: 1, silenceThresholdMs: 800, forceEndMs: 2000 },
+    );
+
+    const events: OrchestratorEvent[] = [];
+    orchestrator.on((e) => events.push(e));
+    orchestrator.start();
+    wake.fire();
+
+    // Script consumed; silence below threshold — no turn yet
+    await vi.advanceTimersByTimeAsync(50);
+    expect(events.some((e) => e.type === "turn_complete")).toBe(false);
+    expect(tts.calls.length).toBe(0);
+
+    // The silence threshold elapses with no further STT events — the armed
+    // timer re-evaluates end-of-turn and the turn completes.
+    await vi.advanceTimersByTimeAsync(900);
+    expect(events.some((e) => e.type === "turn_complete")).toBe(true);
+    expect(tts.lastSpokenSentences.join(" ")).toContain("Hi!");
+
+    await orchestrator.stop();
+  });
+
+  it("a new speech_start disarms the silence timer (no spurious turn)", async () => {
+    vi.useFakeTimers();
+    const wake = new FakeWakeWordSource();
+    const stt = new FakeSttEngine();
+    const tts = new FakeTtsEngine();
+    const core = new FakeCoreClient();
+
+    // speech_end below threshold, then the user resumes speaking — the armed
+    // timer must be cleared so the half-finished utterance is not turned.
+    stt.holdOpenAfterScript = true;
+    stt.setScript([
+      { type: "speech_start" },
+      { type: "partial", text: "Hello there.", stability: 0.8 },
+      { type: "final", text: "Hello there.", confidence: 0.95 },
+      { type: "speech_end", silenceMs: 100 },
+      { type: "speech_start" }, // user resumes — disarm the timer
+    ]);
+    core.tokenScript = ["Hi!"];
+
+    const orchestrator = createVoiceOrchestrator(
+      { wakeWord: wake, stt, tts, core },
+      { minCharsPerChunk: 1, silenceThresholdMs: 800, forceEndMs: 2000 },
+    );
+
+    const events: OrchestratorEvent[] = [];
+    orchestrator.on((e) => events.push(e));
+    orchestrator.start();
+    wake.fire();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(events.some((e) => e.type === "turn_complete")).toBe(false);
+    expect(tts.calls.length).toBe(0);
+
+    await orchestrator.stop();
+  });
+});
+
+describe("VoiceOrchestrator — error recovery tears down the STT loop", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("after a turn error and recovery, a new wake runs exactly ONE stream and only the new turn executes", async () => {
+    vi.useFakeTimers();
+    const wake = new FakeWakeWordSource();
+    const stt = new FakeSttEngine();
+    const tts = new FakeTtsEngine();
+    const core = new FakeCoreClient();
+
+    // First session: the LLM stream errors immediately → error path.
+    stt.holdOpenAfterScript = true; // a real stream stays open unless torn down
+    stt.setScript(speechScript("Break it."));
+    core.tokenScript = ["never"];
+    core.chatErrorAfterTokens = 0;
+
+    const orchestrator = createVoiceOrchestrator(
+      { wakeWord: wake, stt, tts, core },
+      { minCharsPerChunk: 1, silenceThresholdMs: 100, forceEndMs: 500 },
+    );
+
+    const events: OrchestratorEvent[] = [];
+    orchestrator.on((e) => events.push(e));
+    orchestrator.start();
+    wake.fire({ id: "session-err" });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      events.some((e) => e.type === "error" && e.message.includes("Turn error")),
+    ).toBe(true);
+
+    // The error path tore down the STT stream — no orphaned loop survives
+    expect(stt.activeStreams).toBe(0);
+
+    // RECOVER returns the machine to idle
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(orchestrator.state).toBe("idle");
+
+    // Second session: healthy LLM, fresh script
+    core.chatErrorAfterTokens = null;
+    core.tokenScript = ["All good."];
+    stt.setScript(speechScript("Again."));
+    wake.fire({ id: "session-ok" });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    // Exactly one stream was ever active at a time — no second concurrent
+    // loop from the first (errored) session.
+    expect(stt.streamCount).toBe(2);
+    expect(stt.maxConcurrentStreams).toBe(1);
+
+    // Only the new session's turn executed
+    const turns = events.filter((e) => e.type === "turn_complete");
+    expect(turns).toHaveLength(1);
+    if (turns[0]?.type === "turn_complete") {
+      expect(turns[0].turn.userText).toBe("Again.");
+      expect(turns[0].turn.sessionId).toBe("session-ok");
+    }
+
+    await orchestrator.stop();
   });
 });
 

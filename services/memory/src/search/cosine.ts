@@ -8,12 +8,14 @@
  * ~50k entries or d > 512.
  */
 
-/** Cosine similarity between two equal-length vectors. Range [-1, 1]. */
+/** Cosine similarity between two equal-length vectors. Range [-1, 1].
+ *  Returns 0 on dimension mismatch (instead of silently truncating). */
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  const len = Math.min(a.length, b.length);
+  const len = a.length;
   for (let i = 0; i < len; i++) {
     const ai = a[i] ?? 0;
     const bi = b[i] ?? 0;

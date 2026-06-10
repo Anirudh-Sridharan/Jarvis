@@ -179,6 +179,39 @@ describe("sentenceChunker — abbreviation edge cases", () => {
   });
 });
 
+describe("sentenceChunker — mid-stream end-of-buffer is not a sentence boundary", () => {
+  it("does not chunk at a decimal point split across pushes", async () => {
+    // "Pi is 3" + "." + "14 is wrong. " — the buffer transiently ends in "."
+    // but the next token continues the number. Must NOT emit "Pi is 3.".
+    const tokens = ["Pi is 3", ".", "14 is wrong. ", "Trust me."];
+    const sentences = await collectSentences(tokens, { minChars: 1 });
+    expect(sentences).not.toContain("Pi is 3.");
+    expect(sentences[0]).toBe("Pi is 3.14 is wrong.");
+    expect(sentences[sentences.length - 1]).toBe("Trust me.");
+  });
+
+  it("still chunks promptly when punctuation is followed by whitespace", async () => {
+    const order: string[] = [];
+    async function* tokens() {
+      for (const t of ["Done. ", "Next part"]) {
+        order.push(`token:${t.trim()}`);
+        yield t;
+      }
+    }
+    for await (const s of chunkSentences(tokens(), { minChars: 1 })) {
+      order.push(`sentence:${s}`);
+    }
+    // "Done." flushes as soon as the ". " arrives — before the next token
+    expect(order[0]).toBe("token:Done.");
+    expect(order[1]).toBe("sentence:Done.");
+  });
+
+  it("still emits a trailing sentence ending in punctuation at end-of-stream", async () => {
+    const sentences = await collectSentences(["Hello world", "."], { minChars: 1 });
+    expect(sentences).toEqual(["Hello world."]);
+  });
+});
+
 describe("sentenceChunker — streaming interface", () => {
   it("yields sentences lazily before the full stream is consumed", async () => {
     const yielded: string[] = [];

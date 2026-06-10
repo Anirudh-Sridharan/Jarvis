@@ -67,6 +67,18 @@ export class FakeSttEngine implements SttEngine {
   private stopped = false;
   private _streaming = false;
   private resolve: (() => void) | null = null;
+  /** Number of startStream() iterations currently active. */
+  public activeStreams = 0;
+  /** Highest number of concurrently active streams ever observed. */
+  public maxConcurrentStreams = 0;
+  /** Total number of startStream() calls. */
+  public streamCount = 0;
+  /**
+   * When true, the stream stays open after the script is exhausted until
+   * stop() is called — like a real engine that keeps listening through
+   * silence. Lets tests exercise silence-timeout paths.
+   */
+  public holdOpenAfterScript = false;
 
   /** Set the script of events to emit when startStream() is called. */
   setScript(events: SttEvent[]): void {
@@ -80,19 +92,35 @@ export class FakeSttEngine implements SttEngine {
   async *startStream(): AsyncGenerator<SttEvent> {
     this._streaming = true;
     this.stopped = false;
-    for (const event of this.script) {
-      if (this.stopped) break;
-      yield event;
-      // Tiny yield to allow event loop to process between events
-      await new Promise<void>((r) => setTimeout(r, 0));
+    this.streamCount++;
+    this.activeStreams++;
+    this.maxConcurrentStreams = Math.max(
+      this.maxConcurrentStreams,
+      this.activeStreams,
+    );
+    try {
+      for (const event of this.script) {
+        if (this.stopped) break;
+        yield event;
+        // Tiny yield to allow event loop to process between events
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+      if (this.holdOpenAfterScript && !this.stopped) {
+        await new Promise<void>((r) => {
+          this.resolve = r;
+        });
+      }
+    } finally {
+      this.activeStreams--;
+      this._streaming = false;
     }
-    this._streaming = false;
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     this._streaming = false;
     this.resolve?.();
+    this.resolve = null;
   }
 }
 

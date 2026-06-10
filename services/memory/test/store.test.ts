@@ -248,3 +248,152 @@ describe("MemoryStore - Procedural block", () => {
     expect(store.getProceduralBlock()).toBeNull();
   });
 });
+
+describe("MemoryStore - keyword search liveness (BM25)", () => {
+  it("stops surfacing a fact after invalidation (cache is invalidated)", async () => {
+    const { store } = makeStore();
+    const fact = await store.upsertFact({
+      subjectId: "e-bm25",
+      predicate: "prefers",
+      objectLiteral: "zebra snorkeling",
+      text: "User prefers zebra snorkeling on weekends",
+      validFrom: "2026-01-01T00:00:00Z",
+      provenance: { source: "chat", sourceId: "kw-1", confidence: 0.9 },
+    });
+
+    // Build the cached index while the fact is live
+    let results = store.keywordSearch({ query: "zebra snorkeling", k: 5 });
+    expect(results.some((r) => r.node.id === fact.id)).toBe(true);
+
+    // Invalidate — the cached BM25 index must not keep serving the stale entry
+    store.invalidateFact({ factId: fact.id, validTo: new Date().toISOString() });
+    results = store.keywordSearch({ query: "zebra snorkeling", k: 5 });
+    expect(results.some((r) => r.node.id === fact.id)).toBe(false);
+  });
+
+  it("honors includeInvalidated: invalidated facts surface only when requested", async () => {
+    const { store } = makeStore();
+    const fact = await store.upsertFact({
+      subjectId: "e-bm25-2",
+      predicate: "works_at",
+      objectLiteral: "Quaxolotl Labs",
+      text: "User works at Quaxolotl Labs",
+      validFrom: "2026-01-01T00:00:00Z",
+      provenance: { source: "chat", sourceId: "kw-2", confidence: 0.9 },
+    });
+    store.invalidateFact({ factId: fact.id, validTo: new Date().toISOString() });
+
+    const liveOnly = store.keywordSearch({ query: "Quaxolotl", k: 5 });
+    expect(liveOnly.some((r) => r.node.id === fact.id)).toBe(false);
+
+    const withInvalidated = store.keywordSearch({
+      query: "Quaxolotl",
+      k: 5,
+      includeInvalidated: true,
+    });
+    expect(withInvalidated.some((r) => r.node.id === fact.id)).toBe(true);
+  });
+});
+
+describe("MemoryStore - upsertFact never replaces (no hard delete)", () => {
+  it("throws on duplicate id and preserves the original row", async () => {
+    const { store } = makeStore();
+    await store.upsertFact({
+      id: "fixed-fact-id",
+      subjectId: "e-dup",
+      predicate: "role",
+      objectLiteral: "engineer",
+      text: "Role is engineer",
+      validFrom: "2026-01-01T00:00:00Z",
+      provenance: { source: "note", sourceId: "dup-1", confidence: 1 },
+    });
+    store.invalidateFact({ factId: "fixed-fact-id", validTo: "2026-02-01T00:00:00Z" });
+
+    await expect(
+      store.upsertFact({
+        id: "fixed-fact-id",
+        subjectId: "e-dup",
+        predicate: "role",
+        objectLiteral: "manager",
+        text: "Role is manager",
+        validFrom: "2026-03-01T00:00:00Z",
+        provenance: { source: "note", sourceId: "dup-2", confidence: 1 },
+      }),
+    ).rejects.toThrow();
+
+    // Original row untouched: invalidation history NOT reset by a REPLACE
+    const row = store.getFactById("fixed-fact-id")!;
+    expect(row.text).toBe("Role is engineer");
+    expect(row.invalidatedAt).not.toBeNull();
+    expect(row.validTo).toBe("2026-02-01T00:00:00Z");
+  });
+
+  it("maps source_trust onto Fact.sourceTrust (default 0.5)", async () => {
+    const { store } = makeStore();
+    const trusted = await store.upsertFact({
+      subjectId: "e-trust",
+      predicate: "manager_is",
+      objectLiteral: "Priya",
+      text: "Manager is Priya",
+      validFrom: "2026-01-01T00:00:00Z",
+      sourceTrust: 1.0,
+      provenance: { source: "system", sourceId: "user-correction", confidence: 1 },
+    });
+    expect(trusted.sourceTrust).toBe(1.0);
+
+    const defaulted = await store.upsertFact({
+      subjectId: "e-trust",
+      predicate: "likes",
+      objectLiteral: "coffee",
+      text: "Likes coffee",
+      validFrom: "2026-01-01T00:00:00Z",
+      provenance: { source: "chat", sourceId: "t-2", confidence: 0.8 },
+    });
+    expect(defaulted.sourceTrust).toBe(0.5);
+  });
+});
+
+describe("MemoryStore - entitySearch matches any entity id", () => {
+  it("finds episodes linked to a non-first entity id", async () => {
+    const { store } = makeStore();
+    const ep = await store.upsertEpisode({
+      text: "Met with Priya about the roadmap",
+      occurredAt: "2026-05-01T10:00:00Z",
+      entityIds: ["ent-priya"],
+      provenance: { source: "calendar", sourceId: "evt-1", confidence: 0.9 },
+    });
+
+    // "ent-priya" is the SECOND id in the list — must still match
+    const results = store.entitySearch({ entityIds: ["ent-other", "ent-priya"], k: 10 });
+    expect(results.some((r) => r.node.id === ep.id)).toBe(true);
+  });
+
+  it("returns empty for an empty entityIds list", () => {
+    const { store } = makeStore();
+    expect(store.entitySearch({ entityIds: [], k: 10 })).toEqual([]);
+  });
+});
+
+describe("MemoryStore - vectorSearch asOf bounds", () => {
+  it("excludes facts whose valid_from is after asOf", async () => {
+    const { store } = makeStore();
+    const embedder = new FakeEmbedder();
+    const fact = await store.upsertFact({
+      subjectId: "e-asof",
+      predicate: "role",
+      objectLiteral: "senior",
+      text: "Role became senior in June",
+      validFrom: "2026-06-01T00:00:00Z",
+      provenance: { source: "chat", sourceId: "asof-1", confidence: 0.9 },
+    });
+    const [queryVec] = await embedder.embed([fact.text]);
+
+    // asOf BEFORE validFrom → the fact was not yet true; must be excluded
+    const before = store.vectorSearch({ query: queryVec!, k: 5, asOf: "2026-01-01T00:00:00Z" });
+    expect(before.some((r) => r.node.id === fact.id)).toBe(false);
+
+    // asOf AFTER validFrom → included
+    const after = store.vectorSearch({ query: queryVec!, k: 5, asOf: "2026-07-01T00:00:00Z" });
+    expect(after.some((r) => r.node.id === fact.id)).toBe(true);
+  });
+});

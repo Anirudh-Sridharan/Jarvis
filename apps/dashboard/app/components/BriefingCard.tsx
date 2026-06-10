@@ -1,4 +1,8 @@
+"use client";
+
+import { useState } from "react";
 import type { BriefingContract, WidgetEnvelope } from "@/app/lib/contracts";
+import { localDateStr } from "@/app/lib/dates";
 
 interface BriefingCardProps {
   envelope: WidgetEnvelope<BriefingContract>;
@@ -16,7 +20,28 @@ function renderMarkdown(md: string): string {
     .replace(/\n/g, "<br />");
 }
 
-export default function BriefingCard({ envelope }: BriefingCardProps) {
+export default function BriefingCard({ envelope: initialEnvelope }: BriefingCardProps) {
+  // Server-fetched envelope seeds the card; "Generate now" re-fetches the same
+  // briefing endpoint client-side (it assembles fresh on every GET) and swaps
+  // the result in without a page navigation.
+  const [envelope, setEnvelope] = useState(initialEnvelope);
+  const [generating, setGenerating] = useState(false);
+
+  const generateNow = async () => {
+    if (generating) return;
+    setGenerating(true);
+    try {
+      const res = await fetch(`/api/briefing?date=${localDateStr()}`, {
+        cache: "no-store",
+      });
+      setEnvelope((await res.json()) as WidgetEnvelope<BriefingContract>);
+    } catch {
+      // Keep the current (empty) state — the card already explains itself.
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   if (envelope.state === "error") {
     return (
       <div className="card card--error">
@@ -34,7 +59,14 @@ export default function BriefingCard({ envelope }: BriefingCardProps) {
         <p className="text-dim">
           Your brief will be ready after tonight&apos;s review.
         </p>
-        <a href="/api/briefing?generate=1" className="link-cta">Generate now</a>
+        <button
+          type="button"
+          className="link-cta"
+          onClick={() => void generateNow()}
+          disabled={generating}
+        >
+          {generating ? "Generating…" : "Generate now"}
+        </button>
       </div>
     );
   }

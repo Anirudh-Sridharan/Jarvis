@@ -323,3 +323,15 @@ describe("mmrSelect - de-duplication proof with k=2 and λ=0.7", () => {
     expect((selected[0]! as typeof top).id).not.toBe("DUP");
   });
 });
+
+// ── cosineSimilarity dimension-mismatch guard ─────────────────────────────────
+
+describe("cosineSimilarity - dimension mismatch", () => {
+  it("returns 0 when vector lengths differ (no silent truncation)", async () => {
+    const { cosineSimilarity } = await import("../src/search/cosine.js");
+    expect(cosineSimilarity([1, 0], [1])).toBe(0);
+    expect(cosineSimilarity([], [1, 2, 3])).toBe(0);
+    // Sanity: equal-length still works
+    expect(cosineSimilarity([1, 0], [1, 0])).toBeCloseTo(1, 10);
+  });
+});

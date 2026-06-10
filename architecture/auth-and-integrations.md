@@ -237,11 +237,13 @@ nothing new costs ~nothing.
 
 - [ ] **Gmail** — In Google Cloud Console: create an OAuth client (Desktop app), enable the
       Gmail API, add `you@example.com` as a **Test User**, keep consent screen in *Testing*.
-      Run Jarvis `auth login gmail` (loopback flow). For push: create a Pub/Sub topic + grant
+      Put the client id/secret in `.env` (`GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET`), then run
+      `npm run connect -- gmail` (loopback flow). For push: create a Pub/Sub topic + grant
       `gmail-api-push@system.gserviceaccount.com` publish rights, set the tunnel URL as the
       Pub/Sub push subscription, then call `users.watch`. Schedule re-arm < 7 days.
 - [ ] **Google Calendar** — Same Cloud project: enable Calendar API, ensure the scope is
-      added, run `auth login calendar`. For push: register `events.watch` against the tunnel
+      added, put `GCAL_CLIENT_ID`/`GCAL_CLIENT_SECRET` in `.env`, run
+      `npm run connect -- gcal`. For push: register `events.watch` against the tunnel
       URL; store channel id/expiration and schedule renewal.
 - [ ] **GitHub** — Create a **fine-grained PAT** (read-only: contents/metadata, plus
       issues/PRs as needed), copy it, run `auth paste github` to store it in Keychain. Note the
@@ -250,9 +252,10 @@ nothing new costs ~nothing.
       automation** pointing at the tunnel URL `…/ingest/health`, add header
       `X-Jarvis-Secret: <generated secret>` (store the secret in Keychain too), choose JSON +
       the metric set, set the schedule. Send a test export and confirm a `200`.
-- [ ] **Whoop** — Register a Whoop developer app, set redirect to the loopback URI, request
-      scopes incl. `offline`, store `client_id`/`client_secret` in Keychain, run
-      `auth login whoop`. Verify the **rotating refresh** persists by forcing a refresh twice.
+- [ ] **Whoop** — Register a Whoop developer app, set the redirect URI to **exactly**
+      `http://127.0.0.1:8976/callback` (fixed port; `JARVIS_OAUTH_PORT` overrides), request
+      scopes incl. `offline`, put `WHOOP_CLIENT_ID`/`WHOOP_CLIENT_SECRET` in `.env`, run
+      `npm run connect -- whoop`. Verify the **rotating refresh** persists by forcing a refresh twice.
 - [ ] **SimpleFIN** — Get a **setup token** from SimpleFIN Bridge, run `auth claim simplefin`
       (Jarvis POSTs/claims it to obtain the **Access URL**), store the Access URL in Keychain.
       The setup token is now spent; only the Access URL matters going forward.

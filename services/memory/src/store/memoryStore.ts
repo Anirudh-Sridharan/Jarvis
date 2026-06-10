@@ -104,7 +104,10 @@ export interface SearchResult {
 // ── MemoryStore ───────────────────────────────────────────────────────────────
 
 export class MemoryStore {
+  /** BM25 index over live nodes (default search path). */
   private bm25Index: BM25Index | null = null;
+  /** BM25 index including invalidated facts (includeInvalidated searches). */
+  private bm25IndexAll: BM25Index | null = null;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -334,8 +337,10 @@ export class MemoryStore {
       embedding = vec;
     }
 
+    // Plain INSERT: facts are bi-temporal and never overwritten in place.
+    // A duplicate id throws — corrections must go through invalidate + insert.
     this.db.prepare(`
-      INSERT OR REPLACE INTO facts
+      INSERT INTO facts
         (id, subject_id, predicate, object_id, object_literal, text, embedding,
          valid_from, valid_to, ingested_at, invalidated_at, invalidated_by,
          supersedes, importance, last_accessed_at, access_count, provenance, source_trust)
@@ -384,6 +389,9 @@ export class MemoryStore {
       SET valid_to = ?, invalidated_at = ?, invalidated_by = ?
       WHERE id = ?
     `).run(args.validTo, now, args.invalidatedBy ?? null, args.factId);
+
+    // The cached BM25 index would otherwise keep serving the invalidated fact.
+    this.invalidateBm25();
 
     return this.getFactById(args.factId);
   }
@@ -470,16 +478,18 @@ export class MemoryStore {
     }
 
     // Facts
-    const factQuery = `SELECT id, embedding, valid_to, invalidated_at FROM facts WHERE embedding IS NOT NULL`;
+    const factQuery = `SELECT id, embedding, valid_from, valid_to, invalidated_at FROM facts WHERE embedding IS NOT NULL`;
     const factRows = this.db.prepare(factQuery).all() as unknown as {
       id: string;
       embedding: string;
+      valid_from: string;
       valid_to: string | null;
       invalidated_at: string | null;
     }[];
     for (const f of factRows) {
       if (!includeInvalidated) {
         if (f.invalidated_at !== null) continue;
+        if (asOf && f.valid_from > asOf) continue; // not yet true at asOf
         if (asOf && f.valid_to !== null && f.valid_to <= asOf) continue;
         if (!asOf && f.valid_to !== null && f.valid_to <= now) continue;
       }
@@ -505,9 +515,9 @@ export class MemoryStore {
     return results;
   }
 
-  /** BM25 keyword search over all memory text. */
+  /** BM25 keyword search over all memory text (live facts only by default). */
   keywordSearch(args: KeywordSearchArgs): SearchResult[] {
-    const index = this.getBm25Index();
+    const index = this.getBm25Index(args.includeInvalidated ?? false);
     const results = index.search(args.query, args.k);
     const out: SearchResult[] = [];
     for (const r of results) {
@@ -526,12 +536,16 @@ export class MemoryStore {
   /** Entity-linked memory search. */
   entitySearch(args: EntitySearchArgs): SearchResult[] {
     const results: SearchResult[] = [];
-    const placeholders = args.entityIds.map(() => "?").join(",");
+    if (args.entityIds.length === 0) return results;
+    const likeClauses = args.entityIds.map(() => "entity_ids LIKE ?").join(" OR ");
     const rows = this.db
       .prepare(
-        `SELECT * FROM episodes WHERE entity_ids LIKE ? LIMIT ?`,
+        `SELECT * FROM episodes WHERE ${likeClauses} LIMIT ?`,
       )
-      .all(`%${args.entityIds[0]}%`, args.k) as unknown as RawEpisode[];
+      .all(
+        ...args.entityIds.map((id) => `%${id}%`),
+        args.k,
+      ) as unknown as RawEpisode[];
     for (const r of rows) {
       const ep = this.rowToEpisode(r);
       const entityIds = ep.entityIds;
@@ -627,6 +641,25 @@ export class MemoryStore {
       .run(state, id);
   }
 
+  // ── Embeddings table (deferred embed queue) ───────────────────────────────
+
+  /** Persist a node's embedding vector into the embeddings table. */
+  upsertEmbedding(
+    nodeId: string,
+    nodeKind: "episode" | "entity" | "fact" | "experience",
+    embedding: number[],
+  ): void {
+    this.db.prepare(`
+      INSERT INTO embeddings (node_id, node_kind, embedding, dim, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(node_id) DO UPDATE SET
+        node_kind = excluded.node_kind,
+        embedding = excluded.embedding,
+        dim = excluded.dim,
+        updated_at = excluded.updated_at
+    `).run(nodeId, nodeKind, toJson(embedding), embedding.length, new Date().toISOString());
+  }
+
   // ── Consolidation runs ────────────────────────────────────────────────────
 
   insertConsolidationRun(run: import("../types.js").ConsolidationRun): void {
@@ -695,10 +728,12 @@ export class MemoryStore {
 
   private invalidateBm25(): void {
     this.bm25Index = null;
+    this.bm25IndexAll = null;
   }
 
-  private getBm25Index(): BM25Index {
-    if (this.bm25Index) return this.bm25Index;
+  private getBm25Index(includeInvalidated: boolean): BM25Index {
+    const cached = includeInvalidated ? this.bm25IndexAll : this.bm25Index;
+    if (cached) return cached;
 
     const docs: BM25Doc[] = [];
     const episodes = this.db
@@ -707,15 +742,29 @@ export class MemoryStore {
     for (const e of episodes) {
       docs.push({ id: `ep:${e.id}`, text: e.text });
     }
-    const facts = this.db
-      .prepare(`SELECT id, text FROM facts`)
-      .all() as unknown as { id: string; text: string }[];
+    // Default index covers only live facts — invalidated/superseded facts must
+    // not keep surfacing via keyword retrieval.
+    const facts = (
+      includeInvalidated
+        ? this.db.prepare(`SELECT id, text FROM facts`).all()
+        : this.db
+            .prepare(
+              `SELECT id, text FROM facts
+               WHERE invalidated_at IS NULL AND (valid_to IS NULL OR valid_to > ?)`,
+            )
+            .all(new Date().toISOString())
+    ) as unknown as { id: string; text: string }[];
     for (const f of facts) {
       docs.push({ id: `fact:${f.id}`, text: f.text });
     }
 
-    this.bm25Index = buildBM25Index(docs);
-    return this.bm25Index;
+    const index = buildBM25Index(docs);
+    if (includeInvalidated) {
+      this.bm25IndexAll = index;
+    } else {
+      this.bm25Index = index;
+    }
+    return index;
   }
 
   // ── Row mappers ───────────────────────────────────────────────────────────
@@ -786,6 +835,7 @@ export class MemoryStore {
       invalidatedAt: row.invalidated_at ?? null,
       invalidatedBy: row.invalidated_by ?? null,
       supersedes: row.supersedes ?? null,
+      sourceTrust: row.source_trust,
       importance: row.importance,
       lastAccessedAt: row.last_accessed_at,
       accessCount: row.access_count,

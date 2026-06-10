@@ -99,8 +99,16 @@ export class ConsolidationService {
 
     // ── Stage 2: EXTRACT ──────────────────────────────────────────────────
     let extractedFacts: ExtractedFact[] = [];
+    // Only records whose extraction succeeded may be marked consolidated in
+    // stage 9 — failed records stay pending for the next run.
+    let extractionProcessedIds = new Set<string>();
     try {
-      extractedFacts = await extractFacts(pending, this.llm, runId);
+      const extraction = await extractFacts(pending, this.llm, runId);
+      extractedFacts = extraction.facts;
+      extractionProcessedIds = new Set(extraction.processedRecordIds);
+      for (const failure of extraction.failures) {
+        run.errors.push({ stage: 2, message: failure.message, recordId: failure.recordId });
+      }
       run.counts.factsExtracted = extractedFacts.length;
     } catch (err) {
       run.errors.push({ stage: 2, message: String(err) });
@@ -175,11 +183,17 @@ export class ConsolidationService {
       const deferredRecords = pending.filter((r) => r.embed_state === "deferred");
       if (deferredRecords.length > 0) {
         const texts = deferredRecords.map((r) => r.text);
-        await this.embedder.embed(texts);
-        for (const r of deferredRecords) {
+        const vectors = await this.embedder.embed(texts);
+        let written = 0;
+        for (let i = 0; i < deferredRecords.length; i++) {
+          const r = deferredRecords[i]!;
+          const vec = vectors[i];
+          if (!vec) continue; // no vector returned — stays deferred
+          this.store.upsertEmbedding(r.id, "experience", vec);
           this.store.updateExperienceEmbedState(r.id, "done");
+          written++;
         }
-        run.counts.embeddingsWritten = deferredRecords.length;
+        run.counts.embeddingsWritten = written;
       }
     } catch (err) {
       run.errors.push({ stage: 8, message: String(err) });
@@ -187,10 +201,15 @@ export class ConsolidationService {
     this.checkpoint(run, 8);
 
     // ── Stage 9: BRIEFING PREP / CLEAR FLAGS ─────────────────────────────
+    // Only clear records whose extraction succeeded; failed records stay
+    // pending so they are retried by the next consolidation pass.
     for (const record of pending) {
-      this.store.markExperienceConsolidated(record.id);
+      if (extractionProcessedIds.has(record.id)) {
+        this.store.markExperienceConsolidated(record.id);
+      }
     }
-    run.status = "completed";
+    const allProcessed = pending.every((r) => extractionProcessedIds.has(r.id));
+    run.status = allProcessed ? "completed" : "partial";
     run.finishedAt = new Date().toISOString();
     run.stage = 9;
     this.store.updateConsolidationRun(runId, run);

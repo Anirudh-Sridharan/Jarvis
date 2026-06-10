@@ -299,8 +299,9 @@ export class ProfileService {
    * corrected fact. Re-derives the affected facet.
    *
    * This is the "user corrects what Jarvis believes" loop:
-   * 1. INVALIDATE old fact (bi-temporal: valid_to = now)
-   * 2. INSERT corrected fact with capturedBy="feature-20"
+   * 1. INSERT corrected fact with capturedBy="feature-20" (first, so a failed
+   *    insert never loses the original fact)
+   * 2. INVALIDATE old fact (bi-temporal: valid_to = now, invalidatedBy = new id)
    * 3. Re-derive profile so the corrected facet is reflected immediately.
    */
   async correctFact(args: CorrectFactArgs): Promise<PersonalProfile> {
@@ -313,16 +314,10 @@ export class ProfileService {
       throw new Error(`ProfileService.correctFact: fact ${factId} not found`);
     }
 
-    // Step 2: Invalidate the old fact (bi-temporal invalidation)
+    // Step 2: Insert the corrected fact FIRST (source = feature-20,
+    // user-authoritative). The insert awaits the embedder (a network call in
+    // production); if it fails, the original fact must remain live.
     const newFactId = newId();
-    this.store.invalidateFact({
-      factId,
-      validTo: now,
-      invalidatedBy: newFactId,
-      reason: "user-correction",
-    });
-
-    // Step 3: Insert the corrected fact (source = feature-20, user-authoritative)
     await this.store.upsertFact({
       id: newFactId,
       subjectId: original.subjectId,
@@ -339,6 +334,15 @@ export class ProfileService {
         sourceId: "user-correction",
         confidence: 1.0,
       },
+    });
+
+    // Step 3: Invalidate the old fact (bi-temporal invalidation), pointing at
+    // the replacement that now definitely exists.
+    this.store.invalidateFact({
+      factId,
+      validTo: now,
+      invalidatedBy: newFactId,
+      reason: "user-correction",
     });
 
     // Step 4: Re-derive profile to reflect the correction

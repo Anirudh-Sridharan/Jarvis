@@ -90,6 +90,9 @@ const TRANSITION_MAP = new Map<string, VoiceSessionState>(
   TRANSITIONS.map(([from, event, to]) => [`${from}:${event}`, to]),
 );
 
+/** Max retained transitions — the machine lives for the daemon's lifetime. */
+const MAX_HISTORY = 200;
+
 export class SessionMachine {
   private _state: VoiceSessionState = "idle";
   private _listeners: TransitionListener[] = [];
@@ -131,6 +134,7 @@ export class SessionMachine {
     };
     this._state = next;
     this._history.push(transition);
+    if (this._history.length > MAX_HISTORY) this._history.shift();
     for (const l of this._listeners) {
       try {
         l(transition);

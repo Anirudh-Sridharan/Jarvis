@@ -165,7 +165,7 @@ describe("Policy decision table", () => {
     expect(decision.triggeredRules).toContain("injection_marker");
   });
 
-  it("injection flag in provenance → block", () => {
+  it("soft injection flag from external content → require_approval (escalation)", () => {
     const action = makeAction("search", {}, {
       provenance: {
         derivedFromExternal: true,
@@ -177,7 +177,40 @@ describe("Policy decision table", () => {
       sideEffects: "read_only",
       reversible: true,
     });
+    // severityForFlags: soft flags from external content escalate to approval
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.triggeredRules).toContain("injection_marker");
+  });
+
+  it("soft injection flag NOT from external content → block (suspicious agent state)", () => {
+    const action = makeAction("search", {}, {
+      provenance: {
+        derivedFromExternal: false,
+        sources: [],
+        injectionFlags: ["ignore-prev-instructions"],
+      },
+    });
+    const decision = classifyAndDecide(action, {
+      sideEffects: "read_only",
+      reversible: true,
+    });
     expect(decision.outcome).toBe("block");
+  });
+
+  it("hard-block injection flag (model control tokens) → block even from external content", () => {
+    const action = makeAction("search", {}, {
+      provenance: {
+        derivedFromExternal: true,
+        sources: ["web-page"],
+        injectionFlags: ["hermes-token"],
+      },
+    });
+    const decision = classifyAndDecide(action, {
+      sideEffects: "read_only",
+      reversible: true,
+    });
+    expect(decision.outcome).toBe("block");
+    expect(decision.triggeredRules).toContain("injection_marker");
   });
 
   it("taint escalation: derivedFromExternal on non-read-only → require_approval", () => {

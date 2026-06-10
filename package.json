@@ -12,10 +12,14 @@
     "node": ">=20"
   },
   "scripts": {
+    "start": "bash scripts/start.sh",
     "core": "npm --workspace @jarvis/core run dev",
     "core:build": "npm --workspace @jarvis/core run build",
     "dashboard": "npm --workspace @jarvis/dashboard run dev",
     "chat": "npm --workspace @jarvis/core run chat",
-    "sidecar": "bash sidecar/mlx/run.sh"
+    "connect": "npm --workspace @jarvis/core run connect --",
+    "voice": "npm --workspace @jarvis/core run voice",
+    "sidecar": "bash sidecar/mlx/run.sh",
+    "sidecar:voice": "bash sidecar/voice/run.sh"
   }
 }

@@ -81,6 +81,7 @@ export { makeMetricId } from "./framework/metricStore.js";
 export { MetricStore } from "./framework/metricStore.js";
 export { ConnectorRegistry } from "./framework/registry.js";
 export { Scheduler, isDue } from "./framework/scheduler.js";
+export type { EventSink, SchedulerConfig } from "./framework/scheduler.js";
 export { TodoStore, computeNextDue } from "./work/todos.js";
 export { BriefingService, renderTemplateBrief } from "./briefing/briefing.js";
 export {
@@ -111,6 +112,25 @@ export {
   getAccessToken,
   clearOAuthState,
 } from "./framework/oauth.js";
+export {
+  getOAuthProvider,
+  getRefreshConfig,
+  requireClientCredentials,
+  isOAuthSource,
+} from "./framework/providers.js";
+export type {
+  OAuthProviderConfig,
+  OAuthSourceId,
+  ClientCredentials,
+} from "./framework/providers.js";
+export {
+  generatePkce,
+  generateState,
+  buildAuthorizeUrl,
+  parseCallbackUrl,
+  exchangeCodeForTokens,
+} from "./framework/authFlow.js";
+export type { PkcePair } from "./framework/authFlow.js";
 
 // ── Factory ───────────────────────────────────────────────────────────────────
 
@@ -152,7 +172,9 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
   const metrics = new MetricStore(db);
   const todos = new TodoStore(db);
   const calendarMirror = new CalendarMirror(db);
-  const scheduler = new Scheduler(db, metrics, config.clock);
+  const scheduler = new Scheduler(db, metrics, config.clock, {
+    eventSink: calendarMirror,
+  });
   const briefing = new BriefingService(metrics, calendarMirror, todos, config.llm);
 
   // Register default connectors

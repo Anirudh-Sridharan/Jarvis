@@ -1,7 +1,23 @@
 import type { Metadata } from "next";
+import { Fira_Code, Share_Tech_Mono } from "next/font/google";
 import "./globals.css";
 import ModelStatusBadge from "./components/ModelStatusBadge";
 import Nav from "./components/Nav";
+import SystemClock from "./components/SystemClock";
+
+// Self-hosted at build time via next/font — no runtime font requests.
+const shareTechMono = Share_Tech_Mono({
+  weight: "400",
+  subsets: ["latin"],
+  variable: "--font-share-tech",
+  display: "swap",
+});
+
+const firaCode = Fira_Code({
+  subsets: ["latin"],
+  variable: "--font-fira",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Jarvis",
@@ -14,14 +30,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${shareTechMono.variable} ${firaCode.variable}`}>
       <body>
         <div className="shell">
           <header className="topbar">
             <div className="topbar__brand">
               <span>◆</span> Jarvis
             </div>
-            <ModelStatusBadge />
+            <div className="topbar__right">
+              <SystemClock />
+              <ModelStatusBadge />
+            </div>
           </header>
           <div className="shell__body">
             <Nav />

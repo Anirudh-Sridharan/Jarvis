@@ -22,6 +22,16 @@ interface MetricChartProps {
   downsampled?: boolean;
 }
 
+// HUD theme tokens (mirror globals.css — Recharts needs literal values)
+const GRID_STROKE = "#16223a";
+const TICK_FILL = "#7d8ca6";
+const TOOLTIP_STYLE = {
+  background: "#090e1a",
+  border: "1px solid #24385e",
+  borderRadius: 3,
+  fontSize: 12,
+} as const;
+
 function formatTick(ts: string): string {
   const d = new Date(ts.length === 10 ? ts + "T12:00:00Z" : ts);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -32,7 +42,7 @@ export default function MetricChart({
   label,
   unit = "",
   kind = "line",
-  color = "#5eead4",
+  color = "#60a5fa",
   downsampled,
 }: MetricChartProps) {
   const data = points.map((p) => ({
@@ -51,24 +61,26 @@ export default function MetricChart({
         <ResponsiveContainer>
           {kind === "bar" ? (
             <BarChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#262b33" vertical={false} />
-              <XAxis dataKey="ts" tick={{ fontSize: 10, fill: "#8a93a3" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#8a93a3" }} tickLine={false} axisLine={false} width={36} />
+              <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+              <XAxis dataKey="ts" tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} width={36} />
               <Tooltip
-                contentStyle={{ background: "#14171c", border: "1px solid #262b33", borderRadius: 6, fontSize: 12 }}
-                labelStyle={{ color: "#8a93a3" }}
+                cursor={{ fill: "rgba(59, 130, 246, 0.06)" }}
+                contentStyle={TOOLTIP_STYLE}
+                labelStyle={{ color: TICK_FILL }}
                 itemStyle={{ color: color }}
               />
-              <Bar dataKey="value" fill={color} radius={[2, 2, 0, 0]} />
+              <Bar dataKey="value" fill={color} fillOpacity={0.85} radius={[2, 2, 0, 0]} />
             </BarChart>
           ) : (
             <LineChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#262b33" vertical={false} />
-              <XAxis dataKey="ts" tick={{ fontSize: 10, fill: "#8a93a3" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#8a93a3" }} tickLine={false} axisLine={false} width={36} />
+              <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+              <XAxis dataKey="ts" tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} width={36} />
               <Tooltip
-                contentStyle={{ background: "#14171c", border: "1px solid #262b33", borderRadius: 6, fontSize: 12 }}
-                labelStyle={{ color: "#8a93a3" }}
+                cursor={{ stroke: "rgba(96, 165, 250, 0.25)" }}
+                contentStyle={TOOLTIP_STYLE}
+                labelStyle={{ color: TICK_FILL }}
                 itemStyle={{ color: color }}
               />
               <Line
@@ -77,6 +89,7 @@ export default function MetricChart({
                 stroke={color}
                 strokeWidth={2}
                 dot={false}
+                activeDot={{ r: 4, fill: color, stroke: "rgba(96, 165, 250, 0.35)", strokeWidth: 4 }}
                 connectNulls={false}
               />
             </LineChart>

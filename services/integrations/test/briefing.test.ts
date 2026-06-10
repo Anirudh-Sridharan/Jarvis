@@ -165,6 +165,52 @@ describe("BriefingService.assembleBriefing", () => {
     expect(doc.context.todos?.dueToday[0]?.title).toBe("Write the briefing tests");
   });
 
+  it("formats agenda times in the configured timezone", async () => {
+    const tzService = new BriefingService(metrics, mirror, todos, llm, {
+      timezone: "America/New_York",
+    });
+    mirror.upsertEvent(makeCalendarEvent(
+      "evt-tz",
+      "Standup",
+      "2026-06-09T14:00:00Z", // 10:00 in New York (EDT)
+      "2026-06-09T14:30:00Z"
+    ));
+
+    llm.setDefault("ok");
+    const doc = await tzService.assembleBriefing("2026-06-09");
+
+    expect(doc.context.agenda?.events[0]?.time).toBe("10:00");
+  });
+
+  it("defaults agenda times to UTC when no timezone is configured", async () => {
+    mirror.upsertEvent(makeCalendarEvent(
+      "evt-utc",
+      "Standup",
+      "2026-06-09T10:00:00Z",
+      "2026-06-09T10:30:00Z"
+    ));
+
+    llm.setDefault("ok");
+    const doc = await service.assembleBriefing("2026-06-09");
+
+    expect(doc.context.agenda?.events[0]?.time).toBe("10:00");
+  });
+
+  it("treats a recovery point without a sleep-duration point as unknown duration, not 0h", async () => {
+    metrics.upsertSeries([makeRecoveryPoint("2026-06-08T07:00:00Z", 72)]);
+
+    llm.addOverride("", new Error("force template"));
+    const doc = await service.assembleBriefing("2026-06-09");
+
+    expect(doc.context.sleep).toBeDefined();
+    expect(doc.context.sleep?.hoursSlept).toBeNull();
+    // The template must not assert "You slept 0h" as fact
+    expect(doc.markdown).not.toContain("0h");
+    expect(doc.markdown).toContain("No sleep duration recorded");
+    // Recovery info is still present
+    expect(doc.markdown).toContain("Recovery is **high**");
+  });
+
   it("returns null sleep context when no sleep data", async () => {
     llm.setDefault("No sleep data.");
     const doc = await service.assembleBriefing("2026-06-09");

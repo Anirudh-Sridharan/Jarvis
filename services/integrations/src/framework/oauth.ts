@@ -17,6 +17,8 @@ interface RefreshConfig {
   tokenUrl: string;
   clientId: string;
   clientSecret: string;
+  /** Extra body params for the refresh grant (Whoop requires scope=offline). */
+  extraRefreshParams?: Record<string, string>;
 }
 
 // Per-source in-flight refresh promises (single-flight guard)
@@ -139,6 +141,9 @@ async function doRefresh(
     client_id: config.clientId,
     client_secret: config.clientSecret,
   });
+  for (const [k, v] of Object.entries(config.extraRefreshParams ?? {})) {
+    body.set(k, v);
+  }
 
   const res = await http.request({
     method: "POST",

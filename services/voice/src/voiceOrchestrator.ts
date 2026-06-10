@@ -19,6 +19,7 @@ import { DefaultTurnDetector } from "./turnDetector.js";
 import type {
   WakeWordSource,
   SttEngine,
+  SttEvent,
   TtsEngine,
   CoreClient,
   TurnDetector,
@@ -71,6 +72,12 @@ export class VoiceOrchestrator {
   private readonly config: Required<OrchestratorConfig>;
   private listeners: EventListener[] = [];
   private unsubWake: (() => void) | null = null;
+  /** In-flight turn pipeline (LLM → chunker → TTS). Turns are serialized on it. */
+  private inFlightTurn: Promise<void> | null = null;
+  /** Re-evaluates end-of-turn when the STT engine goes quiet mid-silence. */
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Pending error → RECOVER timer. */
+  private recoverTimer: ReturnType<typeof setTimeout> | null = null;
   private currentTurn: {
     id: string;
     sessionId: string;
@@ -141,9 +148,17 @@ export class VoiceOrchestrator {
       this.unsubWake = null;
     }
     this.deps.wakeWord.stop();
+    this.clearSilenceTimer();
+    this.clearRecoverTimer();
+    this.currentTurn?.llmAbort?.abort();
     await this.deps.stt.stop();
     this.deps.tts.cancel();
-    this.currentTurn?.llmAbort?.abort();
+    // Join the in-flight turn (its LLM stream was just aborted) so no pipeline
+    // keeps running after stop() resolves.
+    const inFlight = this.inFlightTurn;
+    if (inFlight) {
+      await inFlight.catch(() => {});
+    }
     this.machine.trySend("FORCE_IDLE");
   }
 
@@ -160,24 +175,47 @@ export class VoiceOrchestrator {
     this.emit({ type: "wake", event });
     this.machine.send("WAKE");
 
-    // Fan-out: warm up models + start STT in parallel
-    const warmupPromise = this.deps.core.warmup().catch((err: unknown) => {
+    // Warm up models; only proceed to listening when warmup succeeded.
+    try {
+      await this.deps.core.warmup();
+    } catch (err) {
       this.emit({
         type: "error",
         message: `Warmup failed: ${err instanceof Error ? err.message : String(err)}`,
       });
-    });
+      this.enterErrorState();
+      return;
+    }
 
-    // Transition to listening once warmup resolves (models ready)
-    warmupPromise.then(() => {
-      if (this.machine.state === "waking") {
-        this.machine.send("MODELS_READY");
-        void this.runSttLoop(event);
-      }
-    }).catch(() => {
-      this.machine.trySend("ERROR");
-      setTimeout(() => this.machine.trySend("RECOVER"), 1000);
-    });
+    // Only legal from "waking" — guards against stop()/error racing the warmup.
+    if (this.machine.canSend("MODELS_READY")) {
+      this.machine.send("MODELS_READY");
+      void this.runSttLoop(event);
+    }
+  }
+
+  /** Send ERROR and schedule recovery back to idle. */
+  private enterErrorState(): void {
+    this.machine.trySend("ERROR");
+    this.clearRecoverTimer();
+    this.recoverTimer = setTimeout(() => {
+      this.recoverTimer = null;
+      this.machine.trySend("RECOVER");
+    }, 1000);
+  }
+
+  private clearRecoverTimer(): void {
+    if (this.recoverTimer !== null) {
+      clearTimeout(this.recoverTimer);
+      this.recoverTimer = null;
+    }
+  }
+
+  private clearSilenceTimer(): void {
+    if (this.silenceTimer !== null) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
   }
 
   private async runSttLoop(wakeEvent: WakeEvent): Promise<void> {
@@ -185,17 +223,91 @@ export class VoiceOrchestrator {
     this.turnDetector.reset();
 
     let transcript = "";
-    // silenceMs tracks the reported silence from the STT engine (speech_end.silenceMs)
-    // or accumulated wall-clock time when no speech_end has been received yet.
+    // silenceStart tracks wall-clock time since the last speech_end.
     let silenceStart: number | null = null;
     // The last reported silence from the STT engine (speech_end carries this).
     let reportedSilenceMs = 0;
-    const eosAt: { value: number | null } = { value: null };
+    let eosAt: number | null = null;
+
+    const resetTurnTracking = (): void => {
+      transcript = "";
+      silenceStart = null;
+      reportedSilenceMs = 0;
+      eosAt = null;
+      this.turnDetector.reset();
+      this.clearSilenceTimer();
+    };
+
+    // Start a turn WITHOUT awaiting it, so this loop keeps consuming STT
+    // events while the reply streams/plays — that is what makes barge-in
+    // reachable. Turns are serialized: a new turn joins the prior in-flight
+    // turn (which a barge-in has already cancelled) before running.
+    const startTurn = (text: string, eos: number): void => {
+      const prior = this.inFlightTurn;
+      const turnPromise = (async () => {
+        if (prior) await prior;
+        await this.runTurn(sessionId, text, eos);
+      })();
+      this.inFlightTurn = turnPromise;
+      void turnPromise.then(() => {
+        if (this.inFlightTurn === turnPromise) this.inFlightTurn = null;
+        // Session ended (REPLY_DONE → idle): close the STT stream so the
+        // loop below terminates instead of lingering as an orphan.
+        if (this.machine.state === "idle") {
+          void this.deps.stt.stop();
+        }
+      });
+    };
+
+    // Evaluate end-of-turn for the latest event. Also called from the silence
+    // timer when the engine goes quiet without emitting further events.
+    const evaluateEndOfTurn = (latestEvent: SttEvent): void => {
+      // Prefer the STT-reported silenceMs (from speech_end) when available,
+      // otherwise fall back to wall-clock elapsed since speech ended.
+      const wallSilenceMs = silenceStart !== null ? Date.now() - silenceStart : 0;
+      const silenceMsForDecision = reportedSilenceMs > 0
+        ? Math.max(reportedSilenceMs, wallSilenceMs)
+        : wallSilenceMs;
+
+      const decision = this.turnDetector.evaluate({
+        latestEvent,
+        currentTranscript: transcript,
+        silenceSinceLastSpeechMs: silenceMsForDecision,
+      });
+
+      if (decision.turnComplete && transcript.trim().length > 0) {
+        const text = transcript;
+        const eos = eosAt ?? Date.now();
+        resetTurnTracking();
+        startTurn(text, eos);
+        return;
+      }
+
+      // Not complete yet: if we are waiting out silence, arm a timer that
+      // re-evaluates when the next threshold elapses. Without this, a single
+      // speech_end below the threshold followed by engine quiet would never
+      // complete the turn (no further events arrive to re-trigger evaluation).
+      this.clearSilenceTimer();
+      if (silenceStart !== null && transcript.trim().length > 0) {
+        const wallNow = Date.now() - silenceStart;
+        const delays = [this.config.silenceThresholdMs, this.config.forceEndMs]
+          .filter((t) => silenceMsForDecision < t)
+          .map((t) => t - wallNow)
+          .filter((d) => d > 0);
+        if (delays.length > 0) {
+          this.silenceTimer = setTimeout(() => {
+            this.silenceTimer = null;
+            evaluateEndOfTurn(latestEvent);
+          }, Math.min(...delays) + 1);
+        }
+      }
+    };
 
     try {
       for await (const event of this.deps.stt.startStream()) {
-        // Handle barge-in speech_start during speaking
+        // Handle barge-in speech_start during thinking/speaking
         if (event.type === "speech_start") {
+          this.clearSilenceTimer();
           this.emit({ type: "partial_transcript", text: transcript });
           const handled = this.bargeIn.evaluate(
             this.machine.state,
@@ -215,11 +327,7 @@ export class VoiceOrchestrator {
 
           if (handled.acted) {
             // Reset for new turn
-            transcript = "";
-            silenceStart = null;
-            reportedSilenceMs = 0;
-            eosAt.value = null;
-            this.turnDetector.reset();
+            resetTurnTracking();
           }
           silenceStart = null;
           reportedSilenceMs = 0;
@@ -227,7 +335,7 @@ export class VoiceOrchestrator {
         }
 
         if (event.type === "speech_end") {
-          eosAt.value = Date.now();
+          eosAt = Date.now();
           silenceStart = Date.now();
           // Use the silence duration reported by the STT/VAD engine; this is
           // authoritative (the fake STT uses this to drive deterministic tests).
@@ -241,50 +349,20 @@ export class VoiceOrchestrator {
 
         if (event.type === "final") {
           transcript = event.text;
-          eosAt.value = eosAt.value ?? Date.now();
+          eosAt = eosAt ?? Date.now();
           this.emit({ type: "final_transcript", text: transcript });
         }
 
-        // Evaluate turn detection.
-        // Prefer the STT-reported silenceMs (from speech_end) when available,
-        // otherwise fall back to wall-clock elapsed since speech ended.
-        const wallSilenceMs = silenceStart !== null ? Date.now() - silenceStart : 0;
-        const silenceMsForDecision = reportedSilenceMs > 0
-          ? Math.max(reportedSilenceMs, wallSilenceMs)
-          : wallSilenceMs;
-
-        const decision = this.turnDetector.evaluate({
-          latestEvent: event,
-          currentTranscript: transcript,
-          silenceSinceLastSpeechMs: silenceMsForDecision,
-        });
-
-        if (decision.turnComplete && transcript.trim().length > 0) {
-          if (eosAt.value === null) eosAt.value = Date.now();
-          await this.runTurn(sessionId, transcript, eosAt.value);
-          // Reset for next turn within the same session
-          transcript = "";
-          silenceStart = null;
-          reportedSilenceMs = 0;
-          eosAt.value = null;
-          this.turnDetector.reset();
-          // Return to listening after speaking completes
-          if (this.machine.state === "idle") {
-            // Session ended during turn processing
-            break;
-          }
-          if (this.machine.state !== "listening" && this.machine.state !== "waking") {
-            this.machine.trySend("MODELS_READY");
-          }
-        }
+        evaluateEndOfTurn(event);
       }
     } catch (err) {
       this.emit({
         type: "error",
         message: `STT error: ${err instanceof Error ? err.message : String(err)}`,
       });
-      this.machine.trySend("ERROR");
-      setTimeout(() => this.machine.trySend("RECOVER"), 1000);
+      this.enterErrorState();
+    } finally {
+      this.clearSilenceTimer();
     }
   }
 
@@ -293,11 +371,16 @@ export class VoiceOrchestrator {
     userText: string,
     eosAt: number,
   ): Promise<void> {
+    // Guard: only run when the machine can actually start a turn (listening →
+    // thinking). An orphaned/queued turn after error recovery or session end
+    // (machine idle) must no-op instead of driving the pipeline off-state.
+    if (this.machine.trySend("TURN_COMPLETE") === null) {
+      return;
+    }
+
     const turnId = randomUUID();
     const latency = new TurnLatencyTracker(turnId);
     latency.markEos(eosAt);
-
-    this.machine.trySend("TURN_COMPLETE");
 
     // Record STT final (we already have it)
     latency.markSttFinal(Date.now());
@@ -399,8 +482,11 @@ export class VoiceOrchestrator {
         type: "error",
         message: `Turn error: ${err instanceof Error ? err.message : String(err)}`,
       });
-      this.machine.trySend("ERROR");
-      setTimeout(() => this.machine.trySend("RECOVER"), 1000);
+      this.enterErrorState();
+      // Tear down the STT stream: the session is over. Otherwise the loop in
+      // runSttLoop stays alive as an orphan and a later wake would start a
+      // SECOND concurrent stream writing shared state.
+      void this.deps.stt.stop();
     } finally {
       this.currentTurn = null;
     }

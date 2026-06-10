@@ -114,7 +114,9 @@ export class BriefingService {
 
     if (!sleepPt && !recovPt) return null;
 
-    const hoursSlept = sleepPt ? sleepPt.value / 60 : 0;
+    // Missing duration point ≠ "slept 0h" — keep it null so renderers can
+    // mark the duration as unknown instead of stating 0h as fact.
+    const hoursSlept = sleepPt ? sleepPt.value / 60 : null;
     const recoveryPct = recovPt?.value ?? 0;
 
     const recovery: SleepInput["recovery"] =
@@ -122,12 +124,12 @@ export class BriefingService {
 
     return {
       score: recovPt?.value ?? 0,
-      hoursSlept: Math.round(hoursSlept * 10) / 10,
+      hoursSlept: hoursSlept == null ? null : Math.round(hoursSlept * 10) / 10,
       recovery,
       source: {
         feature: "10",
         gatheredAt: now,
-        stale: hoursSlept === 0 && recovPt == null,
+        stale: hoursSlept == null && recovPt == null,
       },
     };
   }
@@ -143,7 +145,12 @@ export class BriefingService {
       return {
         events: events.map((e) => ({
           time: e.start.dateTime
-            ? new Date(e.start.dateTime).toISOString().slice(11, 16)
+            ? new Date(e.start.dateTime).toLocaleTimeString("en-US", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                timeZone: this.config.timezone ?? "UTC",
+              })
             : "all-day",
           title: e.summary,
           key: e.attendees.length > 2, // multi-person meetings are "key"
@@ -213,7 +220,12 @@ export function renderTemplateBrief(context: BriefingContext): string {
       ok: "Recovery is **ok**.",
       high: "Recovery is **high** — great day for demanding work.",
     }[recovery];
-    lines.push(`🌙 You slept **${hoursSlept}h** last night. ${recMsg}`);
+    if (hoursSlept == null) {
+      // Recovery exists but no duration point — don't state "0h" as fact.
+      lines.push(`🌙 No sleep duration recorded for last night. ${recMsg}`);
+    } else {
+      lines.push(`🌙 You slept **${hoursSlept}h** last night. ${recMsg}`);
+    }
     lines.push("");
   } else {
     lines.push("🌙 No sleep data for last night.");
@@ -273,7 +285,9 @@ function buildLlmPrompt(context: BriefingContext): string {
   ];
 
   if (context.sleep) {
-    parts.push(`Sleep: ${context.sleep.hoursSlept}h, recovery=${context.sleep.recovery} (${context.sleep.score}%)`);
+    const duration =
+      context.sleep.hoursSlept == null ? "duration unknown" : `${context.sleep.hoursSlept}h`;
+    parts.push(`Sleep: ${duration}, recovery=${context.sleep.recovery} (${context.sleep.score}%)`);
   } else {
     parts.push("Sleep: no data");
   }

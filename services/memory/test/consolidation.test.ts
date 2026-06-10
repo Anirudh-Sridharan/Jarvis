@@ -226,3 +226,105 @@ describe("ConsolidationService - run structure", () => {
     expect(store.getPendingExperienceRecords()).toHaveLength(0);
   });
 });
+
+describe("ConsolidationService - partial runs keep failed records pending", () => {
+  /** LLM that fails extraction for records containing a marker, delegates otherwise. */
+  class PartiallyFailingLlm extends FakeLlm {
+    override async complete(opts: {
+      system?: string;
+      prompt: string;
+      json?: boolean;
+    }): Promise<string> {
+      if (
+        opts.prompt.includes("discrete, updateable FACTS") &&
+        opts.prompt.includes("FAILME")
+      ) {
+        throw new Error("simulated LLM extraction failure");
+      }
+      return super.complete(opts);
+    }
+  }
+
+  it("marks only successfully-extracted records consolidated and sets status=partial", async () => {
+    const { store, capture, consolidation } = makeConsolidation(new PartiallyFailingLlm());
+
+    const good = await capture.captureNote({ text: "I prefer TypeScript", noteId: "good-note" });
+    const bad = await capture.captureNote({ text: "FAILME this record breaks the LLM", noteId: "bad-note" });
+
+    const result = await consolidation.run("manual");
+
+    // Run is partial, not completed — records were lost otherwise
+    expect(result.run.status).toBe("partial");
+    // The failure is recorded with the record id
+    expect(
+      result.run.errors.some((e) => e.stage === 2 && e.recordId === bad.record.id),
+    ).toBe(true);
+
+    // The failed record stays pending (retried next pass); the good one is cleared
+    const pending = store.getPendingExperienceRecords();
+    expect(pending.map((r) => r.id)).toContain(bad.record.id);
+    expect(pending.map((r) => r.id)).not.toContain(good.record.id);
+  });
+
+  it("a follow-up run with a healthy LLM consolidates the previously-failed record", async () => {
+    const { store, capture, consolidation } = makeConsolidation(new PartiallyFailingLlm());
+    await capture.captureNote({ text: "FAILME again", noteId: "retry-note" });
+    await consolidation.run("manual");
+    expect(store.getPendingExperienceRecords()).toHaveLength(1);
+
+    // Same store, healthy LLM
+    const { ConsolidationService } = await import("../src/consolidation/consolidation.js");
+    const healthy = new ConsolidationService(store, new FakeLlm(), new FakeEmbedder());
+    const result = await healthy.run("manual");
+    expect(result.run.status).toBe("completed");
+    expect(store.getPendingExperienceRecords()).toHaveLength(0);
+  });
+});
+
+describe("Contradiction resolution - source trust and validity intervals", () => {
+  it("a user-corrected fact (trust 1.0) is NOT invalidated by a lower-trust incoming fact", async () => {
+    const { store } = makeConsolidation();
+    const { resolveFact } = await import("../src/consolidation/contradictions.js");
+
+    // Prior: user correction, maximally trusted
+    const prior = await store.upsertFact({
+      subjectId: "self",
+      predicate: "manager_is",
+      objectLiteral: "Priya",
+      text: "self manager_is Priya",
+      validFrom: "2026-01-01T00:00:00Z",
+      sourceTrust: 1.0,
+      provenance: { source: "system", sourceId: "user-correction", confidence: 1.0 },
+    });
+    expect(store.getFactById(prior.id)!.sourceTrust).toBe(1.0);
+
+    // Incoming extracted fact from a conversation (trust 0.8), newer validFrom
+    const incoming = {
+      id: "incoming-contradiction-1",
+      runId: "run-1",
+      sourceRecordId: "rec-1",
+      entity: "self",
+      predicate: "manager_is",
+      object: "Bob",
+      text: "self manager_is Bob",
+      confidence: 0.9,
+      validFrom: "2026-06-01T00:00:00Z",
+      validTo: null,
+      sourceTrust: 0.8,
+    };
+
+    const result = await resolveFact(incoming, store, new FakeLlm());
+
+    // Prior (higher trust) wins: it stays live and is not invalidated
+    expect(result.invalidatedIds).toHaveLength(0);
+    const priorAfter = store.getFactById(prior.id)!;
+    expect(priorAfter.validTo).toBeNull();
+    expect(priorAfter.invalidatedAt).toBeNull();
+
+    // The losing incoming fact is stored as historical, closed at its OWN
+    // validFrom (zero-length interval — never a negative one)
+    const losing = store.getFactById(result.factId)!;
+    expect(losing.validTo).toBe(incoming.validFrom);
+    expect(losing.validTo! >= losing.validFrom).toBe(true);
+  });
+});

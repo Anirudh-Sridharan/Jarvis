@@ -143,6 +143,65 @@ describe("RetrievalService - getProceduralBlock", () => {
   });
 });
 
+describe("RetrievalService - degrades to BM25/entity when embedder is unavailable", () => {
+  it("returns keyword results when the embedder returns no vectors", async () => {
+    const { store } = makeRetrieval();
+    await store.upsertEpisode({
+      text: "User prefers TypeScript over Python for type safety",
+      occurredAt: "2026-06-01T10:00:00Z",
+      provenance: { source: "chat", sourceId: "msg-1", confidence: 0.9 },
+    });
+
+    // Embedder like the dashboard BFF's no-op: returns an empty batch
+    const emptyEmbedder = { embed: async (_texts: string[]) => [] as number[][] };
+    const degraded = new RetrievalService(store, emptyEmbedder);
+
+    const results = await degraded.retrieve("TypeScript type safety", { k: 5 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]?.text).toContain("TypeScript");
+  });
+
+  it("returns keyword results when the embedder throws", async () => {
+    const { store } = makeRetrieval();
+    await store.upsertEpisode({
+      text: "Whoop recovery score was 85 this morning",
+      occurredAt: "2026-06-01T08:00:00Z",
+      provenance: { source: "note", sourceId: "n-1", confidence: 0.9 },
+    });
+
+    const throwingEmbedder = {
+      embed: async (_texts: string[]): Promise<number[][]> => {
+        throw new Error("embedder down");
+      },
+    };
+    const degraded = new RetrievalService(store, throwingEmbedder);
+
+    const results = await degraded.retrieve("Whoop recovery score", { k: 5 });
+    expect(results.length).toBeGreaterThan(0);
+  });
+});
+
+describe("RetrievalService - access tracking", () => {
+  it("increments access_count and last_accessed_at for returned memories", async () => {
+    const { store, retrieval } = makeRetrieval();
+    const ep = await store.upsertEpisode({
+      text: "User prefers TypeScript for backend services",
+      occurredAt: "2026-06-01T10:00:00Z",
+      provenance: { source: "chat", sourceId: "touch-1", confidence: 0.9 },
+    });
+
+    const results = await retrieval.retrieve("TypeScript backend services", { k: 5 });
+    expect(results.some((r) => r.memoryId === ep.id)).toBe(true);
+
+    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const row = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+    expect(row.access_count).toBe(1);
+    expect(row.last_accessed_at).toBeGreaterThan(0);
+  });
+});
+
 describe("RetrievalService - fusion score breakdown", () => {
   it("returned memories include score breakdown", async () => {
     const { store, retrieval } = makeRetrieval();

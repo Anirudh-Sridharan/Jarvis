@@ -21,10 +21,14 @@ export interface ChunkerConfig {
   maxChars?: number;
 }
 
-// Matches a sentence terminator followed by whitespace or end-of-string,
-// or a newline. We match the full terminator including trailing space.
+// Matches a sentence terminator followed by whitespace, or a newline.
 // We use a global regex and scan with findAll to locate the rightmost match.
-const TERMINATOR_RE = /[.!?…](?=\s|$)|\n/g;
+//
+// NOTE: deliberately NOT `(?=\s|$)` — mid-stream, the end of the buffer is
+// not evidence of a sentence boundary (the next token may continue it, e.g.
+// "Pi is 3" + "." + "14"). The end-of-stream flush below emits the tail, so
+// a terminator at the very end of the reply is still spoken promptly.
+const TERMINATOR_RE = /[.!?…](?=\s)|\n/g;
 
 /** Find all terminator positions in `text`. Returns array of end-indices. */
 function findTerminators(text: string): number[] {

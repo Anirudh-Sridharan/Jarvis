@@ -5,9 +5,59 @@
  *   - workEventsToMetricPoints: daily count bucketing
  */
 
-import { describe, it, expect } from "vitest";
-import { workEventsToMetricPoints } from "../src/connectors/github.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { githubConnector, workEventsToMetricPoints } from "../src/connectors/github.js";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  makeTokens,
+  githubCommitsFixture,
+} from "../src/testing/fakes.js";
 import type { WorkEvent } from "../src/types.js";
+
+describe("githubConnector.sync — PAT requirement", () => {
+  let http: FakeHttp;
+  let tokenStore: MemoryTokenStore;
+
+  beforeEach(() => {
+    http = new FakeHttp();
+    tokenStore = new MemoryTokenStore();
+    vi.stubEnv("GITHUB_REPOS", "user/jarvis");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("throws a clear error when no PAT is present (instead of an 'ok' run with 0 points)", async () => {
+    await expect(githubConnector.sync(null, http, tokenStore)).rejects.toThrow(
+      /personal access token/
+    );
+    // It must fail before issuing unauthenticated requests
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("syncs normally when a PAT is present", async () => {
+    tokenStore.seed("github", makeTokens({ accessToken: "ghp_test" }));
+    http.add("/commits", { status: 200, headers: {}, body: githubCommitsFixture("user/jarvis") });
+    http.add("/pulls", { status: 200, headers: {}, body: [] });
+    http.add("/issues", { status: 200, headers: {}, body: [] });
+
+    const result = await githubConnector.sync(null, http, tokenStore);
+
+    expect(result.points.some((p) => p.metric === "github.commits")).toBe(true);
+    const auth = http.calls[0]?.req.headers?.["Authorization"];
+    expect(auth).toBe("token ghp_test");
+  });
+
+  it("remains a no-op (no throw) when no repos are configured", async () => {
+    vi.stubEnv("GITHUB_REPOS", "");
+    const result = await githubConnector.sync(null, http, tokenStore);
+    expect(result.points).toHaveLength(0);
+    expect(result.nextCursor).toBeNull();
+    expect(http.calls).toHaveLength(0);
+  });
+});
 
 function makeWorkEvent(overrides: Partial<WorkEvent> = {}): WorkEvent {
   return {

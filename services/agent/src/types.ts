@@ -85,6 +85,13 @@ export interface AgentState {
   reflections: string[];
   routeTier: "local" | "hf";
   status: RunStatus;
+  /**
+   * Per-run taint accumulated from tool outputs that contained injection
+   * markers. Once set, every subsequent ProposedAction is built with
+   * derivedFromExternal: true and these flags, so the policy's taint/injection
+   * escalation actually fires. Optional for backward-compat with old checkpoints.
+   */
+  taint?: { flags: string[]; sources: string[] };
 }
 
 // ── Feature 17 — Action Approval & Safety Gate ───────────────────────────────

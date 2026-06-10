@@ -32,12 +32,22 @@ export const githubConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const tokens = await tokenStore.get("github");
-    const pat = tokens?.accessToken ?? "";
-
     // Repos to sync from cursor metadata (or default to configured list)
     const since = cursor?.highWater ?? thirtyDaysAgo();
     const repos = getRepos();
+    if (repos.length === 0) {
+      return { points: [], nextCursor: null }; // no repos configured → no-op sync
+    }
+
+    const tokens = await tokenStore.get("github");
+    const pat = tokens?.accessToken;
+    if (!pat) {
+      // Without a PAT every request 401s and is silently swallowed — the run
+      // would be recorded "ok" with 0 points. Fail loudly instead.
+      throw new Error(
+        "GitHub sync requires a personal access token: no token found in TokenStore for source 'github'."
+      );
+    }
 
     const events: WorkEvent[] = [];
     let latestTs = since;

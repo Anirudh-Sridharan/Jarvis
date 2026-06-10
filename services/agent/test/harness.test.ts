@@ -58,6 +58,12 @@ describe("parseLlmToolCall", () => {
     expect(parseLlmToolCall("not json at all")).toBeNull();
   });
 
+  it("returns null when openai-format arguments string is unparseable (no silent {} coercion)", () => {
+    expect(
+      parseLlmToolCall('{"name": "search", "arguments": "{not valid json"}'),
+    ).toBeNull();
+  });
+
   it("returns null for JSON without tool/name", () => {
     expect(parseLlmToolCall('{"x": 1}')).toBeNull();
   });
@@ -183,6 +189,40 @@ describe("validateAndRetry harness", () => {
     }
     // Called exactly MAX_VALIDATION_RETRIES times
     expect(llm.callLog.length).toBe(MAX_VALIDATION_RETRIES);
+  });
+
+  it("malformed openai arguments string → retry-with-feedback, never execution with {}", async () => {
+    // A tool whose schema is ALL-OPTIONAL: {} would validate, so the old
+    // silent-{} coercion would have executed with args the model never produced.
+    const noop = {
+      name: "noop",
+      description: "All-optional args",
+      schema: z.object({ mode: z.string().optional() }),
+      readOnly: true,
+      run: async () => "ok",
+    };
+    const tools = makeToolRegistry([noop]);
+
+    const llm = new FakeLlm().setScript([
+      '{"name": "noop", "arguments": "{broken json"}', // attempt 1: malformed
+      '{"tool": "noop", "args": {"mode": "safe"}}', // attempt 2: valid
+    ]);
+
+    const result = await validateAndRetry({
+      llm,
+      goal: "do the thing",
+      scratchpad: [],
+      tools,
+    });
+
+    expect("aborted" in result).toBe(false);
+    if (!("aborted" in result)) {
+      // It retried — it did NOT succeed on attempt 1 with coerced {}.
+      expect(result.attempts).toBe(2);
+      expect(result.args).toMatchObject({ mode: "safe" });
+    }
+    expect(llm.callLog.length).toBe(2);
+    expect(llm.callLog[1]).toContain("Could not parse");
   });
 
   it("passes the __done__ sentinel through without validation", async () => {

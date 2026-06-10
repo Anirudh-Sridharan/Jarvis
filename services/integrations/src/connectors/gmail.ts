@@ -21,14 +21,10 @@ import type {
 } from "../types.js";
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
+import { getRefreshConfig } from "../framework/providers.js";
 
 const ADAPTER_VERSION = "1";
-
-const GMAIL_OAUTH_CONFIG = {
-  tokenUrl: "https://oauth2.googleapis.com/token",
-  clientId: process.env["GMAIL_CLIENT_ID"] ?? "gmail_client",
-  clientSecret: process.env["GMAIL_CLIENT_SECRET"] ?? "gmail_secret",
-};
+const MAX_PAGES = 10;
 
 export const gmailConnector: Connector = {
   id: "gmail",
@@ -41,21 +37,39 @@ export const gmailConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const token = await getAccessToken("gmail", tokenStore, http, GMAIL_OAUTH_CONFIG);
+    const token = await getAccessToken("gmail", tokenStore, http, getRefreshConfig("gmail"));
 
     const since = cursor?.highWater ?? sevenDaysAgo();
     const events: WorkEvent[] = [];
 
-    // Search for received messages
-    const receivedUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=after:${toGmailDate(since)}&maxResults=100`;
-    const receivedRes = await http.request({
-      method: "GET",
-      url: receivedUrl,
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    // Search for received messages. Gmail returns newest-first, so we MUST
+    // follow nextPageToken — otherwise >100 new messages means the cursor
+    // advances past unfetched older ones, losing them forever.
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const params = new URLSearchParams({
+        q: `after:${toGmailDate(since)}`,
+        maxResults: "100",
+      });
+      if (pageToken) params.set("pageToken", pageToken);
 
-    if (receivedRes.status === 200) {
-      const data = receivedRes.body as { messages?: Array<{ id: string; threadId: string }> };
+      const receivedRes = await http.request({
+        method: "GET",
+        url: `https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      // A failed page-level list fetch must fail the run: the cursor would
+      // otherwise advance past messages we never saw.
+      if (receivedRes.status !== 200) {
+        throw new Error(`Gmail messages.list failed: HTTP ${receivedRes.status}`);
+      }
+
+      const data = receivedRes.body as {
+        messages?: Array<{ id: string; threadId: string }>;
+        nextPageToken?: string;
+      };
+
       for (const msg of data.messages ?? []) {
         // Fetch metadata only
         const metaRes = await http.request({
@@ -69,7 +83,11 @@ export const gmailConnector: Connector = {
           const ev = normalizeGmailMessage(meta, "email_received");
           if (ev) events.push(ev);
         }
+        // Per-message metadata misses are tolerated (skipped), not fatal.
       }
+
+      pageToken = data.nextPageToken;
+      if (!pageToken) break;
     }
 
     // Get unread count
@@ -84,16 +102,21 @@ export const gmailConnector: Connector = {
     if (unreadRes.status === 200) {
       const label = unreadRes.body as { messagesUnread?: number };
       if (label.messagesUnread != null) {
-        const now = new Date().toISOString();
+        const now = new Date();
+        // Bucket ts to the start of the current hour: re-runs within the hour
+        // produce the same deterministic id and upsert instead of appending.
+        const hourStart = new Date(now);
+        hourStart.setUTCMinutes(0, 0, 0);
+        const ts = hourStart.toISOString();
         points.push({
-          id: makeMetricId({ source: "gmail", metric: "gmail.unread_count", ts: now, dims: {} }),
+          id: makeMetricId({ source: "gmail", metric: "gmail.unread_count", ts, dims: {} }),
           source: "gmail",
           metric: "gmail.unread_count",
           value: label.messagesUnread,
           unit: "count",
-          ts: now,
+          ts,
           dims: {},
-          ingestedAt: now,
+          ingestedAt: now.toISOString(),
           adapterVersion: ADAPTER_VERSION,
         });
       }
@@ -139,12 +162,10 @@ export function normalizeGmailMessage(
   const dateHeader = headers.find((h) => h.name?.toLowerCase() === "date")?.value;
   const inReplyTo = headers.find((h) => h.name?.toLowerCase() === "in-reply-to")?.value;
 
-  // Use internalDate (ms) or parse Date header
-  const ts = msg.internalDate
-    ? new Date(parseInt(msg.internalDate, 10)).toISOString()
-    : dateHeader
-    ? new Date(dateHeader).toISOString()
-    : new Date().toISOString();
+  // Use internalDate (ms) → Date header → now. Each candidate is validated:
+  // an unparseable date must not throw (a poison message would wedge every
+  // subsequent sync because the cursor never advances past it).
+  const ts = parseMessageTs(msg.internalDate, dateHeader);
 
   // Determine if sent (has SENT label)
   const isSent = msg.labelIds?.includes("SENT") ?? false;
@@ -212,6 +233,19 @@ export function gmailEventsToMetricPoints(events: WorkEvent[]): MetricPoint[] {
   }
 
   return points;
+}
+
+/** Best-effort message timestamp: internalDate (ms) → Date header → now. */
+function parseMessageTs(internalDate?: string, dateHeader?: string): string {
+  if (internalDate) {
+    const d = new Date(parseInt(internalDate, 10));
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  if (dateHeader) {
+    const d = new Date(dateHeader);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return new Date().toISOString();
 }
 
 function sevenDaysAgo(): string {

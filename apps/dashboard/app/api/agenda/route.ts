@@ -8,16 +8,22 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import type { WidgetEnvelope, AgendaEvent } from "@/app/lib/contracts";
+import { localDateStr, localDayBounds } from "@/app/lib/dates";
 import { getIntegrations } from "@/app/lib/services";
 import type { CalendarEvent } from "@jarvis/integrations";
 
+/** HH:MM in the machine's local timezone (NOT UTC — toISOString would shift it). */
+function localTime(dateTime: string): string {
+  return new Date(dateTime).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
 function toContract(e: CalendarEvent): AgendaEvent {
-  const startStr = e.start.dateTime
-    ? new Date(e.start.dateTime).toISOString().slice(11, 16)
-    : e.start.date ?? "";
-  const endStr = e.end.dateTime
-    ? new Date(e.end.dateTime).toISOString().slice(11, 16)
-    : e.end.date ?? "";
+  const startStr = e.start.dateTime ? localTime(e.start.dateTime) : e.start.date ?? "";
+  const endStr = e.end.dateTime ? localTime(e.end.dateTime) : e.end.date ?? "";
 
   return {
     id: e.id,
@@ -31,15 +37,21 @@ function toContract(e: CalendarEvent): AgendaEvent {
 
 export async function GET(req: NextRequest) {
   const t0 = Date.now();
-  const date = req.nextUrl.searchParams.get("date") ?? todayDate();
-  const dayStart = `${date}T00:00:00.000Z`;
-  const dayEnd = `${date}T23:59:59.999Z`;
+  // Day window = the LOCAL day, not the UTC day — otherwise evening events
+  // land on the wrong date for anyone west/east of UTC.
+  const requested = req.nextUrl.searchParams.get("date");
+  const date =
+    requested && /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : localDateStr();
+  const { dayStart, dayEnd } = localDayBounds(date);
 
   try {
     const { calendar } = getIntegrations();
     const events = calendar.mirror.getEvents("primary", dayStart, dayEnd);
     const contracts = events
       .filter((e) => e.status !== "cancelled")
+      // The mirror matches all-day events by date-prefix of the bounds, which
+      // can spill a day past the local window — keep only the requested day.
+      .filter((e) => !e.allDay || e.start.date === date)
       .map(toContract);
 
     const envelope: WidgetEnvelope<AgendaEvent[]> = {
@@ -63,8 +75,4 @@ export async function GET(req: NextRequest) {
     };
     return NextResponse.json(envelope);
   }
-}
-
-function todayDate(): string {
-  return new Date().toISOString().slice(0, 10);
 }

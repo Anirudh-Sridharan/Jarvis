@@ -43,6 +43,16 @@ export default function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, waking]);
 
+  // Abort any in-flight stream on unmount so the reader loop stops instead of
+  // running (and firing setState) after navigation away. The abort surfaces in
+  // send() as an AbortError, which is already swallowed; React treats the
+  // post-unmount setState calls in `finally` as no-ops.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const appendToAssistant = useCallback((id: string, text: string) => {
     setMessages((prev) =>
       prev.map((m) => (m.id === id ? { ...m, content: m.content + text } : m)),

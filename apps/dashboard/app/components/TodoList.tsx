@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import type { TodoContract, WidgetEnvelope } from "@/app/lib/contracts";
+import { isOverdue } from "@/app/lib/dates";
 
 interface TodoListProps {
   initialEnvelope: WidgetEnvelope<TodoContract[]>;
@@ -59,7 +60,7 @@ export default function TodoList({ initialEnvelope }: TodoListProps) {
   }, []);
 
   const open = todos.filter((t) => t.status === "open");
-  const isNow = (due?: string) => due ? new Date(due) < new Date() : false;
+  const isNow = (due?: string) => (due ? isOverdue(due) : false);
 
   return (
     <div className="card">

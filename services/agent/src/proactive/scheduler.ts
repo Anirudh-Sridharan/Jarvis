@@ -33,14 +33,13 @@ import type {
   Clock,
   LlmClient,
   ToolRegistry,
-  ApprovalSink,
 } from "../types.js";
 import { TriggerStore } from "./triggers.js";
 import { EpisodicStateStore } from "./episodicState.js";
 import { AgentRunner } from "../core/agent.js";
-import { Checkpointer } from "../core/checkpointer.js";
-import { ApprovalService } from "../safety/approval.js";
-import { AuditLog } from "../safety/audit.js";
+import type { Checkpointer } from "../core/checkpointer.js";
+import type { ApprovalService } from "../safety/approval.js";
+import type { AuditLog } from "../safety/audit.js";
 
 const RUN_DDL = `
 CREATE TABLE IF NOT EXISTS trigger_runs (
@@ -80,7 +79,17 @@ export interface SchedulerOptions {
   clock: Clock;
   llm: LlmClient;
   tools: ToolRegistry;
-  approvalSink: ApprovalSink;
+  /**
+   * SHARED safety/persistence instances — the same objects used by the rest
+   * of the agent system. The Scheduler must NOT construct its own: two
+   * AuditLog instances over the same file cache latestSeq/latestHash in
+   * memory and the second writer throws on the PRIMARY KEY constraint; a
+   * private ApprovalService would create requests nobody can approve through
+   * the public system.approvals.
+   */
+  auditLog: AuditLog;
+  approvalService: ApprovalService;
+  checkpointer: Checkpointer;
   /** DST-aware cron next-fire parser. Returns ms-since-epoch for next occurrence. */
   parseCronNext?: (expr: string, tz: string, after?: number) => number | null;
   /** Optional event bus */
@@ -115,14 +124,14 @@ export class Scheduler {
     this.runDb.exec("PRAGMA journal_mode=WAL");
     this.runDb.exec(RUN_DDL);
 
-    this.approvalService = new ApprovalService(opts.approvalSink, opts.clock);
-    this.auditLog = new AuditLog(opts.dataDir);
+    // Shared instances injected by createAgentSystem — never re-constructed.
+    this.approvalService = opts.approvalService;
+    this.auditLog = opts.auditLog;
 
-    const checkpointer = new Checkpointer(opts.dataDir);
     this.agentRunner = new AgentRunner({
       llm: opts.llm,
       tools: opts.tools,
-      checkpointer,
+      checkpointer: opts.checkpointer,
       approvalService: this.approvalService,
       auditLog: this.auditLog,
       clock: opts.clock,

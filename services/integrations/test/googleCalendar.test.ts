@@ -17,6 +17,7 @@ import {
   busyIntervals,
   findFreeTime,
   detectConflicts,
+  eventToMetricPoint,
 } from "../src/connectors/googleCalendar.js";
 import { FakeHttp, MemoryTokenStore, makeTokens, gcalEventsFixture } from "../src/testing/fakes.js";
 import type { CalendarEvent } from "../src/types.js";
@@ -179,6 +180,20 @@ describe("CalendarMirror", () => {
   });
 });
 
+describe("eventToMetricPoint", () => {
+  it("two events starting at the same instant produce distinct point ids", () => {
+    const a = makeEvent({ id: "evt-a", summary: "Meeting A" });
+    const b = makeEvent({ id: "evt-b", summary: "Meeting B" }); // same start as A
+
+    const pa = eventToMetricPoint(a);
+    const pb = eventToMetricPoint(b);
+
+    expect(pa.id).not.toBe(pb.id);
+    expect(pa.dims["eventId"]).toBe("evt-a");
+    expect(pb.dims["eventId"]).toBe("evt-b");
+  });
+});
+
 describe("Conflict detection + free-busy", () => {
   const events: CalendarEvent[] = [
     makeEvent({ id: "a", summary: "Morning standup", start: { dateTime: "2026-06-09T10:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-06-09T10:30:00Z", timeZone: "UTC" } }),
@@ -239,6 +254,89 @@ describe("Conflict detection + free-busy", () => {
       (s) => s.start >= "2026-06-09T10:30:00Z" && s.end <= "2026-06-09T14:00:00Z"
     );
     expect(midSlot).toBeDefined();
+  });
+
+  it("busyIntervals skips events missing end.dateTime (would break cursor advance)", () => {
+    const noEnd = makeEvent({
+      id: "no-end",
+      start: { dateTime: "2026-06-09T11:00:00Z", timeZone: "UTC" },
+      end: { timeZone: "UTC" }, // no dateTime
+    });
+    const busy = busyIntervals([...events, noEnd]);
+    expect(busy).toHaveLength(2);
+    expect(busy.every((b) => b.end !== undefined)).toBe(true);
+
+    // findFreeTime must not offer a slot built on an undefined interval end
+    const free = findFreeTime("2026-06-09T09:00:00Z", "2026-06-09T17:00:00Z", 30, [
+      ...events,
+      noEnd,
+    ]);
+    expect(free.every((s) => s.start && s.end)).toBe(true);
+  });
+
+  it("compares mixed-UTC-offset timestamps by epoch, not lexicographically", () => {
+    // 15:30+05:30 === 10:00Z; lexicographic comparison would misorder it
+    const offsetEvent = makeEvent({
+      id: "offset",
+      start: { dateTime: "2026-06-09T15:30:00+05:30", timeZone: "Asia/Kolkata" },
+      end: { dateTime: "2026-06-09T16:00:00+05:30", timeZone: "Asia/Kolkata" },
+    });
+
+    // detectConflicts: proposed 10:00Z–10:30Z overlaps the offset event exactly
+    const conflicts = detectConflicts(
+      "2026-06-09T10:00:00Z",
+      "2026-06-09T10:30:00Z",
+      [offsetEvent]
+    );
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]?.source).toBe("offset");
+
+    // findFreeTime: no returned free slot may overlap the busy interval (in epoch terms)
+    const free = findFreeTime("2026-06-09T09:00:00Z", "2026-06-09T12:00:00Z", 30, [
+      offsetEvent,
+    ]);
+    expect(free.length).toBeGreaterThan(0);
+    const busyStart = Date.parse("2026-06-09T10:00:00Z");
+    const busyEnd = Date.parse("2026-06-09T10:30:00Z");
+    for (const s of free) {
+      const sStart = Date.parse(s.start);
+      const sEnd = Date.parse(s.end);
+      expect(sStart < busyEnd && sEnd > busyStart).toBe(false);
+    }
+    // And the gap around the meeting is correctly identified
+    expect(free.some((s) => Date.parse(s.end) === busyStart)).toBe(true);
+    expect(free.some((s) => Date.parse(s.start) === busyEnd)).toBe(true);
+  });
+
+  it("clamps free slots to windowEnd", () => {
+    // Busy event ends at 10:30; window ends at 11:00 (before work-hours end)
+    const free = findFreeTime("2026-06-09T09:00:00Z", "2026-06-09T11:00:00Z", 30, events);
+    for (const s of free) {
+      expect(Date.parse(s.end)).toBeLessThanOrEqual(Date.parse("2026-06-09T11:00:00Z"));
+    }
+    expect(free.some((s) => Date.parse(s.end) === Date.parse("2026-06-09T11:00:00Z"))).toBe(true);
+  });
+
+  it("clamps free slots to the work-hours end", () => {
+    // Window runs to 20:00 but workHoursEnd defaults to 18 → nothing past 18:00Z
+    const free = findFreeTime("2026-06-09T09:00:00Z", "2026-06-09T20:00:00Z", 30, events);
+    const workEndMs = Date.parse("2026-06-09T18:00:00Z");
+    for (const s of free) {
+      expect(Date.parse(s.end)).toBeLessThanOrEqual(workEndMs);
+    }
+    expect(free.some((s) => Date.parse(s.end) === workEndMs)).toBe(true);
+
+    // Explicit workHoursEnd is honored too
+    const freeTo16 = findFreeTime(
+      "2026-06-09T09:00:00Z",
+      "2026-06-09T20:00:00Z",
+      30,
+      events,
+      { workHoursEnd: 16 }
+    );
+    for (const s of freeTo16) {
+      expect(Date.parse(s.end)).toBeLessThanOrEqual(Date.parse("2026-06-09T16:00:00Z"));
+    }
   });
 
   it("syncToken 410 flow: normalizeCalendarEvent handles cancelled status for tombstone", () => {

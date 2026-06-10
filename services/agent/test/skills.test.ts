@@ -16,7 +16,11 @@ import { emailTriageSkill } from "../src/skills/emailTriage.js";
 import { webResearchSkill, verifyCitations } from "../src/skills/webResearch.js";
 import { remindersSkill } from "../src/skills/reminders.js";
 import { calendarSkill } from "../src/skills/calendarSkill.js";
-import { SkillRegistry } from "../src/skills/registry.js";
+import {
+  SkillRegistry,
+  ToolNotAllowedError,
+  ToolApprovalDeniedError,
+} from "../src/skills/registry.js";
 import { ApprovalService } from "../src/safety/approval.js";
 import { AuditLog } from "../src/safety/audit.js";
 import { registerToolMeta } from "../src/safety/policy.js";
@@ -39,7 +43,7 @@ import {
   ManualApprovalSink,
   FixedClock,
 } from "../src/testing/fakes.js";
-import type { SkillCtx } from "../src/skills/registry.js";
+import type { Skill, SkillCtx } from "../src/skills/registry.js";
 
 function makeTempDir() {
   return mkdtempSync(join(tmpdir(), "skills-test-"));
@@ -51,9 +55,10 @@ function makeCtx(
   approvalService: ApprovalService,
   auditLog: AuditLog,
   clock: FixedClock,
+  forSkill?: Pick<Skill, "id" | "allowedTools">,
 ): SkillCtx {
   const registry = new SkillRegistry();
-  return registry.makeCtx(tools, llm, approvalService, auditLog, clock);
+  return registry.makeCtx(tools, llm, approvalService, auditLog, clock, forSkill);
 }
 
 describe("emailTriage skill", () => {
@@ -93,7 +98,7 @@ describe("emailTriage skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, emailTriageSkill);
 
     const result = await emailTriageSkill.run({ window: "newer_than:1d" }, ctx);
 
@@ -129,7 +134,7 @@ describe("emailTriage skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, emailTriageSkill);
 
     const result = await emailTriageSkill.run({ window: "newer_than:1d" }, ctx);
 
@@ -159,7 +164,7 @@ describe("webResearch skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, webResearchSkill);
 
     const result = await webResearchSkill.run({ query: "TypeScript" }, ctx);
 
@@ -184,7 +189,7 @@ describe("webResearch skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, webResearchSkill);
 
     const result = await webResearchSkill.run({ query: "something", maxSources: 2 }, ctx);
 
@@ -223,7 +228,7 @@ describe("reminders skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, remindersSkill);
 
     const result = await remindersSkill.run(
       { action: "create", text: "Renew car insurance", due: "2024-06-01" },
@@ -251,7 +256,7 @@ describe("reminders skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, remindersSkill);
 
     const result = await remindersSkill.run(
       { action: "create", text: "Renew car insurance" },
@@ -281,7 +286,7 @@ describe("calendar skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, calendarSkill);
 
     const result = await calendarSkill.run(
       {
@@ -313,7 +318,7 @@ describe("calendar skill", () => {
     const clock = new FixedClock(Date.now());
     const auditLog = new AuditLog(tmpDir);
     const approvalService = new ApprovalService(sink, clock);
-    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, calendarSkill);
 
     const result = await calendarSkill.run(
       {
@@ -329,5 +334,141 @@ describe("calendar skill", () => {
     // An approval request was created
     expect(requests.length).toBeGreaterThan(0);
     expect(createTool.createdEvents.length).toBe(1);
+  });
+});
+
+describe("SkillCtx structural safety gate (ctx.tool)", () => {
+  let tmpDir: string;
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  it("a tool not in the skill's allowedTools throws and never executes", async () => {
+    tmpDir = makeTempDir();
+    const sendEmail = new FakeSendEmailTool();
+    const tools = makeToolRegistry([sendEmail]);
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoApproveSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+
+    // Skill is only allowed read tools — send_email is NOT in its list
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
+      id: "limited.skill",
+      allowedTools: ["search_threads", "get_thread"],
+    });
+
+    await expect(
+      ctx.tool("send_email", {
+        to: ["victim@example.com"],
+        subject: "exfil",
+        body: "secret data",
+      }),
+    ).rejects.toThrow(ToolNotAllowedError);
+
+    expect(sendEmail.sentEmails.length).toBe(0);
+    expect(requests.length).toBe(0);
+  });
+
+  it("non-readOnly tool is gated: rejection blocks execution", async () => {
+    tmpDir = makeTempDir();
+    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+
+    const sendEmail = new FakeSendEmailTool();
+    const tools = makeToolRegistry([sendEmail]);
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoRejectSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
+      id: "mailer.skill",
+      allowedTools: ["send_email"],
+    });
+
+    // The skill does NOT voluntarily request approval — the ctx must.
+    await expect(
+      ctx.tool("send_email", {
+        to: ["alice@example.com"],
+        subject: "Hi",
+        body: "Hello",
+      }),
+    ).rejects.toThrow(ToolApprovalDeniedError);
+
+    // The gate fired (a request was made) and the tool never ran.
+    expect(requests.length).toBe(1);
+    expect(sendEmail.sentEmails.length).toBe(0);
+  });
+
+  it("non-readOnly tool is gated: approval allows execution", async () => {
+    tmpDir = makeTempDir();
+    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+
+    const sendEmail = new FakeSendEmailTool();
+    const tools = makeToolRegistry([sendEmail]);
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoApproveSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
+      id: "mailer.skill",
+      allowedTools: ["send_email"],
+    });
+
+    const result = await ctx.tool("send_email", {
+      to: ["alice@example.com"],
+      subject: "Hi",
+      body: "Hello",
+    });
+
+    expect(requests.length).toBe(1);
+    expect(sendEmail.sentEmails.length).toBe(1);
+    expect(result).toMatchObject({ status: "sent" });
+  });
+
+  it("args are zod-validated before any execution or approval", async () => {
+    tmpDir = makeTempDir();
+    const sendEmail = new FakeSendEmailTool();
+    const tools = makeToolRegistry([sendEmail]);
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoApproveSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
+      id: "mailer.skill",
+      allowedTools: ["send_email"],
+    });
+
+    // 'to' must be an array of emails — invalid args must throw (ZodError)
+    await expect(
+      ctx.tool("send_email", { to: "not-an-array", subject: "Hi", body: "x" }),
+    ).rejects.toThrow();
+
+    expect(sendEmail.sentEmails.length).toBe(0);
+    expect(requests.length).toBe(0); // failed before reaching the gate
+  });
+
+  it("read-only tools run without approval requests", async () => {
+    tmpDir = makeTempDir();
+    const getThread = new FakeGetThreadTool();
+    const tools = makeToolRegistry([getThread]);
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoRejectSink(); // would deny if asked
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, {
+      id: "reader.skill",
+      allowedTools: ["get_thread"],
+    });
+
+    const result = await ctx.tool("get_thread", { id: "t-1" });
+    expect(result).toMatchObject({ id: "t-1" });
+    expect(requests.length).toBe(0);
   });
 });

@@ -102,7 +102,7 @@ export async function resolveFact(
       confidence: prior.provenance.confidence,
       validFrom: prior.validFrom,
       validTo: prior.validTo,
-      sourceTrust: 0.5,
+      sourceTrust: prior.sourceTrust,
     };
 
     if (sameValue(priorAsExtracted, incoming)) {
@@ -129,10 +129,11 @@ export async function resolveFact(
         store.invalidateFact({ factId: prior.id, validTo: incoming.validFrom, invalidatedBy: fact.id });
         invalidatedIds.push(prior.id);
       } else {
-        // Prior wins — insert incoming as historical (closed validity)
+        // Prior wins — insert incoming as historical (closed at its own
+        // validFrom: a zero-length interval, never a negative one)
         const closedFact = await store.upsertFact({
           ...buildFactInput(incoming, entityId),
-          validTo: priorAsExtracted.validFrom,
+          validTo: incoming.validFrom,
         });
         factId = closedFact.id;
       }
@@ -145,10 +146,11 @@ export async function resolveFact(
       store.invalidateFact({ factId: prior.id, validTo: incoming.validFrom, invalidatedBy: fact.id });
       invalidatedIds.push(prior.id);
     } else {
-      // Prior wins — insert incoming as historical
+      // Prior wins — insert incoming as historical, closed at its own
+      // validFrom (zero-length interval, never a negative one)
       const closedFact = await store.upsertFact({
         ...buildFactInput(incoming, entityId),
-        validTo: priorAsExtracted.validFrom,
+        validTo: incoming.validFrom,
       });
       factId = closedFact.id;
     }

@@ -20,7 +20,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AuditEntry } from "../types.js";
+import type { AuditEntry, Clock } from "../types.js";
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -59,7 +59,10 @@ export class AuditLog {
   private latestSeq: number = -1;
   private initialized = false;
 
-  constructor(dataDir: string) {
+  constructor(
+    dataDir: string,
+    private clock?: Clock,
+  ) {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, "audit.db"));
     this.db.exec("PRAGMA journal_mode=WAL");
@@ -89,7 +92,7 @@ export class AuditLog {
     e: Pick<AuditEntry, "kind" | "actionId" | "runId" | "payload">,
   ): AuditEntry {
     const seq = this.latestSeq + 1;
-    const ts = new Date().toISOString();
+    const ts = this.clock ? this.clock.isoNow() : new Date().toISOString();
     const prevHash = this.latestHash;
 
     const base: Omit<AuditEntry, "hash"> = {

@@ -4,6 +4,7 @@
  */
 
 import type { WidgetEnvelope, AgendaEvent } from "@/app/lib/contracts";
+import { localDateStr } from "@/app/lib/dates";
 import AgendaList from "@/app/components/AgendaList";
 
 const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
@@ -23,12 +24,12 @@ async function fetchAgenda(date: string): Promise<WidgetEnvelope<AgendaEvent[]>>
 }
 
 export default async function CalendarPage() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr();
 
-  // Fetch today + tomorrow
+  // Fetch today + tomorrow (local calendar days)
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+  const tomorrowStr = localDateStr(tomorrow);
 
   const [todayEnv, tomorrowEnv] = await Promise.all([
     fetchAgenda(today),

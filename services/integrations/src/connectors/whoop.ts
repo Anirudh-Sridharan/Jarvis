@@ -1,12 +1,16 @@
 /**
  * Whoop connector — OAuth2 with ROTATING refresh token (serialized).
  *
- * Endpoints:
- *   GET /v1/recovery  → recovery/HRV/RHR → MetricPoints
- *   GET /v1/activity/sleep → sleep duration/stages → MetricPoints
- *   GET /v1/cycle      → strain → MetricPoints
+ * Endpoints (v2 — v1 was sunset 2025-10-01):
+ *   GET /developer/v2/recovery        → recovery/HRV/RHR → MetricPoints
+ *   GET /developer/v2/activity/sleep  → sleep duration/stages → MetricPoints
+ *   GET /developer/v2/cycle           → strain → MetricPoints
  *
- * Rotating refresh: handled by oauth.ts getAccessToken(..., isRotating=true).
+ * Pagination: each collection returns { records, next_token }; pass it back as
+ * ?nextToken= until exhausted (page-count capped).
+ *
+ * Rotating refresh: handled by oauth.ts getAccessToken(..., isRotating=true);
+ * the refresh grant re-sends scope=offline (provider catalog).
  * Concurrency must be 1 at the scheduler level for Whoop.
  */
 
@@ -20,14 +24,11 @@ import type {
 } from "../types.js";
 import { makeMetricId } from "../framework/metricStore.js";
 import { getAccessToken } from "../framework/oauth.js";
+import { getRefreshConfig } from "../framework/providers.js";
 
 const ADAPTER_VERSION = "1";
-
-const WHOOP_OAUTH_CONFIG = {
-  tokenUrl: "https://api.prod.whoop.com/oauth/token",
-  clientId: process.env["WHOOP_CLIENT_ID"] ?? "whoop_client",
-  clientSecret: process.env["WHOOP_CLIENT_SECRET"] ?? "whoop_secret",
-};
+const WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v2";
+const MAX_PAGES_PER_COLLECTION = 10;
 
 export const whoopConnector: Connector = {
   id: "whoop",
@@ -44,7 +45,7 @@ export const whoopConnector: Connector = {
       "whoop",
       tokenStore,
       http,
-      WHOOP_OAUTH_CONFIG,
+      getRefreshConfig("whoop"),
       true // isRotating = true → serialized refresh critical section
     );
 
@@ -52,68 +53,28 @@ export const whoopConnector: Connector = {
     const points: MetricPoint[] = [];
     let latestTs = since;
 
-    // Fetch recovery records
-    const recoveryRes = await http.request({
-      method: "GET",
-      url: `https://api.prod.whoop.com/developer/v1/recovery?start=${since}&limit=25`,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (recoveryRes.status === 200) {
-      const data = recoveryRes.body as {
-        records?: WhoopRecovery[];
-        next_token?: string;
-      };
-      for (const r of data.records ?? []) {
-        const pts = normalizeWhoopRecovery(r);
+    const collect = <T>(records: T[], normalize: (r: T) => MetricPoint[]) => {
+      for (const r of records) {
+        const pts = normalize(r);
         points.push(...pts);
         for (const p of pts) {
           if (p.ts > latestTs) latestTs = p.ts;
         }
       }
-    }
+    };
 
-    // Fetch sleep records
-    const sleepRes = await http.request({
-      method: "GET",
-      url: `https://api.prod.whoop.com/developer/v1/activity/sleep?start=${since}&limit=25`,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (sleepRes.status === 200) {
-      const data = sleepRes.body as {
-        records?: WhoopSleep[];
-        next_token?: string;
-      };
-      for (const s of data.records ?? []) {
-        const pts = normalizeWhoopSleep(s);
-        points.push(...pts);
-        for (const p of pts) {
-          if (p.ts > latestTs) latestTs = p.ts;
-        }
-      }
-    }
-
-    // Fetch cycle/strain records
-    const cycleRes = await http.request({
-      method: "GET",
-      url: `https://api.prod.whoop.com/developer/v1/cycle?start=${since}&limit=25`,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (cycleRes.status === 200) {
-      const data = cycleRes.body as {
-        records?: WhoopCycle[];
-        next_token?: string;
-      };
-      for (const c of data.records ?? []) {
-        const pts = normalizeWhoopCycle(c);
-        points.push(...pts);
-        for (const p of pts) {
-          if (p.ts > latestTs) latestTs = p.ts;
-        }
-      }
-    }
+    collect(
+      await fetchAllPages<WhoopRecovery>(http, token, "recovery", since),
+      normalizeWhoopRecovery
+    );
+    collect(
+      await fetchAllPages<WhoopSleep>(http, token, "activity/sleep", since),
+      normalizeWhoopSleep
+    );
+    collect(
+      await fetchAllPages<WhoopCycle>(http, token, "cycle", since),
+      normalizeWhoopCycle
+    );
 
     return {
       points,
@@ -121,6 +82,44 @@ export const whoopConnector: Connector = {
     };
   },
 };
+
+/** Page through a v2 collection endpoint via next_token until exhausted. */
+async function fetchAllPages<T>(
+  http: HttpClient,
+  token: string,
+  collection: string,
+  since: string
+): Promise<T[]> {
+  const records: T[] = [];
+  let nextToken: string | undefined;
+
+  for (let page = 0; page < MAX_PAGES_PER_COLLECTION; page++) {
+    const params = new URLSearchParams({ start: since, limit: "25" });
+    if (nextToken) params.set("nextToken", nextToken);
+
+    const res = await http.request({
+      method: "GET",
+      url: `${WHOOP_API_BASE}/${collection}?${params}`,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    // Non-200 (rate limit, transient 5xx, auth failure): fail the whole run.
+    // The shared cursor advances past the max ts across ALL collections, so
+    // silently skipping one collection would permanently lose its window.
+    // Throwing makes the Scheduler record an error run without advancing.
+    if (res.status !== 200) {
+      throw new Error(`Whoop ${collection} sync failed: HTTP ${res.status}`);
+    }
+
+    const data = res.body as { records?: T[]; next_token?: string | null };
+    records.push(...(data.records ?? []));
+
+    if (!data.next_token) break;
+    nextToken = data.next_token;
+  }
+
+  return records;
+}
 
 // ── Normalizers ────────────────────────────────────────────────────────────────
 
@@ -154,7 +153,7 @@ interface WhoopSleepScore {
 }
 
 interface WhoopSleep {
-  id?: number;
+  id?: number | string; // v2 sleep IDs are UUID strings
   start?: string;
   end?: string;
   score_state?: "SCORED" | "PENDING_SCORE" | "UNSCORABLE";
@@ -247,7 +246,9 @@ export function normalizeWhoopSleep(s: WhoopSleep): MetricPoint[] {
 }
 
 export function normalizeWhoopCycle(c: WhoopCycle): MetricPoint[] {
-  if (c.score_state !== "SCORED" || !c.score?.strain) return [];
+  // `== null` (not falsy check): a strain of 0 is a legitimate rest day.
+  const strain = c.score?.strain;
+  if (c.score_state !== "SCORED" || strain == null) return [];
 
   const ts = c.start ?? new Date().toISOString();
   const ingestedAt = new Date().toISOString();
@@ -257,7 +258,7 @@ export function normalizeWhoopCycle(c: WhoopCycle): MetricPoint[] {
       id: makeMetricId({ source: "whoop", metric: "strain", ts, dims: {} }),
       source: "whoop",
       metric: "strain",
-      value: c.score.strain,
+      value: strain,
       unit: "score",
       ts,
       dims: {},

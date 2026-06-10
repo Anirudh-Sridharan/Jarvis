@@ -82,7 +82,10 @@ export function parseLlmToolCall(
       try {
         args = JSON.parse(rawArgs) as Record<string, unknown>;
       } catch {
-        args = {};
+        // Unparseable arguments string is a PARSE FAILURE — never silently
+        // execute with {} (tools with all-optional schemas would run with
+        // arguments the model never produced). Let the retry loop re-prompt.
+        return null;
       }
     } else if (typeof rawArgs === "object" && rawArgs !== null) {
       args = rawArgs as Record<string, unknown>;

@@ -29,9 +29,30 @@ import type { AuditLog } from "./audit.js";
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
-function hashArgs(args: Record<string, unknown>): string {
-  const canonical = JSON.stringify(args, Object.keys(args).sort());
-  return createHash("sha256").update(canonical).digest("hex");
+/**
+ * Canonical JSON serialization: object keys sorted at EVERY depth, so that
+ * semantically identical args always serialize (and hash) identically, and
+ * nested values are fully covered. (A JSON.stringify array-replacer whitelists
+ * keys at every depth and silently drops nested objects — do not use it here.)
+ */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null"; // undefined → "null"
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => canonicalJson(v)).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort();
+  return `{${keys
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+    .join(",")}}`;
+}
+
+export function hashArgs(args: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalJson(args)).digest("hex");
 }
 
 interface PendingEntry {
@@ -41,6 +62,8 @@ interface PendingEntry {
   timer: ReturnType<typeof setTimeout> | null;
   // If sink resolved before waitForDecision was called, store here
   earlyDecision: ApprovalDecision | null;
+  // The audit log that requested this approval — used for the expiry record.
+  auditLog: AuditLog;
 }
 
 export class ApprovalService {
@@ -67,13 +90,20 @@ export class ApprovalService {
     clock: Clock,
   ): Promise<{ decision: PolicyDecision; requestId?: string }> {
     const toolMeta = getToolMeta(action.tool);
-    const decision = classifyAndDecide(action, toolMeta);
+    const decision = classifyAndDecide(action, toolMeta, clock);
 
     auditLog.append({
       kind: "classified",
       actionId: action.id,
       runId: action.runId,
-      payload: { riskClass: decision.riskClass, outcome: decision.outcome },
+      payload: {
+        riskClass: decision.riskClass,
+        outcome: decision.outcome,
+        reasons: decision.reasons,
+        triggeredRules: decision.triggeredRules,
+        injectionFlags: action.provenance.injectionFlags,
+        derivedFromExternal: action.provenance.derivedFromExternal,
+      },
     });
 
     if (decision.outcome === "block") {
@@ -144,6 +174,7 @@ export class ApprovalService {
       resolve: null,
       timer: null,
       earlyDecision: null,
+      auditLog,
     };
     this.pending.set(requestId, entry);
     this.actionToRequest.set(action.id, requestId);
@@ -186,6 +217,16 @@ export class ApprovalService {
       entry.resolve = resolve;
       entry.timer = setTimeout(() => {
         entry.resolve = null;
+        // Mark the request expired and record it in the audit log —
+        // a silent timeout must leave a tamper-evident trace.
+        entry.request.status = "expired";
+        entry.request.resolvedAt = this.clock.isoNow();
+        entry.auditLog.append({
+          kind: "expired",
+          actionId: entry.actionId,
+          runId: entry.request.runId,
+          payload: { requestId, reason: "approval timeout" },
+        });
         this.pending.delete(requestId);
         this.actionToRequest.delete(actionId);
         resolve(null);
@@ -202,6 +243,10 @@ export class ApprovalService {
     auditLog: AuditLog,
     alwaysAllow?: AllowScope,
   ): void {
+    // Only register an always-allow grant for a request that is actually
+    // pending — a bogus/expired requestId must never mint a standing grant.
+    const entry = this.pending.get(requestId);
+    if (!entry || entry.request.status !== "pending") return;
     if (alwaysAllow) {
       this.grants.push(alwaysAllow);
     }
@@ -268,9 +313,9 @@ export class ApprovalService {
       if (g.expiresAt && g.expiresAt < now) return false;
       if (g.match === "any") return true;
       if (g.match === "exact_args" && g.bound) {
-        return Object.entries(g.bound).every(
-          ([k, v]) => JSON.stringify(action.args[k]) === JSON.stringify(v),
-        );
+        // Full-object canonical comparison: extra keys in the new action's
+        // args (bcc, attachments, …) must NOT match a narrower grant.
+        return canonicalJson(action.args) === canonicalJson(g.bound);
       }
       if (g.match === "same_recipient" && g.bound?.["to"]) {
         const recipient = action.args["to"];

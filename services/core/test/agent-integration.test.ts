@@ -387,6 +387,61 @@ describe("agent-integration: ApprovalQueue in-memory queue", () => {
     expect(queue.list().length).toBe(0);
   });
 
+  it("expired entries are evicted: list() omits them, approve()/reject() return false", async () => {
+    const queue = new ApprovalQueue();
+
+    // Entry whose agent-side approval window already closed.
+    const sinkPromise = queue.sink({
+      id: "req-expired",
+      actionId: "action-x",
+      runId: "run-x",
+      riskClass: "outward_comm",
+      summary: "expired email",
+      args: {},
+      reasoning: "test",
+      argsHash: "exp1",
+      status: "pending",
+      createdAt: new Date(Date.now() - 120_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(), // already past
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    // list() must not surface a dead approval the agent already timed out on.
+    expect(queue.list()).toHaveLength(0);
+    // Approving/rejecting an expired action must be a 404-shaped false, not
+    // a fake ok:true for something that will never execute.
+    expect(queue.approve("req-expired", "test-user")).toBe(false);
+    expect(queue.reject("req-expired", "test-user")).toBe(false);
+
+    // Eviction settles the sink promise as expired (no leaked promise).
+    const decision = await sinkPromise;
+    expect(decision.status).toBe("expired");
+  });
+
+  it("non-expired entries survive eviction and can still be approved", async () => {
+    const queue = new ApprovalQueue();
+
+    void queue.sink({
+      id: "req-live",
+      actionId: "action-y",
+      runId: "run-y",
+      riskClass: "outward_comm",
+      summary: "live email",
+      args: {},
+      reasoning: "test",
+      argsHash: "live1",
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(queue.list()).toHaveLength(1);
+    expect(queue.approve("req-live", "test-user")).toBe(true);
+  });
+
   it("queue.reject() resolves with rejected status", async () => {
     const queue = new ApprovalQueue();
 

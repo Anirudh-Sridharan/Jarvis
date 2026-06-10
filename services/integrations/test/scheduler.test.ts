@@ -76,6 +76,74 @@ describe("isDue", () => {
     expect(isDue("0 5 * * *", lastRun, now, "whoop", 0)).toBe(true);
   });
 
+  describe("interval schedule '*/30 * * * *' (gmail/github)", () => {
+    const now = new Date("2026-06-09T10:15:00Z").getTime();
+
+    it("is due on first run (no prior run)", () => {
+      expect(isDue("*/30 * * * *", null, now, "gmail", 0)).toBe(true);
+    });
+
+    it("is not due immediately after a run", () => {
+      expect(isDue("*/30 * * * *", now, now + 60_000, "gmail", 0)).toBe(false);
+    });
+
+    it("is not due 29 minutes after the last run", () => {
+      expect(isDue("*/30 * * * *", now, now + 29 * 60_000, "gmail", 0)).toBe(false);
+    });
+
+    it("is due again 30 minutes after the last run", () => {
+      expect(isDue("*/30 * * * *", now, now + 30 * 60_000, "gmail", 0)).toBe(true);
+    });
+
+    it("keeps firing on subsequent intervals (regression: NaN parse fired once then never)", () => {
+      let lastRun: number | null = null;
+      let fired = 0;
+      for (let t = now; t < now + 3 * 60 * 60_000; t += 60_000) {
+        if (isDue("*/30 * * * *", lastRun, t, "gmail", 0)) {
+          fired++;
+          lastRun = t;
+        }
+      }
+      expect(fired).toBe(6); // first run + one per 30 min over 3h
+    });
+  });
+
+  describe("hourly schedule '0 * * * *' (gcal)", () => {
+    it("is due on first run (no prior run, past the hour's minute)", () => {
+      const now = new Date("2026-06-09T10:15:00Z").getTime();
+      expect(isDue("0 * * * *", null, now, "gcal", 0)).toBe(true);
+    });
+
+    it("is not due again within the same hour", () => {
+      const lastRun = new Date("2026-06-09T10:15:00Z").getTime();
+      const now = new Date("2026-06-09T10:45:00Z").getTime();
+      expect(isDue("0 * * * *", lastRun, now, "gcal", 0)).toBe(false);
+    });
+
+    it("is due again in the next hour", () => {
+      const lastRun = new Date("2026-06-09T10:15:00Z").getTime();
+      const now = new Date("2026-06-09T11:00:00Z").getTime();
+      expect(isDue("0 * * * *", lastRun, now, "gcal", 0)).toBe(true);
+    });
+
+    it("is not due before the target minute of the hour", () => {
+      const lastRun = new Date("2026-06-09T10:15:00Z").getTime();
+      const now = new Date("2026-06-09T11:10:00Z").getTime();
+      expect(isDue("15 * * * *", lastRun, now, "gcal", 0)).toBe(false);
+    });
+
+    it("applies per-source jitter to the hourly target minute", () => {
+      // With a large jitter window the target shifts past the raw minute
+      const now = new Date("2026-06-09T10:00:30Z").getTime();
+      // jitter for 'gcal' with max 30 min is deterministic and > 0
+      const due = isDue("0 * * * *", null, now, "gcal", 30 * 60_000);
+      // exactly at :00:30 with non-zero jitter → not yet due
+      expect(due).toBe(false);
+      // but with zero jitter it is due
+      expect(isDue("0 * * * *", null, now, "gcal", 0)).toBe(true);
+    });
+  });
+
   it("applies per-source jitter — different sources have different offsets", () => {
     const base = new Date("2026-06-09T05:00:00Z").getTime();
     // With zero jitter, both would be identical; with non-zero they may differ
@@ -175,5 +243,74 @@ describe("Scheduler", () => {
 
       expect(run.startedAt).toBe(clockTime);
     });
+  });
+});
+
+describe("Scheduler — event sink (calendar mirror)", () => {
+  function makeEvent(id: string, status: "confirmed" | "cancelled") {
+    return {
+      calendarId: "primary",
+      id,
+      etag: `"etag-${id}"`,
+      status,
+      summary: `Event ${id}`,
+      start: { dateTime: "2026-06-09T10:00:00Z", timeZone: "UTC" },
+      end: { dateTime: "2026-06-09T11:00:00Z", timeZone: "UTC" },
+      allDay: false,
+      attendees: [],
+      created: "2026-06-01T00:00:00Z",
+      updated: "2026-06-01T00:00:00Z",
+      source: "google" as const,
+      syncedAt: "2026-06-09T09:00:00Z",
+    };
+  }
+
+  function makeEventConnector(): Connector {
+    return {
+      id: "gcal",
+      auth: "oauth",
+      schedule: "0 * * * *",
+      concurrency: 2,
+      async sync(): Promise<ConnectorSyncResult> {
+        return {
+          points: [],
+          events: [makeEvent("evt1", "confirmed"), makeEvent("evt2", "cancelled")],
+          nextCursor: "sync_tok_2",
+        };
+      },
+    };
+  }
+
+  it("upserts confirmed events and tombstones cancelled ones before advancing the cursor", async () => {
+    const db = makeDb();
+    const metricStore = new MetricStore(db);
+    const upserted: string[] = [];
+    const tombstoned: string[] = [];
+    const scheduler = new Scheduler(db, metricStore, new FixedClock(new Date("2026-06-09T05:30:00Z").getTime()), {
+      eventSink: {
+        upsertEvent: (e) => upserted.push(e.id),
+        tombstoneEvent: (_cal, id) => tombstoned.push(id),
+      },
+    });
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gcal", makeTokens());
+
+    const run = await scheduler.runSync(makeEventConnector(), new FakeHttp(), tokenStore);
+
+    expect(run.status).toBe("ok");
+    expect(upserted).toEqual(["evt1"]);
+    expect(tombstoned).toEqual(["evt2"]);
+    expect(run.cursorAfter).toBe("sync_tok_2");
+  });
+
+  it("drops events without complaint when no sink is configured (back-compat)", async () => {
+    const db = makeDb();
+    const metricStore = new MetricStore(db);
+    const scheduler = new Scheduler(db, metricStore, new FixedClock(Date.now()));
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gcal", makeTokens());
+
+    const run = await scheduler.runSync(makeEventConnector(), new FakeHttp(), tokenStore);
+    expect(run.status).toBe("ok");
   });
 });

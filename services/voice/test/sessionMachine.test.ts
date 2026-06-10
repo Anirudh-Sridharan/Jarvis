@@ -256,6 +256,18 @@ describe("SessionMachine — history", () => {
     expect(m.history[2]?.event).toBe("TURN_COMPLETE");
   });
 
+  it("caps history at 200 transitions (ring buffer over a daemon lifetime)", () => {
+    const m = new SessionMachine();
+    for (let i = 0; i < 150; i++) {
+      m.send("WAKE");
+      m.send("FORCE_IDLE");
+    }
+    // 300 transitions occurred; only the most recent 200 are retained
+    expect(m.history).toHaveLength(200);
+    expect(m.history[m.history.length - 1]?.event).toBe("FORCE_IDLE");
+    expect(m.history[0]?.event).toBe("WAKE"); // transition #101, not #1
+  });
+
   it("reset() clears history and returns to idle", () => {
     const m = new SessionMachine();
     m.send("WAKE");

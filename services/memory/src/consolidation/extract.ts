@@ -73,12 +73,22 @@ function sourceTrustForKind(source: string): number {
   }
 }
 
+export interface ExtractionResult {
+  facts: ExtractedFact[];
+  /** Ids of records whose extraction completed (even if zero facts came out). */
+  processedRecordIds: string[];
+  /** Records whose LLM call failed — they must stay consolidation_pending. */
+  failures: { recordId: string; message: string }[];
+}
+
 export async function extractFacts(
   records: ExperienceRecord[],
   llm: LlmClient,
   runId: string,
-): Promise<ExtractedFact[]> {
+): Promise<ExtractionResult> {
   const out: ExtractedFact[] = [];
+  const processedRecordIds: string[] = [];
+  const failures: { recordId: string; message: string }[] = [];
 
   for (const rec of records) {
     try {
@@ -103,10 +113,13 @@ export async function extractFacts(
           sourceTrust: sourceTrustForKind(rec.source),
         });
       }
-    } catch {
-      // Per-record isolation: skip bad records, stay pending
+      processedRecordIds.push(rec.id);
+    } catch (err) {
+      // Per-record isolation: skip bad records — they stay pending and are
+      // reported so the run can be marked "partial".
+      failures.push({ recordId: rec.id, message: String(err) });
     }
   }
 
-  return out;
+  return { facts: out, processedRecordIds, failures };
 }

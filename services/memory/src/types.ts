@@ -89,6 +89,8 @@ export interface Fact extends MemoryNode {
   invalidatedAt: ISO | null; // null = live
   invalidatedBy: string | null; // factId that supersedes
   supersedes: string | null; // factId this one replaced
+  /** Trust of the originating source (0..1). User corrections are 1.0. */
+  sourceTrust: number;
 }
 
 // ─── Procedural block (singleton) ────────────────────────────────────────────

@@ -77,6 +77,16 @@ export class AgentRunner {
         createdAt: clock.isoNow(),
         updatedAt: clock.isoNow(),
       };
+
+      // Terminal checkpoint: never re-execute a finished run — resuming a
+      // "done" run would replay side-effecting steps.
+      if (state.status === "done" || state.status === "error") {
+        const lastObs = state.observations[state.observations.length - 1];
+        if (lastObs?.ok && lastObs.result !== undefined) {
+          run.result = lastObs.result;
+        }
+        return { run, state };
+      }
     } else {
       // ── New run ───────────────────────────────────────────────────────────
       state = {
@@ -130,14 +140,26 @@ export class AgentRunner {
         approvalService,
         auditLog,
         clock,
+        runId,
       });
 
-      checkpointer.save(runId, i + 1, state);
-
       const finalStatus = state.status as string;
-    if (finalStatus === "error" || finalStatus === "awaiting-approval") {
+      if (finalStatus === "error" || finalStatus === "awaiting-approval") {
+        // Step did NOT complete: keep currentStep at i so a resume retries it
+        // (error is terminal anyway — see resume guard above).
+        checkpointer.save(runId, i + 1, state);
         break;
       }
+
+      // Step completed: advance the step pointer BEFORE checkpointing so a
+      // resume never re-executes a completed step (duplicate side effects).
+      state.currentStep = i + 1;
+      if (i + 1 < state.plan.length) {
+        // Mid-plan "done" is only step-local — persist as running so an
+        // interrupted run resumes instead of being treated as terminal.
+        state.status = "running";
+      }
+      checkpointer.save(runId, i + 1, state);
 
       // Reset per-step counters
       state.validationRetries = 0;

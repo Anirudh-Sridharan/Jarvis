@@ -78,13 +78,21 @@ export class RetrievalService {
 
     if (!query.trim()) return [];
 
-    // 1. Embed query
-    const [queryVec] = await this.embedder.embed([query]);
-    if (!queryVec) return [];
+    // 1. Embed query. If the embedder is unavailable or returns no vector,
+    // degrade gracefully: skip the vector retriever but still run the
+    // keyword/entity paths (feature-5 edge case 8: embedder down → BM25 + entity).
+    let queryVec: number[] | undefined;
+    try {
+      [queryVec] = await this.embedder.embed([query]);
+    } catch {
+      queryVec = undefined;
+    }
 
     // 2. Fan out three retrievers in parallel
     const [vectorResults, bm25Results, entityResults] = await Promise.all([
-      this.vectorRetriever(queryVec, CANDIDATE_CAP_VECTOR, includeStale, nowMs),
+      queryVec
+        ? this.vectorRetriever(queryVec, CANDIDATE_CAP_VECTOR, includeStale, nowMs)
+        : ([] as InternalCandidate[]),
       this.bm25Retriever(query, CANDIDATE_CAP_BM25),
       this.entityRetriever(opts.entityIds ?? [], CANDIDATE_CAP_ENTITY),
     ]);
@@ -184,10 +192,11 @@ export class RetrievalService {
     const preMMR = kept.slice(0, RERANK_CAP);
 
     // 8. MMR de-dup — greedy Maximal Marginal Relevance
-    const selected = mmrSelect(preMMR, queryVec, { lambda: MMR_LAMBDA, k });
+    // (mmrSelect falls back to precomputed queryScores when queryVec is empty)
+    const selected = mmrSelect(preMMR, queryVec ?? [], { lambda: MMR_LAMBDA, k });
 
     // 9. Build results with placement hints
-    return selected.map((c, i) => ({
+    const results: RetrievedMemory[] = selected.map((c, i) => ({
       memoryId: c.memoryId,
       text: c.text,
       kind: c.kind,
@@ -206,6 +215,16 @@ export class RetrievalService {
       validFrom: new Date(c.validFrom).getTime(),
       rank: i,
     }));
+
+    // 10. Touch access counters for the returned memories (fire-and-forget:
+    // results are already computed, so this cannot affect determinism).
+    try {
+      this.store.touchAccess(results.map((r) => r.memoryId));
+    } catch {
+      // Non-fatal — access tracking must never break retrieval.
+    }
+
+    return results;
   }
 
   // ── Private retrievers ────────────────────────────────────────────────────

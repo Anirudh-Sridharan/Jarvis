@@ -13,12 +13,20 @@
 
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { Clock, Connector, Cursor, HttpClient, TokenStore, SyncRun, SourceId } from "../types.js";
+import type { CalendarEvent, Clock, Connector, Cursor, HttpClient, TokenStore, SyncRun, SourceId } from "../types.js";
 import { MetricStore } from "./metricStore.js";
 import { newId, toJson, fromJson } from "../db/database.js";
 
+/** Where ConnectorSyncResult.events land (CalendarMirror in production). */
+export interface EventSink {
+  upsertEvent(event: CalendarEvent): void;
+  tombstoneEvent(calendarId: string, eventId: string): void;
+}
+
 export interface SchedulerConfig {
   jitterMaxMs?: number;
+  /** Persists calendar events from sync results. Without it, events are dropped. */
+  eventSink?: EventSink;
 }
 
 const DEFAULT_JITTER_MAX_MS = 5 * 60 * 1000; // 5 minutes max jitter
@@ -34,17 +42,36 @@ export function isDue(
   // Deterministic per-source jitter offset
   const jitterMs = sourceJitter(sourceId, jitterMaxMs);
 
-  // Simple cron: parse '0 5 * * *' format (min hour day month weekday)
+  // Simple cron: supports '*/N * * * *' (every N minutes),
+  // 'M * * * *' (hourly at minute M), and 'M H * * *' (daily at H:M UTC).
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
 
   const [minute, hour] = parts;
-  const now = new Date(nowMs);
-  const nowMin = now.getUTCMinutes();
-  const nowHour = now.getUTCHours();
+
+  // '*/N * * * *' — interval schedule: due every N minutes since the last run.
+  if (minute?.startsWith("*/")) {
+    const intervalMin = parseInt(minute.slice(2), 10);
+    if (!Number.isFinite(intervalMin) || intervalMin <= 0) return false;
+    if (lastRunAt === null) return true;
+    return nowMs - lastRunAt >= intervalMin * 60_000;
+  }
 
   const targetMin = parseInt(minute ?? "0", 10);
+  if (Number.isNaN(targetMin)) return false;
+
+  // 'M * * * *' — hourly at minute M (+ per-source jitter).
+  if (hour === "*") {
+    const hourStart = new Date(nowMs);
+    hourStart.setUTCMinutes(0, 0, 0);
+    const hourTargetMs = hourStart.getTime() + targetMin * 60_000 + jitterMs;
+    if (nowMs < hourTargetMs) return false;
+    if (lastRunAt === null) return true;
+    return lastRunAt < hourTargetMs;
+  }
+
   const targetHour = parseInt(hour ?? "5", 10);
+  if (Number.isNaN(targetHour)) return false;
 
   // The target time for today (UTC), adjusted for jitter
   const todayTarget = new Date(nowMs);
@@ -129,6 +156,19 @@ export class Scheduler {
       if (result.points.length > 0) {
         const { inserted, updated } = this.metricStore.upsertSeries(result.points);
         written = inserted + updated;
+      }
+
+      // Mirror calendar events BEFORE advancing the cursor (cursor discipline:
+      // a syncToken must never advance past events that weren't persisted).
+      const sink = this.config.eventSink;
+      if (sink) {
+        for (const event of result.events ?? []) {
+          if (event.status === "cancelled") {
+            sink.tombstoneEvent(event.calendarId, event.id);
+          } else {
+            sink.upsertEvent(event);
+          }
+        }
       }
 
       // Advance cursor only after successful write

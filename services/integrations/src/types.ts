@@ -183,7 +183,8 @@ export interface Todo {
 
 export interface SleepInput {
   score: number;
-  hoursSlept: number;
+  /** Hours slept; null = no sleep-duration data (recovery may still exist). */
+  hoursSlept: number | null;
   recovery: "low" | "ok" | "high";
   source: { feature: string; gatheredAt: string; stale: boolean };
 }

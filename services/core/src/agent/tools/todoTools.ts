@@ -78,6 +78,16 @@ export function makeTodoListTool(
         return integrations.todos.overdue();
       }
 
+      if (filter === "today") {
+        // Open todos due no later than the end of the current local day
+        // (includes already-overdue items — they're still "for today").
+        const endOfToday = new Date();
+        endOfToday.setHours(23, 59, 59, 999);
+        return integrations.todos
+          .listTodos({ status: "open" })
+          .filter((t) => t.due != null && new Date(t.due) <= endOfToday);
+      }
+
       const status =
         filter === "done" ? "done" :
         filter === "all" ? undefined :

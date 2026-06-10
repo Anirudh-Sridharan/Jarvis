@@ -39,10 +39,14 @@ export class CaptureService {
 
     // Decide embed strategy
     if (record.text.length <= DEFER_THRESHOLD_CHARS) {
-      // Embed immediately
+      // Embed immediately and persist the vector
       try {
-        await this.embedder.embed([record.text]);
-        this.store.updateExperienceEmbedState(record.id, "done");
+        const [vec] = await this.embedder.embed([record.text]);
+        if (vec) {
+          this.store.upsertEmbedding(record.id, "experience", vec);
+          this.store.updateExperienceEmbedState(record.id, "done");
+        }
+        // No vector returned (embedder unavailable) — stays pending
       } catch {
         // Non-fatal — stays pending
       }
