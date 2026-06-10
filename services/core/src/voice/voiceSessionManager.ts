@@ -9,6 +9,10 @@
  *
  * The orchestrator factory is injected so tests run against @jarvis/voice
  * fakes — no network, no audio processes.
+ *
+ * start()/stop() are serialized on an internal op chain, and each start()
+ * builds a fresh HttpWakeSource, so toggle races can't leak an orchestrator
+ * or let a stale stop() disarm a newer session.
  */
 import type { OrchestratorEvent, VoiceOrchestrator, WakeEvent } from "@jarvis/voice";
 import { HttpWakeSource } from "./httpWakeSource.js";
@@ -44,7 +48,7 @@ export class VoiceSessionManager {
   private readonly fetchImpl: typeof fetch;
   private readonly bufferSize: number;
 
-  private readonly wakeSource = new HttpWakeSource();
+  private wakeSource = new HttpWakeSource();
   private orchestrator: VoiceOrchestrator | null = null;
   private unsubscribeOrchestrator: (() => void) | null = null;
   private frames: VoiceEventFrame[] = [];
@@ -59,9 +63,34 @@ export class VoiceSessionManager {
     this.bufferSize = opts.bufferSize ?? 200;
   }
 
+  /** Serializes start/stop so toggle races can't interleave enable/disable. */
+  private ops: Promise<unknown> = Promise.resolve();
+
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.ops.then(fn, fn);
+    this.ops = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   /** Idempotent: starting an active session returns current status. */
   async start(): Promise<VoiceStartResult> {
+    return this.enqueue(() => this.doStart());
+  }
+
+  /** Disable sidecar wake listener (best effort) and stop the orchestrator. */
+  async stop(): Promise<VoiceSessionStatus> {
+    return this.enqueue(() => this.doStop());
+  }
+
+  private async doStart(): Promise<VoiceStartResult> {
     if (this.orchestrator) return { ok: true, status: this.status() };
+
+    // Fresh wake source per session: a stale stop() (which calls
+    // wakeWord.stop() on its own instance) can no longer disarm this one.
+    this.wakeSource = new HttpWakeSource();
 
     try {
       const res = await this.fetchImpl(`${this.sidecarUrl}/health`, {
@@ -97,13 +126,10 @@ export class VoiceSessionManager {
     return { ok: true, status: this.status() };
   }
 
-  /** Disable sidecar wake listener (best effort) and stop the orchestrator. */
-  async stop(): Promise<VoiceSessionStatus> {
+  private async doStop(): Promise<VoiceSessionStatus> {
     const orchestrator = this.orchestrator;
     if (!orchestrator) return this.status();
     this.orchestrator = null; // reject dispatchWake immediately
-    this.unsubscribeOrchestrator?.();
-    this.unsubscribeOrchestrator = null;
     try {
       await this.fetchImpl(`${this.sidecarUrl}/wake/disable`, {
         method: "POST",
@@ -113,14 +139,18 @@ export class VoiceSessionManager {
       // Best effort — the sidecar may already be down.
     }
     await orchestrator.stop(); // cancels in-flight TTS/LLM, disarms wake source
+    // Unsubscribe only after stop() so terminal state_change events are relayed.
+    this.unsubscribeOrchestrator?.();
+    this.unsubscribeOrchestrator = null;
     return this.status();
   }
 
   /** Deliver a wake event from the sidecar. Returns false if no active session. */
   dispatchWake(event: WakeEvent): boolean {
     if (!this.orchestrator) return false;
-    this.lastWakeAt = Date.now();
-    return this.wakeSource.dispatch(event);
+    const delivered = this.wakeSource.dispatch(event);
+    if (delivered) this.lastWakeAt = Date.now();
+    return delivered;
   }
 
   status(): VoiceSessionStatus {
@@ -148,7 +178,13 @@ export class VoiceSessionManager {
     if (this.frames.length > this.bufferSize) {
       this.frames.splice(0, this.frames.length - this.bufferSize);
     }
-    for (const listener of this.listeners) listener(frame);
+    for (const listener of this.listeners) {
+      try {
+        listener(frame);
+      } catch {
+        // One bad subscriber (e.g. a closed SSE stream) must not starve the rest.
+      }
+    }
   }
 }
 

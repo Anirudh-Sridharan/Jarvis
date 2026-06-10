@@ -199,4 +199,39 @@ describe("VoiceSessionManager", () => {
     expect(seqs[1]).toBe((seqs[0] ?? 0) + 1); // monotonic
     await manager.stop();
   });
+
+  it("concurrent start() calls produce one session and one wake/enable", async () => {
+    const { manager, calls } = makeManager();
+    const [a, b] = await Promise.all([manager.start(), manager.start()]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(calls.filter((u) => u.endsWith("/wake/enable")).length).toBe(1);
+    await manager.stop();
+  });
+
+  it("fast stop()/start() overlap leaves the new session armed", async () => {
+    const { manager } = makeManager();
+    await manager.start();
+    const stopping = manager.stop();
+    const restarting = manager.start();
+    await Promise.all([stopping, restarting]);
+    expect(manager.status().active).toBe(true);
+    expect(manager.dispatchWake(wakeEvent())).toBe(true);
+    await manager.stop();
+  });
+
+  it("a throwing subscriber does not starve other subscribers", async () => {
+    const { manager } = makeManager();
+    await manager.start();
+    const frames: VoiceEventFrame[] = [];
+    manager.subscribe(() => {
+      throw new Error("closed SSE stream");
+    });
+    manager.subscribe((f) => frames.push(f));
+    manager.dispatchWake(wakeEvent());
+    await vi.waitFor(() => {
+      expect(frames.some((f) => f.event.type === "wake")).toBe(true);
+    });
+    await manager.stop();
+  });
 });
