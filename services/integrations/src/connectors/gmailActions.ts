@@ -91,25 +91,41 @@ export async function searchEmail(
   }
 
   const data = listRes.body as { messages?: Array<{ id: string; threadId: string }> };
-  const hits: EmailSearchHit[] = [];
-  for (const msg of data.messages ?? []) {
-    const metaRes = await deps.http.request({
-      method: "GET",
-      url: `${GMAIL_BASE}/messages/${msg.id}?format=metadata&metadataHeaders=Subject,From,Date`,
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (metaRes.status !== 200) continue; // tolerate per-message misses
-    const meta = metaRes.body as RawGmailMessage;
-    const headers = meta.payload?.headers ?? [];
-    hits.push({
-      messageId: msg.id,
-      threadId: msg.threadId,
-      subject: headerValue(headers, "subject") ?? "(no subject)",
-      from: headerValue(headers, "from") ?? "",
-      date: headerValue(headers, "date") ?? "",
-    });
-  }
-  return hits;
+  const messages = data.messages ?? [];
+
+  // Metadata fetches are independent — run them with bounded concurrency
+  // instead of serially (50 hits = 50 sequential round-trips inside one agent
+  // step otherwise). Per-message misses are tolerated (null), preserving the
+  // sync connector's semantics; order is restored from the list response.
+  const CONCURRENCY = 8;
+  const results: Array<EmailSearchHit | null> = new Array(messages.length).fill(null);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= messages.length) return;
+      const msg = messages[i]!;
+      const metaRes = await deps.http.request({
+        method: "GET",
+        url: `${GMAIL_BASE}/messages/${msg.id}?format=metadata&metadataHeaders=Subject,From,Date`,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (metaRes.status !== 200) continue; // tolerate per-message misses
+      const meta = metaRes.body as RawGmailMessage;
+      const headers = meta.payload?.headers ?? [];
+      results[i] = {
+        messageId: msg.id,
+        threadId: msg.threadId,
+        subject: headerValue(headers, "subject") ?? "(no subject)",
+        from: headerValue(headers, "from") ?? "",
+        date: headerValue(headers, "date") ?? "",
+      };
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, messages.length) }, () => worker()),
+  );
+  return results.filter((h): h is EmailSearchHit => h !== null);
 }
 
 /**

@@ -5,7 +5,9 @@ idleTimeoutSeconds: 600        # unload local model after 10 min idle
 
 routing:
   agentLocalTokenCap: 12000    # agent requests above this escalate to HF
-  localCtxSafe: 24000          # any request above this goes to HF regardless
+  localCtxSafe: 14000          # any request above this goes to HF regardless
+                               # (must fit the LOCAL ctxWindow 16384 minus ~2.4k
+                               #  reply headroom — 24000 could never fire before overflow)
 
 models:
   - id: qwen-local-chat

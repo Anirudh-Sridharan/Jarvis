@@ -39,7 +39,9 @@ const modelEntrySchema = z.object({
 
 const routingSchema = z.object({
   agentLocalTokenCap: z.number().int().positive().default(12_000),
-  localCtxSafe: z.number().int().positive().default(24_000),
+  // Must fit the LOCAL model's ctxWindow (16384) minus reply headroom —
+  // a ceiling above the context can never fire before overflow.
+  localCtxSafe: z.number().int().positive().default(14_000),
   /** RAM floor (GB): below this a local pick is downgraded to HF. 0 disables the guard. */
   ramFloorGB: z.number().nonnegative().default(2),
   /**
