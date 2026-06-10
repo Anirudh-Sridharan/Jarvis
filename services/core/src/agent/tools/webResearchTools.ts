@@ -1,10 +1,9 @@
 /**
  * Web research tools — read-only, no approval required.
  *
- * web_search — stub that returns a clear "configure search provider" message.
- *   TODO(prod: wire a real search API/MCP) — e.g. Brave Search, SerpAPI, or an
- *   MCP tool provided by the search provider. The tool interface and schema are
- *   ready; only the HTTP call is missing.
+ * web_search — live Brave Search API (BRAVE_API_KEY in .env; free tier at
+ *   https://api-dashboard.search.brave.com). Missing key degrades to a
+ *   structured ok:false note, never a throw. fetchFn is injectable for tests.
  *
  * web_fetch  — real fetch via global fetch(). Returns the response text (capped
  *   at 50 KB to avoid context overflow). Falls back to error message on network
@@ -33,28 +32,87 @@ const WebSearchSchema = z.object({
     .describe("Maximum number of results to return"),
 });
 
-export const webSearchTool: Tool = {
-  name: "web_search",
-  description:
-    "Search the web for information. Returns search results with titles, URLs, and snippets.",
-  schema: WebSearchSchema,
-  readOnly: true,
+const BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
+const SEARCH_TIMEOUT_MS = 10_000;
 
-  async run(rawArgs: unknown): Promise<unknown> {
-    const args = WebSearchSchema.parse(rawArgs);
-    // TODO(prod: wire a real search API/MCP)
-    // Acceptable providers: Brave Search API, SerpAPI, Tavily, or a search MCP tool.
-    // The interface is stable — swap the body below once credentials are available.
-    return {
-      query: args.query,
-      results: [],
-      note:
-        "web_search is not yet configured. " +
-        "TODO(prod: wire a real search API/MCP — e.g. Brave Search, SerpAPI, or search MCP tool). " +
-        `Query was: "${args.query}"`,
-    };
-  },
-};
+interface BraveWebResult {
+  title?: string;
+  url?: string;
+  description?: string;
+}
+
+/**
+ * Build the live web_search tool. fetchFn is injectable for tests; the real
+ * registry uses the global fetch. The API key is read from BRAVE_API_KEY at
+ * call time so `.env` auto-load ordering doesn't matter.
+ */
+export function makeWebSearchTool(fetchFn: typeof fetch = fetch): Tool {
+  return {
+    name: "web_search",
+    description:
+      "Search the web for information. Returns search results with titles, URLs, and snippets.",
+    schema: WebSearchSchema,
+    readOnly: true,
+
+    async run(rawArgs: unknown): Promise<unknown> {
+      const args = WebSearchSchema.parse(rawArgs);
+
+      const apiKey = process.env["BRAVE_API_KEY"];
+      if (!apiKey) {
+        return {
+          ok: false,
+          query: args.query,
+          results: [],
+          error:
+            "BRAVE_API_KEY not set. Get a free key at https://api-dashboard.search.brave.com and add it to .env.",
+        };
+      }
+
+      const count = args.max_results ?? 5;
+      const params = new URLSearchParams({ q: args.query, count: String(count) });
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+      try {
+        const response = await fetchFn(`${BRAVE_SEARCH_URL}?${params}`, {
+          signal: controller.signal,
+          headers: {
+            Accept: "application/json",
+            "X-Subscription-Token": apiKey,
+          },
+        });
+
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          return {
+            ok: false,
+            query: args.query,
+            status: response.status,
+            results: [],
+            error: `Brave Search API error: HTTP ${response.status}`,
+          };
+        }
+
+        const data = (await response.json()) as { web?: { results?: BraveWebResult[] } };
+        const results = (data.web?.results ?? []).slice(0, count).map((r) => ({
+          title: r.title ?? "",
+          url: r.url ?? "",
+          snippet: r.description ?? "",
+        }));
+        return { ok: true, query: args.query, results, count: results.length };
+      } catch (err) {
+        return {
+          ok: false,
+          query: args.query,
+          results: [],
+          error: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
 
 // ── web_fetch ─────────────────────────────────────────────────────────────────
 

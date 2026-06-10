@@ -13,8 +13,8 @@
  *     todo_list             readOnly:true
  *     todo_complete         readOnly:false  → auto_allow (internal_write)
  *
- *   Web Research (no external dep):
- *     web_search            readOnly:true   (stub — TODO(prod: wire real search API/MCP))
+ *   Web Research:
+ *     web_search            readOnly:true   (live Brave Search API — BRAVE_API_KEY)
  *     web_fetch             readOnly:true   (real fetch)
  *
  *   Email (live Gmail REST via @jarvis/integrations):
@@ -36,7 +36,7 @@ import {
   makeTodoListTool,
   makeTodoCompleteTool,
 } from "./todoTools.js";
-import { webSearchTool, webFetchTool } from "./webResearchTools.js";
+import { makeWebSearchTool, webFetchTool } from "./webResearchTools.js";
 import {
   makeEmailSearchTool,
   makeEmailGetTool,
@@ -57,7 +57,7 @@ export function buildToolRegistry(
     makeTodoListTool(integrations),
     makeTodoCompleteTool(integrations),
     // Web research
-    webSearchTool,
+    makeWebSearchTool(),
     webFetchTool,
     // Email (live Gmail)
     makeEmailSearchTool(integrations),
