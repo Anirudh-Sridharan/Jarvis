@@ -2,8 +2,8 @@
  * Finance store (feature 11): accounts / balances / transactions / categories
  * in the shared SQLite DB. Deterministic invariants:
  *   - reported balances are AUTHORITATIVE (never derived from txn sums)
- *   - net worth = Σ latest posted balances, sign-adjusted by isAsset,
- *     computed PER CURRENCY (no FX in this slice)
+ *   - net worth = Σ latest balances (source sign authoritative — SimpleFIN
+ *     reports debt negative), computed PER CURRENCY (no FX in this slice)
  *   - dedupe on (accountId, sourceTxnId), hash fallback; pending→posted
  *     updates in place — upsert never double-inserts
  *   - transfers are excluded from income/expense/spending aggregates
@@ -125,7 +125,21 @@ export class FinanceStore {
     ) ??
       this.db
         .prepare(`SELECT id, category_id FROM fin_transactions WHERE dedupe_hash = ?`)
-        .get(t.dedupeHash);
+        .get(t.dedupeHash) ??
+      // Pending→posted fuzzy match (spec edge case 3): a pending txn whose
+      // hash included no posted date won't hash-match once it posts. Match a
+      // PENDING row on the same account with the same amount + normalized
+      // description within a small window, and update it in place instead of
+      // inserting a phantom duplicate.
+      (t.status === "posted"
+        ? this.db
+            .prepare(
+              `SELECT id, category_id FROM fin_transactions
+               WHERE account_id = ? AND status = 'pending' AND amount_minor = ?
+                 AND lower(trim(description)) = lower(trim(?))`,
+            )
+            .get(t.accountId, t.amountMinor, t.description)
+        : undefined);
 
     if (existing) {
       const keepCategory = (existing as { category_id: string }).category_id !== "uncategorized";
@@ -189,8 +203,10 @@ export class FinanceStore {
   }
 
   /**
-   * Net worth per currency: Σ latest balance per ACTIVE/reauth account,
-   * sign-adjusted (liabilities negative). Disconnected accounts are excluded
+   * Net worth per currency: Σ latest balance per ACTIVE/reauth account.
+   * The source's sign is AUTHORITATIVE — SimpleFIN reports debt as a negative
+   * balance, and abs-forcing liabilities would turn an overpaid credit card's
+   * genuine +credit into phantom debt. Disconnected accounts are excluded
    * from current totals (history retained).
    */
   netWorth(): Array<{ currency: string; amountMinor: number }> {
@@ -206,8 +222,7 @@ export class FinanceStore {
 
     const byCurrency = new Map<string, number>();
     for (const r of rows) {
-      const signed = r.is_asset === 1 ? r.amount : -Math.abs(r.amount);
-      byCurrency.set(r.currency, (byCurrency.get(r.currency) ?? 0) + signed);
+      byCurrency.set(r.currency, (byCurrency.get(r.currency) ?? 0) + r.amount);
     }
     return [...byCurrency.entries()].map(([currency, amountMinor]) => ({ currency, amountMinor }));
   }

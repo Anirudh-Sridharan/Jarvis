@@ -236,3 +236,45 @@ describe("FinanceStore", () => {
     expect(series.points[0]!.value).toBe(250010 - 43210);
   });
 });
+
+describe("FinanceStore: edge cases from review", () => {
+  it("net worth trusts the source sign — an overpaid credit card adds, not subtracts", () => {
+    const db = makeDb();
+    const store = new FinanceStore(db);
+    const now = "2026-06-10T12:00:00Z";
+    store.upsertAccount({
+      id: "card-1", sourceId: "src-card", connectorId: "simplefin",
+      name: "Credit Card", institution: "Bank…", type: "credit",
+      currency: "USD", isAsset: false, lastSyncedAt: now, status: "active",
+    });
+    // Overpaid by $50: source reports +50.00
+    store.upsertBalance({ accountId: "card-1", amountMinor: 5000, currency: "USD", asOf: now, capturedAt: now });
+    expect(store.netWorth()).toEqual([{ currency: "USD", amountMinor: 5000 }]);
+  });
+
+  it("pending→posted with NO source txn id updates in place (fuzzy match)", () => {
+    const db = makeDb();
+    const store = new FinanceStore(db);
+    const pending: Transaction = {
+      id: "tx-p1", sourceTxnId: null, accountId: "acct-1",
+      amountMinor: -4200, currency: "USD", description: "  Corner CAFE ",
+      postedAt: null, pendingAt: "2026-06-09T08:00:00Z", status: "pending",
+      categoryId: "dining", categorySource: "rule",
+      dedupeHash: "hash-pending-no-date",
+    };
+    expect(store.upsertTransaction(pending)).toBe(true);
+
+    // Same charge posts: different hash (date now included), no source id
+    const posted: Transaction = {
+      ...pending, id: "tx-p2", postedAt: "2026-06-10T00:00:00Z",
+      pendingAt: null, status: "posted", description: "corner cafe",
+      dedupeHash: "hash-posted-with-date",
+    };
+    expect(store.upsertTransaction(posted)).toBe(false); // updated, not inserted
+
+    const rows = db.prepare("SELECT status, category_id FROM fin_transactions").all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["status"]).toBe("posted");
+    expect(rows[0]!["category_id"]).toBe("dining"); // categorization preserved
+  });
+});
