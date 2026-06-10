@@ -30,6 +30,8 @@ import {
   detectConflicts,
   executeEventWrite,
 } from "./connectors/googleCalendar.js";
+import { sendEmail, createEmailDraft } from "./connectors/gmailActions.js";
+import type { EmailSendRequest, EmailSendResult } from "./connectors/gmailActions.js";
 import { whoopConnector } from "./connectors/whoop.js";
 import { appleHealthConnector, createPushEndpointHandler } from "./connectors/appleHealth.js";
 import { googleCalendarConnector } from "./connectors/googleCalendar.js";
@@ -112,6 +114,19 @@ export {
   gmailEventsToMetricPoints,
 } from "./connectors/gmail.js";
 export {
+  sendEmail,
+  createEmailDraft,
+  buildRfc2822,
+} from "./connectors/gmailActions.js";
+export type {
+  GmailDeps,
+  EmailSearchHit,
+  EmailMessage,
+  EmailThread,
+  EmailSendRequest,
+  EmailSendResult,
+} from "./connectors/gmailActions.js";
+export {
   getAccessToken,
   clearOAuthState,
 } from "./framework/oauth.js";
@@ -155,6 +170,11 @@ export interface IntegrationsSystem {
     detectConflicts: typeof detectConflicts;
     /** Live Google Calendar write engine, bound to the injected http/tokenStore/mirror. */
     executeWrite: (req: EventWriteRequest) => Promise<WriteResult>;
+  };
+  /** Live Gmail actions, bound to the injected http/tokenStore. */
+  email: {
+    send: (req: EmailSendRequest) => Promise<EmailSendResult>;
+    createDraft: (req: EmailSendRequest) => Promise<EmailSendResult>;
   };
   briefing: BriefingService;
   scheduler: Scheduler;
@@ -203,6 +223,12 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
           tokenStore: config.tokenStore,
           mirror: calendarMirror,
         }),
+    },
+    email: {
+      send: (req) =>
+        sendEmail(req, { http: config.http, tokenStore: config.tokenStore }),
+      createDraft: (req) =>
+        createEmailDraft(req, { http: config.http, tokenStore: config.tokenStore }),
     },
     briefing,
     scheduler,

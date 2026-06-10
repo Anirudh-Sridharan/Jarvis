@@ -79,9 +79,15 @@ const PROVIDERS: Record<OAuthSourceId, OAuthProviderConfig> = {
     displayName: "Gmail",
     // gmail.readonly (not gmail.metadata): the connector uses q= search on
     // messages.list, which the metadata scope does not permit.
+    // gmail.send + gmail.compose: live agent email actions (send / drafts).
+    // Users who consented before those landed must re-run `npm run connect -- gmail`.
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    scopes: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ],
     clientIdEnv: "GMAIL_CLIENT_ID",
     clientSecretEnv: "GMAIL_CLIENT_SECRET",
     pkce: true,
