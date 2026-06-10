@@ -17,10 +17,11 @@
  *     web_search            readOnly:true   (stub — TODO(prod: wire real search API/MCP))
  *     web_fetch             readOnly:true   (real fetch)
  *
- *   Email (stub — TODO(prod: wire Google Workspace MCP / Gmail OAuth)):
- *     email_search          readOnly:true   (throws "Gmail not connected")
- *     email_get             readOnly:true   (throws "Gmail not connected")
+ *   Email (live Gmail REST via @jarvis/integrations):
+ *     email_search          readOnly:true
+ *     email_get             readOnly:true
  *     email_send            readOnly:false  → GATED (outward_comm)
+ *     email_draft           readOnly:false  → auto_allow (internal_write)
  */
 
 import type { ToolRegistry } from "@jarvis/agent";
@@ -37,13 +38,14 @@ import {
 } from "./todoTools.js";
 import { webSearchTool, webFetchTool } from "./webResearchTools.js";
 import {
-  emailSearchTool,
-  emailGetTool,
-  emailSendTool,
+  makeEmailSearchTool,
+  makeEmailGetTool,
+  makeEmailSendTool,
+  makeEmailDraftTool,
 } from "./emailTools.js";
 
 export function buildToolRegistry(
-  integrations: Pick<IntegrationsSystem, "calendar" | "todos">,
+  integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email">,
 ): ToolRegistry {
   const tools = [
     // Calendar
@@ -57,10 +59,11 @@ export function buildToolRegistry(
     // Web research
     webSearchTool,
     webFetchTool,
-    // Email (stubs)
-    emailSearchTool,
-    emailGetTool,
-    emailSendTool,
+    // Email (live Gmail)
+    makeEmailSearchTool(integrations),
+    makeEmailGetTool(integrations),
+    makeEmailSendTool(integrations),
+    makeEmailDraftTool(integrations),
   ];
 
   const registry: ToolRegistry = new Map(tools.map((t) => [t.name, t]));

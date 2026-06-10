@@ -38,6 +38,7 @@ import {
   FakeLlm as IntegrationsFakeLlm,
 } from "@jarvis/integrations/testing";
 import { makeCalendarCreateEventTool } from "../src/agent/tools/calendarTools.js";
+import { makeEmailSendTool, makeEmailDraftTool } from "../src/agent/tools/emailTools.js";
 
 import {
   ApprovalQueue,
@@ -840,5 +841,108 @@ describe("agent-integration: approved calendar_create_event hits the live write 
       "2026-06-13T00:00:00Z",
     );
     expect(mirrored.map((e) => e.id)).toContain("evt-agent-1");
+  });
+});
+
+describe("agent-integration: live email tools", () => {
+  let tmpDir: string;
+  let integrationsDir: string;
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    if (integrationsDir) rmSync(integrationsDir, { recursive: true, force: true });
+    resetAgentSystem();
+  });
+
+  function makeLiveEmailSetup() {
+    tmpDir = makeTempDir();
+    integrationsDir = makeTempDir();
+    const http = new FakeHttp();
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gmail", makeTokens());
+    const integrations = createIntegrations({
+      http,
+      clock: new IntegrationsFixedClock(),
+      tokenStore,
+      llm: new IntegrationsFakeLlm(),
+      dataDir: integrationsDir,
+    });
+    return { http, integrations };
+  }
+
+  it("approved email_send drives the Gmail POST and returns ids", async () => {
+    const { http, integrations } = makeLiveEmailSetup();
+    http.add("/messages/send", {
+      status: 200,
+      headers: {},
+      body: { id: "msg-live-1", threadId: "thr-live-1" },
+    });
+
+    const sendTool = makeEmailSendTool(integrations);
+    const llm = new FakeLlm().setScript([
+      JSON.stringify({
+        tool: "email_send",
+        args: {
+          to: ["pat@example.com"],
+          subject: "Thursday sync",
+          body: "Does 3pm Thursday work?",
+        },
+      }),
+      JSON.stringify({ tool: "__done__", args: { result: "sent" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "sent" } }),
+    ]);
+
+    const { sink, requests } = makeAutoApproveSink("test-user");
+    const agentSystem = createAgentSystem({
+      llm,
+      tools: makeToolRegistry([sendTool]),
+      clock: new FixedClock(Date.now()),
+      dataDir: tmpDir,
+      approvalSink: sink,
+    });
+
+    const result = await agentSystem.agent.run("email Pat about Thursday", { source: "manual" });
+
+    expect(requests.length).toBeGreaterThanOrEqual(1); // outward_comm gated
+    expect(["done", "error"]).toContain(result.run.status);
+    expect(http.callCount("/messages/send")).toBe(1);
+  });
+
+  it("email_draft auto-allows (no approval request) and creates the draft", async () => {
+    const { http, integrations } = makeLiveEmailSetup();
+    http.add("/drafts", {
+      status: 200,
+      headers: {},
+      body: { id: "draft-live-1", message: { id: "m", threadId: "t" } },
+    });
+
+    const draftTool = makeEmailDraftTool(integrations);
+    const llm = new FakeLlm().setScript([
+      JSON.stringify({
+        tool: "email_draft",
+        args: {
+          to: ["pat@example.com"],
+          subject: "Draft: Thursday sync",
+          body: "Draft body",
+        },
+      }),
+      JSON.stringify({ tool: "__done__", args: { result: "drafted" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "drafted" } }),
+    ]);
+
+    const { sink, requests } = makeAutoApproveSink("test-user");
+    const agentSystem = createAgentSystem({
+      llm,
+      tools: makeToolRegistry([draftTool]),
+      clock: new FixedClock(Date.now()),
+      dataDir: tmpDir,
+      approvalSink: sink,
+    });
+
+    const result = await agentSystem.agent.run("draft an email to Pat", { source: "manual" });
+
+    expect(requests.length).toBe(0); // internal_write auto-allowed
+    expect(result.run.status).toBe("done");
+    expect(http.callCount("/drafts")).toBe(1);
   });
 });

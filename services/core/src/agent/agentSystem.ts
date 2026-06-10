@@ -126,7 +126,7 @@ export interface AgentSystemBag {
  */
 export function getAgentSystem(
   gateway: InferenceGateway,
-  integrations: Pick<IntegrationsSystem, "calendar" | "todos"> | null,
+  integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email"> | null,
 ): AgentSystemBag | null {
   if (initialized) {
     if (!agentSystemInstance || !approvalQueueInstance) return null;
