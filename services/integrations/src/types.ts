@@ -12,7 +12,8 @@ export type SourceId =
   | "whoop"
   | "gcal"
   | "github"
-  | "gmail";
+  | "gmail"
+  | "simplefin";
 
 export type AuthKind = "oauth" | "pat" | "push";
 

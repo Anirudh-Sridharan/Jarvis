@@ -14,7 +14,7 @@
  * All external I/O is behind injected interfaces (HttpClient, Clock, TokenStore,
  * LlmClient). Use fakes from @jarvis/integrations/testing for tests.
  *
- * NOTE: Finance (feature 11) is DEFERRED to v2 — not implemented here.
+ * Finance (feature 11): SimpleFIN slice implemented — finance.store + finance.sync.
  * TODO(future): share ConnectorRegistry with @jarvis/memory (feature 3 connectors).
  */
 
@@ -42,6 +42,8 @@ import type {
   EmailSearchHit,
   EmailThread,
 } from "./connectors/gmailActions.js";
+import { FinanceStore } from "./finance/financeStore.js";
+import { runFinanceSync } from "./finance/sync.js";
 import { whoopConnector } from "./connectors/whoop.js";
 import { appleHealthConnector, createPushEndpointHandler } from "./connectors/appleHealth.js";
 import { googleCalendarConnector } from "./connectors/googleCalendar.js";
@@ -130,6 +132,11 @@ export {
   getEmailThread,
   buildRfc2822,
 } from "./connectors/gmailActions.js";
+export { FinanceStore } from "./finance/financeStore.js";
+export { runFinanceSync } from "./finance/sync.js";
+export { SimpleFinClient, syncSimpleFin, toMinor } from "./finance/simplefin.js";
+export { categorize, BUILT_IN_CATEGORIES, BUILT_IN_RULES, UNCATEGORIZED } from "./finance/categorize.js";
+export type { Account, AccountBalance, Transaction, Category, CategoryRule } from "./finance/types.js";
 export type {
   GmailDeps,
   EmailSearchHit,
@@ -183,6 +190,11 @@ export interface IntegrationsSystem {
     /** Live Google Calendar write engine, bound to the injected http/tokenStore/mirror. */
     executeWrite: (req: EventWriteRequest) => Promise<WriteResult>;
   };
+  /** Finance (feature 11, SimpleFIN slice): store + bound sync. */
+  finance: {
+    store: FinanceStore;
+    sync: (opts: { accessUrl: string; startDate?: string }) => ReturnType<typeof runFinanceSync>;
+  };
   /** Live Gmail actions, bound to the injected http/tokenStore. */
   email: {
     search: (query: string, maxResults?: number) => Promise<EmailSearchHit[]>;
@@ -214,6 +226,7 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
     eventSink: calendarMirror,
   });
   const briefing = new BriefingService(metrics, calendarMirror, todos, config.llm);
+  const financeStore = new FinanceStore(db);
 
   // Register default connectors
   const connectors = new ConnectorRegistry();
@@ -237,6 +250,11 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
           tokenStore: config.tokenStore,
           mirror: calendarMirror,
         }),
+    },
+    finance: {
+      store: financeStore,
+      sync: (opts) =>
+        runFinanceSync(opts, { http: config.http, store: financeStore, metrics, now: () => new Date(config.clock.now()) }),
     },
     email: {
       search: (query, maxResults = 10) =>
