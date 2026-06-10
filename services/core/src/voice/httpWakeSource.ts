@@ -29,9 +29,10 @@ export class HttpWakeSource implements WakeWordSource {
     this.running = false;
   }
 
-  /** Deliver an externally-built wake event. No-op unless running. */
-  dispatch(event: WakeEvent): void {
-    if (!this.running) return;
+  /** Deliver an externally-built wake event. Returns false (dropped) unless running. */
+  dispatch(event: WakeEvent): boolean {
+    if (!this.running) return false;
     for (const listener of this.listeners) listener(event);
+    return true;
   }
 }

@@ -50,4 +50,37 @@ describe("HttpWakeSource", () => {
     source.dispatch(wakeEvent());
     expect(received).toHaveLength(0);
   });
+
+  it("delivers to listeners subscribed after start() — the orchestrator's call order", () => {
+    const source = new HttpWakeSource();
+    const received: WakeEvent[] = [];
+    source.start();
+    source.onWake((e) => received.push(e));
+    expect(source.dispatch(wakeEvent())).toBe(true);
+    expect(received).toHaveLength(1);
+  });
+
+  it("delivers again after a stop/start cycle (re-arm)", () => {
+    const source = new HttpWakeSource();
+    const received: WakeEvent[] = [];
+    source.onWake((e) => received.push(e));
+    source.start();
+    source.stop();
+    expect(source.dispatch(wakeEvent())).toBe(false);
+    source.start();
+    expect(source.dispatch(wakeEvent())).toBe(true);
+    expect(received).toHaveLength(1);
+  });
+
+  it("fans out to multiple listeners", () => {
+    const source = new HttpWakeSource();
+    const a: WakeEvent[] = [];
+    const b: WakeEvent[] = [];
+    source.onWake((e) => a.push(e));
+    source.onWake((e) => b.push(e));
+    source.start();
+    source.dispatch(wakeEvent());
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+  });
 });
