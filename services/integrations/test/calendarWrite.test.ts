@@ -158,3 +158,77 @@ describe("executeEventWrite: validation", () => {
     expect(http.calls.length).toBe(0);
   });
 });
+
+describe("executeEventWrite: conflicts", () => {
+  it("blocks a conflicting create with 409 + conflicts and no API call", async () => {
+    const { deps, http, mirror } = makeDeps();
+    mirror.upsertEvent(mirrorEvent()); // 15:00-16:00 existing
+
+    const result = await executeEventWrite(createReq(), deps); // 15:00-15:30 overlaps
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(409);
+    expect(result.conflicts?.length).toBe(1);
+    expect(result.conflicts?.[0]?.source).toBe("evt-existing");
+    expect(http.calls.length).toBe(0);
+  });
+
+  it("allowConflict:true proceeds with the write but still reports conflicts", async () => {
+    const { deps, http, mirror } = makeDeps();
+    mirror.upsertEvent(mirrorEvent());
+    http.add(/\/calendars\/primary\/events$/, {
+      status: 200,
+      headers: {},
+      body: googleEventResponse(),
+    });
+
+    const result = await executeEventWrite(createReq({ allowConflict: true }), deps);
+
+    expect(result.ok).toBe(true);
+    expect(result.conflicts?.length).toBe(1);
+    expect(http.callCount(/\/calendars\/primary\/events$/)).toBe(1);
+  });
+
+  it("an update does not conflict with the event being moved", async () => {
+    const { deps, http, mirror } = makeDeps();
+    mirror.upsertEvent(mirrorEvent({ id: "evt-move-me" }));
+    http.add(/\/events\/evt-move-me$/, {
+      status: 200,
+      headers: {},
+      body: googleEventResponse({ id: "evt-move-me" }),
+    });
+
+    const result = await executeEventWrite(
+      createReq({
+        op: "update",
+        eventId: "evt-move-me",
+        patch: {
+          start: { dateTime: "2026-06-12T15:30:00Z", timeZone: "UTC" },
+          end: { dateTime: "2026-06-12T16:30:00Z", timeZone: "UTC" },
+        },
+      }),
+      deps,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeUndefined();
+    void http;
+  });
+
+  it("detects conflicts with events that started before the proposed slot", async () => {
+    const { deps, http, mirror } = makeDeps();
+    // 14:00-17:00 existing; proposed 15:00-15:30 sits inside it but starts later
+    mirror.upsertEvent(
+      mirrorEvent({
+        start: { dateTime: "2026-06-12T14:00:00Z", timeZone: "UTC" },
+        end: { dateTime: "2026-06-12T17:00:00Z", timeZone: "UTC" },
+      }),
+    );
+
+    const result = await executeEventWrite(createReq(), deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(409);
+    expect(http.calls.length).toBe(0);
+  });
+});
