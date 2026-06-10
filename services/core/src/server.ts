@@ -31,6 +31,7 @@ import { InferenceGateway } from "./inference/gateway.js";
 import { ChatCore } from "./chat/chatCore.js";
 import { InMemoryConversationStore } from "./chat/conversationStore.js";
 import { getAgentSystem } from "./agent/agentSystem.js";
+import { bootstrapLiveAgent } from "./agent/liveBootstrap.js";
 import { getMemorySystem } from "./memory/memorySystem.js";
 import { ConsolidationScheduler } from "./memory/consolidationScheduler.js";
 import type { WakeEvent } from "@jarvis/voice";
@@ -194,14 +195,12 @@ app.post("/chat", async (c) => {
 
 // ── Agent system (lazy, degrades gracefully) ──────────────────────────────────
 
-// We do NOT import @jarvis/integrations here to keep server.ts decoupled from
-// the integrations wiring. The agent bag is null until setAgentSystem() is
-// called externally (e.g. from a daemon entry point), OR the test injects it.
-// Resolved PER REQUEST (not snapshotted at import) so a setAgentSystem() call
-// after this module loads makes the agent endpoints live. With integrations:
-// null, getAgentSystem returns whatever singleton already exists (or null)
-// without poisoning the lazy initialization.
-const currentAgentBag = () => getAgentSystem(gateway, null);
+// The agent bag resolves PER REQUEST (not snapshotted at import). Resolution
+// order: (1) an existing singleton — tests inject one via setAgentSystem();
+// (2) live bootstrap — wires real integrations (fetch + Keychain) on first
+// use in a live run. Bootstrap is skipped under vitest and when
+// JARVIS_DISABLE_LIVE_AGENT=1, so tests still see 503 until they inject.
+const currentAgentBag = () => getAgentSystem(gateway, null) ?? bootstrapLiveAgent(gateway);
 
 const agentBodySchema = z.object({
   goal: z.string().min(1),
