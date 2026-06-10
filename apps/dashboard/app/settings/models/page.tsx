@@ -3,6 +3,7 @@
  */
 
 import ModelStatusBadge from "@/app/components/ModelStatusBadge";
+import TelemetryPanel from "@/app/components/TelemetryPanel";
 
 export default function ModelsPage() {
   return (
@@ -17,6 +18,10 @@ export default function ModelsPage() {
         <p className="text-dim text-sm" style={{ marginTop: 12 }}>
           Model load/unload, profile switching, and VRAM monitoring arrive with feature 1 (full inference core).
         </p>
+      </div>
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card__title">Inference Telemetry</div>
+        <TelemetryPanel />
       </div>
     </div>
   );
