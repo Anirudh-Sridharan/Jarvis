@@ -1,13 +1,17 @@
 /**
- * Home overview — feature 14.
- * Server Component that fetches KPIs, briefing, and agenda in parallel,
- * then renders cards + a link to the full chat page.
+ * Home overview — feature 14, "command center" layout.
+ * Server Component that fetches KPIs, briefing, agenda, and todos in parallel:
+ * KPI band up top for the 10-second morning scan, then briefing | agenda | todos,
+ * with a slim chat-console strip below.
  */
 
 import type { WidgetEnvelope, KpiValue, BriefingContract, AgendaEvent, TodoContract } from "@/app/lib/contracts";
+import { isOverdue, localDateStr } from "@/app/lib/dates";
 import BriefingCard from "./components/BriefingCard";
 import AgendaList from "./components/AgendaList";
 import KpiCard from "./components/KpiCard";
+import TodoList from "./components/TodoList";
+import VoiceHud from "./components/VoiceHud";
 
 const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
 
@@ -37,8 +41,15 @@ function buildKpi(
   return { metricId, label, value, unit, asOf, stale, sourceConnected };
 }
 
+function greetingForHour(hour: number): string {
+  if (hour < 5) return "Good evening";
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 export default async function HomePage() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr();
 
   // Parallel fetches — per-widget Suspense boundaries not needed here
   // because we gracefully handle error state inline
@@ -60,7 +71,7 @@ export default async function HomePage() {
   const agendaCount = agendaEnv.data?.length ?? null;
   const todosOpen = todosEnv.data?.length ?? null;
   const todosOverdue = todosEnv.data?.filter(
-    (t) => t.due && new Date(t.due) < new Date()
+    (t) => t.due && isOverdue(t.due)
   ).length ?? 0;
 
   const kpis: KpiValue[] = [
@@ -112,7 +123,8 @@ export default async function HomePage() {
     },
   ];
 
-  const dateLabel = new Date().toLocaleDateString(undefined, {
+  const now = new Date();
+  const dateLabel = now.toLocaleDateString(undefined, {
     weekday: "long",
     month: "long",
     day: "numeric",
@@ -122,18 +134,20 @@ export default async function HomePage() {
   return (
     <div className="page-home">
       <div className="page-header">
-        <h1 className="page-title">Good morning</h1>
+        <h1 className="page-title">{greetingForHour(now.getHours())}</h1>
         <p className="page-subtitle">{dateLabel}</p>
       </div>
 
-      {/* KPI row */}
+      <VoiceHud />
+
+      {/* KPI band */}
       <div className="kpi-row">
         {kpis.map((kpi) => (
           <KpiCard key={kpi.metricId} kpi={kpi} />
         ))}
       </div>
 
-      {/* Content grid */}
+      {/* Command-center grid: briefing | agenda | todos */}
       <div className="home-grid">
         <div className="home-grid__briefing">
           <BriefingCard envelope={briefingEnv} />
@@ -141,14 +155,16 @@ export default async function HomePage() {
         <div className="home-grid__agenda">
           <AgendaList envelope={agendaEnv} compact />
         </div>
-        <div className="home-grid__chat">
-          <div className="card">
-            <div className="card__title">Chat</div>
-            <p className="text-dim">Ask Jarvis about your day, todos, or anything else.</p>
-            <a href="/chat" className="link-cta">Open Chat</a>
-          </div>
+        <div className="home-grid__todos">
+          <TodoList initialEnvelope={todosEnv} />
         </div>
       </div>
+
+      {/* Chat console strip */}
+      <a href="/chat" className="chat-strip">
+        <span className="chat-strip__prompt">▸ Ask Jarvis</span>
+        <span>Open chat console →</span>
+      </a>
     </div>
   );
 }
