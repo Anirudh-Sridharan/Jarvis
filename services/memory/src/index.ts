@@ -3,7 +3,7 @@
  *
  * createMemorySystem({ embedder, llm, dataDir }) returns:
  *   {
- *     capture:       { captureConversationTurn, captureNote }
+ *     capture:       { captureConversationTurn, captureNote, captureExternal }
  *     store:         MemoryStore instance (for advanced use)
  *     retrieval:     { retrieve, getProceduralBlock }
  *     consolidation: { run }
@@ -17,6 +17,7 @@
 import { openDatabase } from "./db/database.js";
 import { MemoryStore } from "./store/memoryStore.js";
 import { CaptureService } from "./capture/capture.js";
+import type { buildExternalRecord } from "./capture/experience.js";
 import { RetrievalService } from "./retrieval/retrieval.js";
 import { ConsolidationService } from "./consolidation/consolidation.js";
 import { ProfileService } from "./profile/profile.js";
@@ -62,7 +63,7 @@ export {
   DEFAULT_SCORING_CONFIG,
 } from "./retrieval/scoring.js";
 export { isLiveFact, wasTrueAt, wasBelivedAt, factsBelivedAt, factsTrueAt, liveFacts } from "./store/bitemporal.js";
-export { computeDedupKey, buildConversationRecord, buildNoteRecord } from "./capture/experience.js";
+export { computeDedupKey, buildConversationRecord, buildNoteRecord, buildExternalRecord } from "./capture/experience.js";
 
 // ── Memory system factory ──────────────────────────────────────────────────────
 
@@ -88,6 +89,10 @@ export interface MemorySystem {
       tags?: string[];
       timestamp?: string;
     }): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
+
+    captureExternal(
+      opts: Parameters<typeof buildExternalRecord>[0],
+    ): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
   };
 
   store: MemoryStore;
@@ -123,6 +128,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
     capture: {
       captureConversationTurn: (opts) => captureService.captureConversationTurn(opts),
       captureNote: (opts) => captureService.captureNote(opts),
+      captureExternal: (opts) => captureService.captureExternal(opts),
     },
     store,
     retrieval: {

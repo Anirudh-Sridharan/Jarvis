@@ -8,6 +8,7 @@
  */
 
 import type { ExperienceRecord, Embedder } from "../types.js";
+import { buildExternalRecord } from "./experience.js";
 import type { MemoryStore } from "../store/memoryStore.js";
 
 /** Token-length threshold: texts above this are flagged as deferred. */
@@ -80,5 +81,12 @@ export class CaptureService {
     const { buildNoteRecord } = await import("./experience.js");
     const record = buildNoteRecord(opts);
     return this.capture(record);
+  }
+
+  /** Capture an external/connector item (calendar event, health/work digest). */
+  async captureExternal(
+    opts: Parameters<typeof buildExternalRecord>[0],
+  ): Promise<CaptureResult> {
+    return this.capture(buildExternalRecord(opts));
   }
 }

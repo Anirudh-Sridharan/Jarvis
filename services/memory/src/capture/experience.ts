@@ -112,3 +112,47 @@ export function buildNoteRecord(opts: {
     consolidation_pending: true,
   };
 }
+
+/**
+ * Build an ExperienceRecord for an external/connector item (feature 9 →
+ * feature 3 bridge): calendar events, health digests, work digests, etc.
+ * Content-hash dedup: pass the fields whose change should re-capture the
+ * item (e.g. a calendar event's etag/times) as `content`.
+ */
+export function buildExternalRecord(opts: {
+  source: Exclude<SourceId, "conversation" | "note">;
+  type: ExperienceType;
+  nativeId: string;
+  text: string;
+  timestamp: string;
+  actor?: string;
+  payload?: Record<string, unknown>;
+  entities?: CaptureEntity[];
+  /** Fields hashed into the dedup key; defaults to `text`. */
+  content?: unknown;
+}): ExperienceRecord {
+  const now = new Date().toISOString();
+  return {
+    id: newId(),
+    source: opts.source,
+    type: opts.type,
+    timestamp: opts.timestamp,
+    ingested_at: now,
+    actor: opts.actor ?? opts.source,
+    text: opts.text,
+    payload: opts.payload ?? {},
+    entities: opts.entities ?? [],
+    provenance: {
+      adapter: opts.source,
+      adapter_version: "1.0.0",
+      via: "in_process",
+      source_id: opts.nativeId,
+      cursor_at: now,
+    },
+    raw_ref: `raw/${opts.source}/${opts.nativeId}.json`,
+    dedup_key: computeDedupKey(opts.source, opts.nativeId, opts.content ?? opts.text),
+    embed_state: "pending",
+    sync_state: "pending",
+    consolidation_pending: true,
+  };
+}
