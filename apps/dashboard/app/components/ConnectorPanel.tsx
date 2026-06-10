@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ConnectorStatusContract,
   ConnectorTokenState,
+  ConnectStartResult,
   SyncNowResult,
   WidgetEnvelope,
 } from "@/app/lib/contracts";
@@ -43,6 +44,16 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncMsg, setSyncMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [consentUrl, setConsentUrl] = useState<string | null>(null);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -53,6 +64,73 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
       // keep showing the last known state
     }
   }, []);
+
+  const connect = useCallback(
+    async (source: string) => {
+      if (connecting) return;
+      setConnecting(source);
+      setConsentUrl(null);
+      setSyncMsg((m) => ({ ...m, [source]: { ok: true, text: "starting consent flow…" } }));
+      try {
+        const res = await fetch("/api/connectors/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source }),
+        });
+        const env = (await res.json()) as WidgetEnvelope<ConnectStartResult>;
+        if (!env.data) {
+          setSyncMsg((m) => ({
+            ...m,
+            [source]: { ok: false, text: env.error?.message ?? "could not start consent flow" },
+          }));
+          setConnecting(null);
+          return;
+        }
+
+        // The flow also opens the system browser; this is a best-effort extra
+        // tab in case that window is buried (popup blockers may ignore it —
+        // the fallback link below stays visible either way).
+        setConsentUrl(env.data.authorizeUrl);
+        window.open(env.data.authorizeUrl, "_blank", "noopener");
+        setSyncMsg((m) => ({
+          ...m,
+          [source]: { ok: true, text: "waiting for consent in the browser…" },
+        }));
+
+        // Poll token state until the consent lands (CLI times out at 5 min).
+        for (let i = 0; i < 100 && !cancelledRef.current; i++) {
+          await new Promise((r) => setTimeout(r, 3_000));
+          const statusRes = await fetch("/api/connectors", { cache: "no-store" });
+          const statusEnv = (await statusRes.json()) as WidgetEnvelope<ConnectorStatusContract[]>;
+          if (!statusEnv.data) continue;
+          setConnectors(statusEnv.data);
+          const me = statusEnv.data.find((c) => c.id === source);
+          if (me?.token === "connected") {
+            setSyncMsg((m) => ({ ...m, [source]: { ok: true, text: "connected ✓" } }));
+            setConsentUrl(null);
+            setConnecting(null);
+            return;
+          }
+        }
+        if (!cancelledRef.current) {
+          setSyncMsg((m) => ({
+            ...m,
+            [source]: { ok: false, text: "consent not completed — try again" },
+          }));
+          setConsentUrl(null);
+          setConnecting(null);
+        }
+      } catch (e) {
+        setSyncMsg((m) => ({
+          ...m,
+          [source]: { ok: false, text: e instanceof Error ? e.message : "network error" },
+        }));
+        setConsentUrl(null);
+        setConnecting(null);
+      }
+    },
+    [connecting]
+  );
 
   const syncNow = useCallback(
     async (source: string) => {
@@ -138,18 +216,40 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
 
             {last?.error && <p className="text-error text-sm">{last.error}</p>}
 
-            {c.token === "not_connected" && c.connectCmd && (
+            {c.token === "not_connected" && c.auth !== "oauth" && c.connectCmd && (
               <p className="connector-card__hint text-sm">
                 <span className="text-dim">connect:</span> <code>{c.connectCmd}</code>
               </p>
             )}
 
+            {connecting === c.id && consentUrl && (
+              <p className="connector-card__hint text-sm">
+                <span className="text-dim">consent tab didn&apos;t open?</span>{" "}
+                <a href={consentUrl} target="_blank" rel="noopener noreferrer" className="link-cta">
+                  open it manually
+                </a>
+              </p>
+            )}
+
             <div className="connector-card__actions">
+              {c.auth === "oauth" && (
+                <button
+                  className={`btn btn--sm ${c.token === "connected" ? "btn--ghost" : "btn--primary"}`}
+                  onClick={() => void connect(c.id)}
+                  disabled={connecting !== null || syncing !== null}
+                >
+                  {connecting === c.id
+                    ? "Waiting…"
+                    : c.token === "connected"
+                      ? "Reconnect"
+                      : "Connect"}
+                </button>
+              )}
               {c.syncable && (
                 <button
                   className="btn btn--sm btn--primary"
                   onClick={() => void syncNow(c.id)}
-                  disabled={syncing !== null}
+                  disabled={syncing !== null || connecting !== null}
                 >
                   {syncing === c.id ? "Syncing…" : "Sync now"}
                 </button>

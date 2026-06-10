@@ -37,9 +37,9 @@ export default async function IntegrationsPage() {
       </div>
       <ConnectorPanel initialEnvelope={envelope} />
       <p className="text-dim text-sm" style={{ marginTop: 16 }}>
-        OAuth consent runs on the CLI (<code>npm run connect -- &lt;source&gt;</code>) — it needs a
-        browser and a local callback listener. Once connected, syncs run on schedule with core, or
-        on demand from here.
+        Connect launches the provider&apos;s consent page in your browser (loopback OAuth via the
+        connect CLI; tokens land in the macOS Keychain). Once connected, syncs run on schedule
+        with core, or on demand from here.
       </p>
     </div>
   );

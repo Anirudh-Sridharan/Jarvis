@@ -172,6 +172,12 @@ export interface SyncNowResult {
   output: string;
 }
 
+export interface ConnectStartResult {
+  source: string;
+  /** Provider consent URL — the flow also opens it in the system browser. */
+  authorizeUrl: string;
+}
+
 // ── Finance (feature 11) ──────────────────────────────────────────────────────
 
 export interface AccountContract {
