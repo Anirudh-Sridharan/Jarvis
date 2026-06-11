@@ -14,6 +14,7 @@ import type { Message, RetrievedMemory } from "./types.js";
 export const REPLY_HEADROOM = 2_000;
 export const SAFETY_SLACK = 100;
 export const PROCEDURAL_CAP = 800;
+export const PROFILE_CAP = 300;
 export const MEMORY_CAP = 2_500;
 
 export function countTokens(s: string): number {
@@ -92,4 +93,11 @@ export function capProcedural(procedural: string): string {
   // chars/4 estimate => cap by characters. Real tokenizer would cap by tokens.
   const maxChars = PROCEDURAL_CAP * 4;
   return procedural.slice(0, maxChars);
+}
+
+/** Cap the profile-context block (feature 20) to its hard budget. */
+export function capProfile(profile: string): string {
+  if (!profile) return "";
+  if (countTokens(profile) <= PROFILE_CAP) return profile;
+  return profile.slice(0, PROFILE_CAP * 4);
 }

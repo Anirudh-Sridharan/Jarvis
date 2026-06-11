@@ -45,6 +45,7 @@ export interface AssembledPrompt {
   budget: {
     system: number;
     procedural: number;
+    profile: number; // feature 20 "About the user" block (0 when not injected)
     agenda: number; // connected-app calendar block (0 when not injected)
     memories: number;
     history: number;

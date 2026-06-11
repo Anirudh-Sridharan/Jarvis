@@ -21,11 +21,14 @@ import {
   SAFETY_SLACK,
   countTokens,
   capProcedural,
+  capProfile,
 } from "./contextBudget.js";
 import type { AssembledPrompt, Message, RetrievedMemory, Role } from "./types.js";
 
 export interface AssembleArgs {
   procedural: string; // feature 6 block (read-only); empty placeholder in Phase 1
+  /** Feature 20: query-relevant "## About the user" block; "" = omit. */
+  profileContext?: string;
   /** Deterministic connected-app agenda block (calendar); "" when not requested. */
   agenda?: string;
   memories: RetrievedMemory[]; // pre-scored desc, already capped by F5 (empty in Phase 1)
@@ -46,6 +49,7 @@ export interface AssembleArgs {
 
 export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
   const procedural = capProcedural(a.procedural);
+  const profile = capProfile(a.profileContext ?? "");
 
   // --- TOP EDGE: system + persona (strongest attention) ---------------------
   // Local wall-clock alongside UTC: "today"/"tomorrow" must resolve in the
@@ -66,6 +70,8 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
     a.mode === "cloud" ? "Note: answering via cloud model this turn." : "",
     // Procedural "how I work" block sits near the top so it steers the turn.
     procedural ? `## How I work\n${procedural}` : "",
+    // Feature 20: query-relevant profile facets (block carries its own header).
+    profile,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -137,6 +143,7 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
     budget: {
       system,
       procedural: countTokens(procedural),
+      profile: countTokens(profile),
       agenda: agendaTok,
       memories: memTok,
       history: histTok,

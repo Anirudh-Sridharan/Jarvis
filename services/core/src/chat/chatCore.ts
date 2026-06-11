@@ -65,6 +65,23 @@ function loadProceduralBlock(memory: MemorySystem | null): string {
 }
 
 /**
+ * Query-relevant profile facets (feature 20). Returns "" on failure — chat
+ * must never hard-fail because the profile is unavailable.
+ */
+async function loadProfileContext(
+  memory: MemorySystem | null,
+  query: string,
+): Promise<string> {
+  if (!memory) return "";
+  try {
+    return await memory.profile.getProfileContext(query);
+  } catch (err) {
+    console.warn("[memory] getProfileContext failed:", err instanceof Error ? err.message : String(err));
+    return "";
+  }
+}
+
+/**
  * Phase 2 memory retrieval: calls hybrid retrieval (recency × importance × relevance).
  * Returns [] on any error — chat must never hard-fail because memory is down.
  */
@@ -169,6 +186,7 @@ export class ChatCore {
     const now = new Date();
     const memories = await retrieveMemories(args.message, this.memory);
     const procedural = loadProceduralBlock(this.memory);
+    const profileContext = await loadProfileContext(this.memory, args.message);
     const agendaBlock = this.loadAgendaBlock(args.message, now);
 
     // Determine the active context window from the local chat default entry.
@@ -179,6 +197,7 @@ export class ChatCore {
     const systemTokens =
       countTokens(PERSONA_SYSTEM_PROMPT) +
       countTokens(procedural) +
+      countTokens(profileContext) +
       countTokens(agendaBlock) +
       20; // date line + headers
     const summaryTokens = conv.rollingSummary ? countTokens(conv.rollingSummary) : 0;
@@ -198,6 +217,7 @@ export class ChatCore {
     // 5. assemble
     const assembled = assemblePrompt({
       procedural,
+      profileContext,
       agenda: agendaBlock,
       memories: fit.cappedMemories,
       history: fit.history,
