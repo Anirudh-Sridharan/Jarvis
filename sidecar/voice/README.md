@@ -43,7 +43,7 @@ uv python install 3.12
 |-----------|-------|-----------------|-------------|
 | STT | faster-whisper `small` (int8) | Auto on first `/stt/stream` call | ~150 MB |
 | VAD | Silero VAD | Auto via `torch.hub` | ~5 MB |
-| TTS | Kokoro (`bm_fable` British voice) | Auto on first `/tts` call | ~350 MB |
+| TTS | Kokoro (British blend `bm_george:0.7,bf_emma:0.3`) | Auto on first `/tts` call (or `POST /warmup`) | ~350 MB |
 | Wake word | openWakeWord `hey_jarvis` | Auto on `POST /wake/enable` | ~5 MB |
 
 Also install `portaudio` (needed by PyAudio for the wake word mic):
@@ -75,11 +75,11 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
 | `VOICE_SIDECAR_PORT` | `8089` | Listen port (loopback). |
 | `VOICE_ORCHESTRATOR_URL` | `http://127.0.0.1:8080/voice/wake` | Where wake events are POSTed. |
 | `STT_MODEL_SIZE` | `small` | faster-whisper model size (`tiny`, `base`, `small`, `medium`). |
-| `TTS_VOICE` | `bm_fable` | Kokoro voice ID (British male; see also `bm_george`, `bf_emma`). |
+| `TTS_VOICE` | `bm_george:0.7,bf_emma:0.3` | Kokoro voice ID or weighted blend `name:weight,...` (all voices must share the language). |
 | `TTS_LANG` | `en-gb` | Kokoro language (`en-gb` British / `en-us` American — must match voice prefix). |
 | `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openWakeWord model name or file path. |
-| `WAKE_THRESHOLD` | `0.5` | openWakeWord detection confidence threshold. |
+| `WAKE_THRESHOLD` | `0.35` | openWakeWord detection confidence threshold (lower = more sensitive). |
 | `WAKE_DEBOUNCE_SECS` | `1.5` | Seconds to suppress duplicate wake fires. |
 
 ---
@@ -113,7 +113,7 @@ The TypeScript `voiceClient` calls exactly these endpoints.
 |-------|-------------|
 | `{"type":"speech_start"}` | Silero VAD rising edge (silence → speech). |
 | `{"type":"partial","text":"…","stability":0.7}` | Interim hypothesis mid-speech. |
-| `{"type":"speech_end"}` | Silero VAD falling edge + hangover (speech → silence). |
+| `{"type":"speech_end","silence_ms":780}` | Silero VAD falling edge + hangover; `silence_ms` is the honest time since the last voiced frame (hangover + transcription), counted toward end-of-turn upstream. |
 | `{"type":"final","text":"…","confidence":0.92}` | Final transcript from faster-whisper after the segment ends. |
 | `{"type":"error","detail":"…"}` | Non-fatal error; stream continues. |
 
@@ -194,7 +194,7 @@ all.  VAD is an alias for STT (they share the same manager).
 Mic (16 kHz continuous)
   │
   └─▶ openWakeWord (frame inference, <5 ms/frame)
-           │  score ≥ threshold (default 0.5)
+           │  score ≥ threshold (default 0.35)
            ▼
        Debounce (1.5 s cooldown)
            │
@@ -260,7 +260,7 @@ UI) receive only the text events and the PCM bytes from `/tts`.
 
 | File | Purpose |
 |------|---------|
-| `voice_server.py` | FastAPI app: `/health`, `/stt/stream` (WS), `/tts`, `/tts/cancel`, `/wake/*`, `/unload`; `ModelManager` classes for STT/TTS/VAD/Wake with lazy load. |
+| `voice_server.py` | FastAPI app: `/health`, `/stt/stream` (WS), `/tts`, `/tts/cancel`, `/wake/*`, `/unload`, `/warmup` (pre-loads + JIT-warms STT/TTS); `ModelManager` classes for STT/TTS/VAD/Wake with lazy load; weighted voice-blend resolution. |
 | `wakeword.py` | openWakeWord listener loop → POST WakeEvent to orchestrator. |
 | `stt.py` | faster-whisper + Silero VAD streaming wrapper; Parakeet-MLX alternative stub. |
 | `tts.py` | Kokoro TTS streaming wrapper; MLX variant note; WAV header utility. |

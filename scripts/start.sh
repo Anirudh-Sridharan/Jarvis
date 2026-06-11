@@ -8,7 +8,7 @@
 #
 # Services (skipped automatically if already healthy on their port):
 #   MLX sidecar    127.0.0.1:8088   local Qwen chat + embeddings
-#   Voice sidecar  127.0.0.1:8089   STT / VAD / TTS (Kokoro bm_fable, British)
+#   Voice sidecar  127.0.0.1:8089   STT / VAD / TTS (Kokoro British blend)
 #   Core           127.0.0.1:8080   gateway, chat, memory, agent
 #   Dashboard      127.0.0.1:3000   Next.js life-metrics UI
 #
