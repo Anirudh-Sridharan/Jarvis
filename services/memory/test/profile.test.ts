@@ -412,3 +412,72 @@ describe("ProfileService - ProfileFact shape", () => {
     expect(typeof pref.updatedAt).toBe("string");
   });
 });
+
+describe("ProfileService - conflict surfacing", () => {
+  it("two live facts on the same subject+predicate with different values are cross-flagged", async () => {
+    const { store } = makeStore();
+    const entity = await store.upsertEntity({
+      name: "self", entityType: "other", text: "The user",
+      provenance: { source: "system", sourceId: "seed", confidence: 1 },
+    });
+    const a = await store.upsertFact({
+      subjectId: entity.id, predicate: "prefers", objectLiteral: "vim",
+      text: "User prefers vim", validFrom: "2026-01-01T00:00:00.000Z",
+      provenance: { source: "chat", sourceId: "m1", confidence: 0.8 },
+    });
+    const b = await store.upsertFact({
+      subjectId: entity.id, predicate: "prefers", objectLiteral: "emacs",
+      text: "User prefers emacs", validFrom: "2026-02-01T00:00:00.000Z",
+      provenance: { source: "chat", sourceId: "m2", confidence: 0.7 },
+    });
+
+    const profile = await new ProfileService(store).deriveProfile();
+    const fa = profile.preferences.find((f) => f.id === a.id)!;
+    const fb = profile.preferences.find((f) => f.id === b.id)!;
+    expect(fa.conflictsWith).toEqual([b.id]);
+    expect(fb.conflictsWith).toEqual([a.id]);
+  });
+
+  it("same-value duplicates are not flagged", async () => {
+    const { store } = makeStore();
+    const entity = await store.upsertEntity({
+      name: "self", entityType: "other", text: "The user",
+      provenance: { source: "system", sourceId: "seed", confidence: 1 },
+    });
+    await store.upsertFact({
+      subjectId: entity.id, predicate: "prefers", objectLiteral: "Vim",
+      text: "User prefers Vim", validFrom: "2026-01-01T00:00:00.000Z",
+      provenance: { source: "chat", sourceId: "m1", confidence: 0.8 },
+    });
+    await store.upsertFact({
+      subjectId: entity.id, predicate: "prefers", objectLiteral: "vim ",
+      text: "User prefers vim", validFrom: "2026-02-01T00:00:00.000Z",
+      provenance: { source: "chat", sourceId: "m2", confidence: 0.7 },
+    });
+    const profile = await new ProfileService(store).deriveProfile();
+    for (const f of profile.preferences) expect(f.conflictsWith).toBeUndefined();
+  });
+
+  it("'summary' compression facts are exempt from conflict flagging", async () => {
+    const { store } = makeStore();
+    const entity = await store.upsertEntity({
+      name: "self", entityType: "other", text: "The user",
+      provenance: { source: "system", sourceId: "seed", confidence: 1 },
+    });
+    await store.upsertFact({
+      subjectId: entity.id, predicate: "summary", objectLiteral: "summary one",
+      text: "summary one", validFrom: "2026-01-01T00:00:00.000Z",
+      provenance: { source: "consolidation", sourceId: "c1", confidence: 0.6 },
+    });
+    await store.upsertFact({
+      subjectId: entity.id, predicate: "summary", objectLiteral: "summary two",
+      text: "summary two", validFrom: "2026-02-01T00:00:00.000Z",
+      provenance: { source: "consolidation", sourceId: "c2", confidence: 0.6 },
+    });
+    const profile = await new ProfileService(store).deriveProfile();
+    const flagged = [
+      ...profile.preferences, ...profile.routines, ...profile.communicationStyle,
+    ].filter((f) => f.conflictsWith);
+    expect(flagged).toHaveLength(0);
+  });
+});
