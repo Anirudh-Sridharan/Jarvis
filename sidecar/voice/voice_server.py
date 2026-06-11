@@ -85,11 +85,14 @@ VOICE_ORCHESTRATOR_URL = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.
 # Set to "base.en" for lower RAM / faster cold-start on English-only sessions.
 STT_MODEL_SIZE = os.environ.get("STT_MODEL_SIZE", "small")
 
-# Kokoro voice/lang. Jarvis defaults to a British male voice (bm_fable);
-# other British options: bm_george, bm_lewis, bf_emma, bf_isabella.
-# American voices (af_*/am_*) need TTS_LANG=en-us — voice prefix and lang
-# pipeline must agree (b* ↔ en-gb, a* ↔ en-us).
-TTS_VOICE = os.environ.get("TTS_VOICE", "bm_fable")
+# Kokoro voice. Plain voice IDs ("bm_fable") work, as do blends:
+#   "name:weight,name:weight"  e.g.  "bm_george:0.7,bf_emma:0.3"
+# Blending averages the voicepack style tensors.  The default blends
+# bm_george (male timbre) with bf_emma — the only B-grade British voice in
+# Kokoro (hours of training data vs minutes for every British male) — to
+# borrow her prosody.  All blended voices must share the language, and the
+# voice prefix must agree with TTS_LANG (b* ↔ en-gb, a* ↔ en-us).
+TTS_VOICE = os.environ.get("TTS_VOICE", "bm_george:0.7,bf_emma:0.3")
 TTS_LANG = os.environ.get("TTS_LANG", "en-gb")
 
 # Kokoro's KPipeline takes single-letter lang codes; map the friendly names
@@ -347,6 +350,40 @@ wake_mgr = WakeManager()
 # In-flight TTS cancellation registry: request_id → asyncio.Event
 _tts_cancel: Dict[str, asyncio.Event] = {}
 
+# Resolved voice cache: spec string → str | torch.FloatTensor.
+_resolved_voices: Dict[str, Any] = {}
+
+
+def resolve_voice(pipeline: Any, spec: str) -> Any:
+    """Resolve a voice spec to what KPipeline accepts (str or style tensor).
+
+    Plain names ("bm_fable") and unweighted comma lists ("bm_george,bf_emma" —
+    KPipeline averages those natively) pass through as strings.  Weighted
+    blends use "name:weight,..." and resolve to a weighted average of the
+    voicepack tensors via pipeline.load_voice().
+    """
+    if ":" not in spec:
+        return spec
+    import torch  # type: ignore[import]
+
+    parts: List[tuple] = []
+    for entry in spec.split(","):
+        name, _, weight_s = entry.strip().partition(":")
+        parts.append((name.strip(), float(weight_s) if weight_s else 1.0))
+    total = sum(w for _, w in parts)
+    if total <= 0:
+        raise ValueError(f"voice blend has non-positive total weight: {spec!r}")
+    return torch.stack(
+        [pipeline.load_voice(name) * (w / total) for name, w in parts]
+    ).sum(dim=0)
+
+
+def _voice_for(spec: str) -> Any:
+    """Cached resolve_voice against the loaded pipeline."""
+    if spec not in _resolved_voices:
+        _resolved_voices[spec] = resolve_voice(tts_mgr.get_pipeline(), spec)
+    return _resolved_voices[spec]
+
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -564,7 +601,11 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     cancel_event = asyncio.Event()
     _tts_cancel[request_id] = cancel_event
 
-    voice = req.voice or TTS_VOICE
+    try:
+        voice = _voice_for(req.voice or TTS_VOICE)
+    except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
+        _tts_cancel.pop(request_id, None)
+        raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
 
     async def _generate() -> AsyncGenerator[bytes, None]:
         from tts import synthesize_streaming  # type: ignore[import]
@@ -650,6 +691,7 @@ async def unload(req: UnloadRequest) -> Dict[str, Any]:
         done.extend(["stt", "vad"] if "vad" in targets else ["stt"])
     if "tts" in targets:
         tasks.append(asyncio.create_task(tts_mgr.unload()))
+        _resolved_voices.clear()  # voicepack tensors die with the pipeline
         done.append("tts")
     if "wake" in targets:
         tasks.append(asyncio.create_task(wake_mgr.unload()))
@@ -702,7 +744,7 @@ async def warmup() -> Dict[str, Any]:
         async for _chunk in synthesize_streaming(
             text="Ready.",
             pipeline=tts_mgr.get_pipeline(),
-            voice=TTS_VOICE,
+            voice=_voice_for(TTS_VOICE),
             speed=1.0,
             loop=loop,
         ):
