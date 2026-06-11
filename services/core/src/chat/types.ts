@@ -45,6 +45,7 @@ export interface AssembledPrompt {
   budget: {
     system: number;
     procedural: number;
+    agenda: number; // connected-app calendar block (0 when not injected)
     memories: number;
     history: number;
     total: number;

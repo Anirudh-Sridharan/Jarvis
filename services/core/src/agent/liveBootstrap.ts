@@ -24,8 +24,21 @@ import { startIngestBridge } from "../memory/ingestBridge.js";
 import { GatewayLlm } from "../memory/gatewayLlm.js";
 import { registerProactiveTriggers } from "./proactiveBootstrap.js";
 
+import type { CalendarMirror } from "@jarvis/integrations";
+
 let attempted = false;
 let cachedBag: AgentSystemBag | null = null;
+let cachedCalendarMirror: CalendarMirror | null = null;
+
+/**
+ * Live calendar mirror for the chat agenda block. Triggers the (memoized)
+ * live bootstrap on first use; survives agent-bag failure — calendar reads
+ * only need the integrations store, not the full agent system.
+ */
+export function getLiveCalendarMirror(gateway: InferenceGateway): CalendarMirror | null {
+  bootstrapLiveAgent(gateway);
+  return cachedCalendarMirror;
+}
 
 export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | null {
   if (process.env["VITEST"] || process.env["JARVIS_DISABLE_LIVE_AGENT"] === "1") {
@@ -38,6 +51,7 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     // GatewayLlm satisfies the integrations LlmClient too (same structural
     // shape) — the morning-briefing trigger can generate via HF.
     const { system } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
+    cachedCalendarMirror = system.calendar.mirror;
     const bag = getAgentSystem(gateway, system);
     if (!bag) return null; // getAgentSystem already logged; stay memoized-null
 
@@ -74,4 +88,5 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
 export function resetLiveBootstrap(): void {
   attempted = false;
   cachedBag = null;
+  cachedCalendarMirror = null;
 }

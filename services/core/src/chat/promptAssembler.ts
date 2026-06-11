@@ -26,6 +26,8 @@ import type { AssembledPrompt, Message, RetrievedMemory, Role } from "./types.js
 
 export interface AssembleArgs {
   procedural: string; // feature 6 block (read-only); empty placeholder in Phase 1
+  /** Deterministic connected-app agenda block (calendar); "" when not requested. */
+  agenda?: string;
   memories: RetrievedMemory[]; // pre-scored desc, already capped by F5 (empty in Phase 1)
   history: Message[]; // newest verbatim turns (post-truncation)
   rollingSummary?: string; // recap of truncated-out turns
@@ -46,9 +48,21 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
   const procedural = capProcedural(a.procedural);
 
   // --- TOP EDGE: system + persona (strongest attention) ---------------------
+  // Local wall-clock alongside UTC: "today"/"tomorrow" must resolve in the
+  // user's day, not UTC's (an evening chat is often already "tomorrow" in UTC).
+  const localNow = a.now.toLocaleString("en-US", {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  });
   const systemBlock = [
     PERSONA_SYSTEM_PROMPT,
-    `Current time: ${a.now.toISOString()}.`,
+    `Current time: ${a.now.toISOString()} (local: ${localNow}).`,
     a.mode === "cloud" ? "Note: answering via cloud model this turn." : "",
     // Procedural "how I work" block sits near the top so it steers the turn.
     procedural ? `## How I work\n${procedural}` : "",
@@ -92,8 +106,12 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
   for (const m of a.history) historyMsgs.push({ role: m.role, content: m.content });
 
   // --- BOTTOM EDGE: current user message (strongest attention) -------------
+  // Agenda (deterministic connected-app data) precedes the memory block so the
+  // top-scored memory keeps its edge position abutting history.
+  const agenda = a.agenda ?? "";
   const messages: { role: Role; content: string }[] = [
     { role: "system", content: systemBlock },
+    ...(agenda ? [{ role: "system" as Role, content: agenda }] : []),
     ...(memoryBlock ? [{ role: "system" as Role, content: memoryBlock }] : []),
     ...historyMsgs,
     { role: "user", content: a.userMessage },
@@ -101,10 +119,11 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
 
   // --- Budget math + hard assert -------------------------------------------
   const system = countTokens(systemBlock);
+  const agendaTok = countTokens(agenda);
   const memTok = countTokens(memoryBlock);
   const histTok = historyMsgs.reduce((s, m) => s + countTokens(m.content), 0);
   const userTok = countTokens(a.userMessage);
-  const total = system + memTok + histTok + userTok;
+  const total = system + agendaTok + memTok + histTok + userTok;
   const ceiling = a.contextWindow - REPLY_HEADROOM - SAFETY_SLACK;
 
   if (total > ceiling) {
@@ -118,6 +137,7 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
     budget: {
       system,
       procedural: countTokens(procedural),
+      agenda: agendaTok,
       memories: memTok,
       history: histTok,
       total,

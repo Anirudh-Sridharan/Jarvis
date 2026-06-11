@@ -91,6 +91,15 @@ export async function extractFacts(
   const failures: { recordId: string; message: string }[] = [];
 
   for (const rec of records) {
+    // Assistant chat turns are the model's own output: any personal fact in
+    // them either restates what the user/memory already provided (redundant)
+    // or was hallucinated (graph poison — invented "facts" about the user
+    // would later be retrieved as grounded memories). Mark processed so the
+    // record doesn't stay pending, but never mint facts from it.
+    if (rec.source === "conversation" && rec.actor === "assistant") {
+      processedRecordIds.push(rec.id);
+      continue;
+    }
     try {
       const prompt = EXTRACTION_PROMPT.replace("{{body}}", rec.text.slice(0, 4096));
       const raw = await llm.complete({ prompt, json: true });

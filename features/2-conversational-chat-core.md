@@ -90,6 +90,7 @@ sequenceDiagram
   **Prompt-assembly ORDER (top → bottom of the context):**
   1. **System + persona** (top edge — strongest attention): identity, tone rules, capabilities, current date/time, model/cloud-mode note.
   2. **Procedural "how I work" block**: the user's working preferences, near the top so they steer the whole turn.
+  2.5. **Connected-app agenda block (calendar-shaped messages only):** a deterministic agenda rendered from the local Google Calendar mirror (feature 12) in LOCAL time — enumerating a day's events is a lookup, not a similarity search, so it never rides on top-k retrieval. Gated by a cheap calendar-intent regex (the block costs tokens); ends with an explicit "these are ALL the events — do not invent others" line. Injected via the `AgendaSource` seam (core wires the live mirror; tests inject a fake).
   3. **Retrieved long-term memories**: rendered as compact bullet facts/events with timestamps; *highest-scored memory placed last in this block* so it abuts the recent history.
   4. **Truncated recent history**: rolling summary (if any) first, then the newest verbatim turns.
   5. **Current user message** (bottom edge — strongest attention).
@@ -171,6 +172,7 @@ import { PERSONA_SYSTEM_PROMPT } from './persona';
 
 interface AssembleArgs {
   procedural: string;                 // feature 6 block (read-only)
+  agenda?: string;                    // deterministic calendar block (feature 12 mirror); "" unless calendar-shaped
   memories: RetrievedMemory[];        // pre-scored, descending, already capped by F5
   history: Message[];                 // newest verbatim turns (post-truncation)
   rollingSummary?: string;            // recap of truncated-out turns
@@ -389,6 +391,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
 | **Model unloaded** | Feature 1 reports `unloaded` on first turn | Fire load (trigger wake), show **model-waking**, assemble prompt + retrieve memories in parallel, queue the user message, then generate when weights land. Nothing is lost during warm-up. |
 | **Context overflow** | Post-assert total > ceiling (tokenizer drift) | `assemblePrompt` throws `ContextOverflowError`; caller drops lowest-scored memories then oldest verbatim turns, re-fits, logs the event, and retries. Never send an over-budget prompt. |
 | **No relevant memories** | Feature 5 returns `[]` (or all below threshold) | With a memory system wired, the block is replaced by a short **"nothing stored" grounding note** so the model says it doesn't have the fact instead of hallucinating one. With no memory system at all, omit the block entirely (no empty scaffolding). |
+| **Calendar question, empty window** | Calendar-intent message; mirror returns no events in the agenda window | Agenda block still emitted with an explicit "No events in this window" line — silence invites the model to invent events. Mirror unavailable/throws → block omitted, turn proceeds (memory-only). |
 | **Contradictory memories** | Conflicting facts surfaced for the same entity | Pass both through; rely on feature 5's temporal scoring to favor the most recent/valid; persona flags uncertainty ("Last I noted X, though that may have changed") rather than asserting blindly. |
 | **Very long conversation** | History exceeds the verbatim budget repeatedly | Rolling summarization keeps the live window bounded indefinitely; full transcript stays in the local store and stays searchable via memory after it leaves the window. |
 | **Cloud fallback mid-conversation** | Feature 1 routes a turn to an HF endpoint | Re-budget against that model's larger `contextWindow`, keep the same assembly order, show the cloud badge, set per-turn `mode='cloud'`. Subsequent turns may revert to local. |

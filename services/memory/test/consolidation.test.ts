@@ -58,6 +58,51 @@ describe("ConsolidationService - extracts facts from pending records", () => {
   });
 });
 
+describe("ConsolidationService - assistant turns never mint facts", () => {
+  it("extracts facts from user turns but not from assistant turns (hallucination guard)", async () => {
+    const llm = new FakeLlm();
+    // Distinct canned extractions per record body — if the assistant record were
+    // (wrongly) extracted, the Nova Dynamics fact would land in the graph.
+    llm.addOverride(
+      "I prefer TypeScript",
+      JSON.stringify([
+        { entity: "self", predicate: "prefers", object: "TypeScript", text: "User prefers TypeScript", confidence: 0.9 },
+      ]),
+    );
+    llm.addOverride(
+      "Nova Dynamics",
+      JSON.stringify([
+        { entity: "self", predicate: "has_meeting", object: "Nova Dynamics", text: "User has a 10:30 meeting with Nova Dynamics", confidence: 0.9 },
+      ]),
+    );
+    const { store, capture, consolidation } = makeConsolidation(llm);
+
+    await capture.captureConversationTurn({
+      role: "user",
+      content: "I prefer TypeScript",
+      conversationId: "c1",
+      messageId: "m1",
+    });
+    await capture.captureConversationTurn({
+      role: "assistant",
+      content: "Tomorrow at 10:30 you have a Zoom with Nova Dynamics.",
+      conversationId: "c1",
+      messageId: "m2",
+    });
+
+    const result = await consolidation.run("manual");
+    expect(result.run.status).toBe("completed");
+
+    // The assistant record is processed (not stuck pending forever) ...
+    expect(store.getPendingExperienceRecords()).toHaveLength(0);
+
+    // ... but only the user turn produced facts.
+    const facts = store.getFactHistory("self");
+    expect(facts.some((f) => f.text.includes("TypeScript"))).toBe(true);
+    expect(facts.some((f) => f.text.includes("Nova Dynamics"))).toBe(false);
+  });
+});
+
 describe("ConsolidationService - contradiction resolution", () => {
   it("sets valid_to on superseded fact (newest-wins)", async () => {
     const { store } = makeConsolidation();

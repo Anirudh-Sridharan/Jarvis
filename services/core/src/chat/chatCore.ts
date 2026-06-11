@@ -19,6 +19,7 @@ import type { InferenceStreamChunk, JarvisInferenceRequest } from "../inference/
 import { assemblePrompt } from "./promptAssembler.js";
 import { countTokens, fitContextBudget } from "./contextBudget.js";
 import { PERSONA_SYSTEM_PROMPT } from "./persona.js";
+import { CALENDAR_INTENT, type AgendaSource } from "./calendarAgenda.js";
 import type { ConversationStore } from "./conversationStore.js";
 import type { Conversation, RetrievedMemory } from "./types.js";
 import type { MemorySystem, RetrievedMemory as MemRetrievedMemory } from "@jarvis/memory";
@@ -131,7 +132,26 @@ export class ChatCore {
     private readonly store: ConversationStore,
     /** Optional memory system — if null, memory features silently degrade. */
     private readonly memory: MemorySystem | null = null,
+    /** Optional connected-app agenda source (calendar mirror); null degrades. */
+    private readonly agenda: AgendaSource | null = null,
   ) {}
+
+  /**
+   * Deterministic calendar context: only for calendar-shaped messages (the
+   * block costs tokens), and never allowed to fail the turn.
+   */
+  private loadAgendaBlock(message: string, now: Date): string {
+    if (!this.agenda || !CALENDAR_INTENT.test(message)) return "";
+    try {
+      return this.agenda.getAgendaBlock(now);
+    } catch (err) {
+      console.warn(
+        "[chat] agenda block failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+      return "";
+    }
+  }
 
   async *send(
     args: ChatSendArgs,
@@ -147,17 +167,20 @@ export class ChatCore {
     const priorHistory = conv.messages.slice(0, -1);
 
     // 2. retrieval (Phase 2: hybrid memory retrieval) + 3. procedural block
+    const now = new Date();
     const memories = await retrieveMemories(args.message, conv, this.memory);
     const procedural = loadProceduralBlock(this.memory);
+    const agendaBlock = this.loadAgendaBlock(args.message, now);
 
     // Determine the active context window from the local chat default entry.
     const contextWindow = this.resolveContextWindow();
 
     // 4. fit the budget: how much history fits verbatim?
-    // systemTokens approximates persona + date + procedural framing.
+    // systemTokens approximates persona + date + procedural framing + agenda.
     const systemTokens =
       countTokens(PERSONA_SYSTEM_PROMPT) +
       countTokens(procedural) +
+      countTokens(agendaBlock) +
       20; // date line + headers
     const summaryTokens = conv.rollingSummary ? countTokens(conv.rollingSummary) : 0;
 
@@ -176,13 +199,14 @@ export class ChatCore {
     // 5. assemble
     const assembled = assemblePrompt({
       procedural,
+      agenda: agendaBlock,
       memories: fit.cappedMemories,
       history: fit.history,
       rollingSummary: conv.rollingSummary,
       userMessage: args.message,
       contextWindow,
       mode: conv.mode,
-      now: new Date(),
+      now,
       truncated: fit.truncated,
       memoryAvailable: this.memory !== null,
     });

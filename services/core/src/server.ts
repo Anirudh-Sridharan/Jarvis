@@ -34,7 +34,8 @@ import { join } from "node:path";
 import { InMemoryConversationStore } from "./chat/conversationStore.js";
 import { createSqliteConversationStore } from "./chat/sqliteConversationStore.js";
 import { getAgentSystem } from "./agent/agentSystem.js";
-import { bootstrapLiveAgent } from "./agent/liveBootstrap.js";
+import { bootstrapLiveAgent, getLiveCalendarMirror } from "./agent/liveBootstrap.js";
+import { buildAgendaBlock } from "./chat/calendarAgenda.js";
 import { getMemorySystem } from "./memory/memorySystem.js";
 import { DatabaseSync } from "node:sqlite";
 import { setTelemetrySink } from "./inference/telemetry.js";
@@ -67,7 +68,15 @@ const telemetrySink = process.env["VITEST"]
   ? new TelemetrySink(new DatabaseSync(":memory:"))
   : createTelemetrySink(process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data"));
 setTelemetrySink(telemetrySink);
-const chatCore = new ChatCore(gateway, store, memory);
+// Connected-app agenda: calendar-shaped questions get a deterministic agenda
+// block rendered from the live Google Calendar mirror (lazy; null under tests
+// and when integrations are unavailable — chat degrades to memory-only).
+const chatCore = new ChatCore(gateway, store, memory, {
+  getAgendaBlock(now) {
+    const mirror = getLiveCalendarMirror(gateway);
+    return mirror ? buildAgendaBlock(mirror, now) : "";
+  },
+});
 // Background consolidation: promotes captured turns into the retrievable graph
 // so recall works without a manual step (retrieval only sees consolidated
 // memories). Not started under tests (VITEST guard).
