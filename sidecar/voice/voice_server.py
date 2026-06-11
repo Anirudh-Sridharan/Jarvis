@@ -306,7 +306,7 @@ class WakeManager:
             listener = WakeWordListener(
                 model_name=WAKE_WORD_MODEL,
                 orchestrator_url=VOICE_ORCHESTRATOR_URL,
-                threshold=float(os.environ.get("WAKE_THRESHOLD", "0.5")),
+                threshold=float(os.environ.get("WAKE_THRESHOLD", "0.35")),
             )
             self._listener_task = asyncio.create_task(listener.run(), name="wake_listener")
             self.state = "ready"

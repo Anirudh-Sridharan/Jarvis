@@ -92,6 +92,7 @@ echo "Starting Jarvis Voice sidecar on 127.0.0.1:${PORT}"
 echo "  STT model   : ${STT_MODEL_SIZE:-small} (faster-whisper int8)"
 echo "  TTS voice   : ${TTS_VOICE:-bm_fable} (Kokoro, British English)"
 echo "  Wake model  : ${WAKE_WORD_MODEL:-hey_jarvis} (openWakeWord)"
+echo "  Wake thresh : ${WAKE_THRESHOLD:-0.35} (lower = more sensitive)"
 echo "  Orchestrator: ${VOICE_ORCHESTRATOR_URL:-http://127.0.0.1:8080/voice/wake}"
 echo ""
 exec uvicorn voice_server:app \

@@ -10,7 +10,7 @@ Usage (the FastAPI app drives this via ``WakeWordListener.run()``):
     listener = WakeWordListener(
         model_name="hey_jarvis",
         orchestrator_url="http://127.0.0.1:8080/voice/wake",
-        threshold=0.5,
+        threshold=0.35,
     )
     await listener.run()   # runs until cancelled
 
@@ -86,14 +86,15 @@ class WakeWordListener:
         env or passed explicitly.
     threshold:
         Detection confidence threshold (0..1).  Lower = more sensitive but
-        more false accepts.  Default 0.5.
+        more false accepts.  Default 0.35 (0.5 missed too many real wakes
+        in practice on the built-in MacBook mic).
     """
 
     def __init__(
         self,
         model_name: str,
         orchestrator_url: str,
-        threshold: float = 0.5,
+        threshold: float = 0.35,
     ) -> None:
         self.model_name = model_name
         self.orchestrator_url = orchestrator_url
@@ -237,7 +238,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
     model = os.environ.get("WAKE_WORD_MODEL", "hey_jarvis")
     url = os.environ.get("VOICE_ORCHESTRATOR_URL", "http://127.0.0.1:8080/voice/wake")
-    threshold = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
+    threshold = float(os.environ.get("WAKE_THRESHOLD", "0.35"))
 
     listener = WakeWordListener(model_name=model, orchestrator_url=url, threshold=threshold)
     asyncio.run(listener.run())
