@@ -68,17 +68,40 @@ function buildFallbackDescription(facts: Fact[]): string {
   return facts.map((f) => f.objectLiteral ?? f.objectId ?? f.text).join("; ");
 }
 
+/** Anchor comparator: does candidate `f` beat `best`? Pinned first, then confidence. */
+function pinnedThenConfidence(f: Fact, best: Fact): boolean {
+  if (f.pinned !== best.pinned) return f.pinned;
+  return f.provenance.confidence >= best.provenance.confidence;
+}
+
 // ── Row helpers ───────────────────────────────────────────────────────────────
 
-function factToProfileFact(fact: Fact, description?: string): ProfileFact {
+/**
+ * User-sourced facts: written by the profile UI (feature-20) or via the
+ * correctFact loop (whose inserts go through upsertFact and therefore carry
+ * capturedBy "feature-3" — the sourceId is the reliable marker there).
+ */
+function isUserSourced(fact: Fact): boolean {
+  return (
+    fact.provenance.capturedBy === "feature-20" ||
+    fact.provenance.sourceId === "user-correction"
+  );
+}
+
+function factToProfileFact(
+  fact: Fact,
+  description?: string,
+  conflictsWith?: string[],
+): ProfileFact {
   return {
     id: fact.id,
     value: description ?? fact.objectLiteral ?? fact.objectId ?? fact.text,
     confidence: fact.provenance.confidence,
-    pinned: false,
-    source: fact.provenance.capturedBy === "feature-20" ? "user" : "derived",
+    pinned: fact.pinned,
+    source: isUserSourced(fact) ? "user" : "derived",
     provenance: `ingested ${fact.ingestedAt.slice(0, 10)}`,
     updatedAt: fact.ingestedAt,
+    ...(conflictsWith && conflictsWith.length > 0 ? { conflictsWith } : {}),
   };
 }
 
@@ -171,8 +194,8 @@ export class ProfileService {
           id: fact.id,
           value: routine,
           confidence: fact.provenance.confidence,
-          pinned: false,
-          source: fact.provenance.capturedBy === "feature-20" ? "user" : "derived",
+          pinned: fact.pinned,
+          source: isUserSourced(fact) ? "user" : "derived",
           provenance: `ingested ${fact.ingestedAt.slice(0, 10)}`,
           updatedAt: fact.ingestedAt,
         });
@@ -204,9 +227,9 @@ export class ProfileService {
         description = buildFallbackDescription(facts);
       }
 
-      // Use highest-confidence fact as the anchor
-      const anchor = facts.reduce((best, f) =>
-        f.provenance.confidence >= best.provenance.confidence ? f : best,
+      // Anchor: pinned facts first, then highest confidence
+      const anchor = facts.reduce(
+        (best, f) => (pinnedThenConfidence(f, best) ? f : best),
         facts[0]!,
       );
 
@@ -221,8 +244,8 @@ export class ProfileService {
         id: anchor.id,
         value: person,
         confidence: anchor.provenance.confidence,
-        pinned: false,
-        source: anchor.provenance.capturedBy === "feature-20" ? "user" : "derived",
+        pinned: anchor.pinned,
+        source: isUserSourced(anchor) ? "user" : "derived",
         provenance: `${facts.length} fact${facts.length !== 1 ? "s" : ""}, ingested ${anchor.ingestedAt.slice(0, 10)}`,
         updatedAt: anchor.ingestedAt,
       });
@@ -239,8 +262,9 @@ export class ProfileService {
       const status = (statusFact?.objectLiteral as Project["status"]) ?? "active";
       const description = descFact?.objectLiteral;
 
-      const anchor = facts.reduce((best, f) =>
-        f.provenance.confidence >= best.provenance.confidence ? f : best,
+      // Anchor: pinned facts first, then highest confidence
+      const anchor = facts.reduce(
+        (best, f) => (pinnedThenConfidence(f, best) ? f : best),
         facts[0]!,
       );
 
@@ -254,8 +278,8 @@ export class ProfileService {
         id: anchor.id,
         value: project,
         confidence: anchor.provenance.confidence,
-        pinned: false,
-        source: anchor.provenance.capturedBy === "feature-20" ? "user" : "derived",
+        pinned: anchor.pinned,
+        source: isUserSourced(anchor) ? "user" : "derived",
         provenance: `${facts.length} fact${facts.length !== 1 ? "s" : ""}, ingested ${anchor.ingestedAt.slice(0, 10)}`,
         updatedAt: anchor.ingestedAt,
       });
@@ -329,6 +353,7 @@ export class ProfileService {
       validTo: null,
       supersedes: factId,
       sourceTrust: 1.0,   // user correction is maximally trusted
+      pinned: true,       // user input is authoritative — consolidation keeps hands off
       provenance: {
         source: "system",
         sourceId: "user-correction",
@@ -349,6 +374,20 @@ export class ProfileService {
     return this.deriveProfile();
   }
 
+  // ── Pin / confirm ───────────────────────────────────────────────────────────
+
+  /**
+   * Pin/unpin a fact (user confirmation). Persisted on the facts row so
+   * consolidation's resolve/forget stages can respect it.
+   */
+  async setPinned(factId: string, pinned: boolean): Promise<PersonalProfile> {
+    const updated = this.store.setFactPinned(factId, pinned);
+    if (!updated) {
+      throw new Error(`ProfileService.setPinned: fact ${factId} not found`);
+    }
+    return this.deriveProfile();
+  }
+
   // ── Edit facet ──────────────────────────────────────────────────────────────
 
   /**
@@ -363,7 +402,11 @@ export class ProfileService {
       return this.correctFact({ factId, correction: updates.value });
     }
 
-    // For non-value updates (pinned, etc.), update the cached profile in-place
+    if (updates.pinned !== undefined) {
+      return this.setPinned(factId, updates.pinned);
+    }
+
+    // For other cosmetic updates, update the cached profile in-place
     if (this.cached) {
       const facet = this.cached[args.facet] as ProfileFact[];
       const idx = facet.findIndex((f) => f.id === factId);

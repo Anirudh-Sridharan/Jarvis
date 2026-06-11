@@ -20,6 +20,8 @@ export interface ProfileFact<T = string> {
   source: "derived" | "user";
   provenance?: string;   // e.g. "3 conversations, last seen 2026-05"
   updatedAt: string;     // ISO timestamp
+  /** Live fact ids holding a different value for the same subject+predicate. */
+  conflictsWith?: string[];
 }
 
 export interface Person {
