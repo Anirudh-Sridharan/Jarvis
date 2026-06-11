@@ -51,6 +51,9 @@ export type {
 export { chunkSentences, collectSentences } from "./sentenceChunker.js";
 export type { ChunkerConfig } from "./sentenceChunker.js";
 
+// Echo filter (self-echo transcript detection for confirmed barge-in)
+export { speechTokens, isLikelyEcho } from "./echoFilter.js";
+
 // Barge-in
 export { BargeInPolicy } from "./bargeIn.js";
 export type {
