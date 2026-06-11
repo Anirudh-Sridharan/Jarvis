@@ -120,6 +120,9 @@ export function buildToolCallPrompt(
     `You are a reasoning agent. Your goal: ${goal}` +
     scratch +
     `\n\nAvailable tools:\n${toolDefs}\n\n` +
+    `Ground every claim about the user in the goal, the previous steps, or tool ` +
+    `results — never invent personal details; if information is missing, call a ` +
+    `tool to get it or report that it is unavailable.\n\n` +
     `Respond with ONLY a JSON object in this format:\n` +
     `{"tool": "<tool_name>", "args": {<arguments>}}\n` +
     `If the goal is complete, respond with:\n` +

@@ -184,6 +184,7 @@ export class ChatCore {
       mode: conv.mode,
       now: new Date(),
       truncated: fit.truncated,
+      memoryAvailable: this.memory !== null,
     });
 
     // 6. stream generation via the gateway

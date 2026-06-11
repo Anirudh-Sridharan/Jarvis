@@ -178,6 +178,7 @@ interface AssembleArgs {
   contextWindow: number;              // 16k local Qwen; larger for HF cloud
   mode: 'local' | 'cloud';
   now: Date;
+  memoryAvailable?: boolean;          // memory system wired this turn (grounding note on empty recall)
 }
 
 const REPLY_HEADROOM = 2_000;
@@ -207,7 +208,14 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
       return `- ${m.text}${ts}`;
     });
     memoryBlock = `## Relevant memories\n${lines.join('\n')}`;
-  } // else: omit entirely — empty scaffolding wastes tokens and biases output
+  } else if (a.memoryAvailable) {
+    // Grounding: recall ran and found nothing — say so explicitly so the model
+    // answers "not stored" instead of inventing personal details.
+    memoryBlock =
+      '## Relevant memories\nNone found for this message. Do not state personal ' +
+      "facts about the user that are not in this conversation — say the information " +
+      "isn't stored and offer to look it up.";
+  } // no memory system wired: omit scaffolding; persona grounding rules still apply
 
   // --- History: rolling summary first, then newest verbatim turns ----------
   const historyMsgs: { role: Role; content: string }[] = [];
@@ -371,7 +379,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
 - **When to trigger retrieval (selective):** Run retrieval for substantive messages; skip for trivial chit-chat / pure acknowledgements ("ok", "thanks") via a cheap heuristic (length + content classifier) to save the latency budget. Retrieval is **scoped** by the query plus the last 1–2 turns for context. Never dump everything — feature 5 returns a ranked set; this core caps it to the memory token budget, placing the top-scored item adjacent to the history (prompt edge).
 - **Edge-placement rationale (lost-in-the-middle):** Decoder attention follows a U-shape — tokens at the start and end of the window are attended far more reliably than the middle. The assembler exploits this deliberately: persona/procedural at the top edge, the *single highest-scored* memory at the boundary abutting recent history, and the user message at the bottom edge. Low-value content (weak memories, the rolling summary) is parked in the middle where attention loss is least costly.
 - **Procedural block (read-only here):** Loaded as a single string and inlined near the top of the system context. The chat core never writes it — feature 6's nightly consolidation owns it. The core only invalidates its in-process cache when notified of a rewrite. This is how Jarvis "learns with you" without fine-tuning.
-- **Persona system prompt:** A versioned constant defining the "Jarvis" voice — concise, capable, slightly witty; no filler, no over-apologizing; uses memory naturally without announcing it unless asked. Versioned so persona changes are traceable across conversations.
+- **Persona system prompt:** A versioned constant defining the "Jarvis" voice — concise, capable, slightly witty; no filler, no over-apologizing; uses memory naturally without announcing it unless asked. Versioned so persona changes are traceable across conversations. **v2 adds grounding rules:** everything Jarvis knows about the user comes only from the prompt's memory/context blocks (connected-app data surfaces through the same blocks via the ingest bridge) and the conversation itself; personal facts are never invented — unknown means "not stored", with an offer to look it up.
 - **Deterministic vs AI-driven boundary:** Deterministic — segment ordering, token budgeting, truncation, retrieval gating heuristic, edge-placement of top memory. AI-driven — the reply itself and the rolling-summary text. Everything that affects *which* tokens occupy the window is code-controlled and testable.
 
 ## Edge cases & safety
@@ -380,7 +388,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
 |---|---|---|
 | **Model unloaded** | Feature 1 reports `unloaded` on first turn | Fire load (trigger wake), show **model-waking**, assemble prompt + retrieve memories in parallel, queue the user message, then generate when weights land. Nothing is lost during warm-up. |
 | **Context overflow** | Post-assert total > ceiling (tokenizer drift) | `assemblePrompt` throws `ContextOverflowError`; caller drops lowest-scored memories then oldest verbatim turns, re-fits, logs the event, and retries. Never send an over-budget prompt. |
-| **No relevant memories** | Feature 5 returns `[]` (or all below threshold) | Omit the memory block entirely — no empty scaffolding (wastes tokens, biases the model). Assistant answers from history + general capability. |
+| **No relevant memories** | Feature 5 returns `[]` (or all below threshold) | With a memory system wired, the block is replaced by a short **"nothing stored" grounding note** so the model says it doesn't have the fact instead of hallucinating one. With no memory system at all, omit the block entirely (no empty scaffolding). |
 | **Contradictory memories** | Conflicting facts surfaced for the same entity | Pass both through; rely on feature 5's temporal scoring to favor the most recent/valid; persona flags uncertainty ("Last I noted X, though that may have changed") rather than asserting blindly. |
 | **Very long conversation** | History exceeds the verbatim budget repeatedly | Rolling summarization keeps the live window bounded indefinitely; full transcript stays in the local store and stays searchable via memory after it leaves the window. |
 | **Cloud fallback mid-conversation** | Feature 1 routes a turn to an HF endpoint | Re-budget against that model's larger `contextWindow`, keep the same assembly order, show the cloud badge, set per-turn `mode='cloud'`. Subsequent turns may revert to local. |

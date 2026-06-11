@@ -9,9 +9,10 @@
  *   4. Truncated recent history    (rolling summary first, then newest verbatim)
  *   5. Current user message        (bottom edge — strongest attention)
  *
- * Phase 1 has NO memory subsystem: `memories` arrives empty and the memory block
- * is omitted entirely (no empty scaffolding). The seam below is where feature 5
- * retrieval plugs in.
+ * With no memory system wired, `memories` arrives empty and the memory block is
+ * omitted entirely (no empty scaffolding). When a memory system IS wired
+ * (`memoryAvailable`) and retrieval found nothing, a short grounding note takes
+ * the block's place so the model says "not stored" rather than hallucinating.
  */
 import { PERSONA_SYSTEM_PROMPT } from "./persona.js";
 import { ContextOverflowError } from "./errors.js";
@@ -33,6 +34,12 @@ export interface AssembleArgs {
   mode: "local" | "cloud";
   now: Date;
   truncated?: boolean; // set by caller when history was trimmed
+  /**
+   * True when a memory system is wired this turn. With it set and zero
+   * memories retrieved, a short "nothing stored matched" note is emitted so
+   * the model says "not stored" instead of inventing personal details.
+   */
+  memoryAvailable?: boolean;
 }
 
 export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
@@ -63,7 +70,16 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
       return `- ${m.text}${ts}`;
     });
     memoryBlock = `## Relevant memories\n${lines.join("\n")}`;
-  } // else: omit entirely — empty scaffolding wastes tokens and biases output
+  } else if (a.memoryAvailable) {
+    // Recall ran and found nothing. Say so explicitly — a small local model
+    // otherwise fills the gap with invented personal details. (~30 tokens,
+    // covered by SAFETY_SLACK in the budget math.)
+    memoryBlock =
+      "## Relevant memories\n" +
+      "None found for this message. Do not state personal facts about the user " +
+      "that are not in this conversation — say the information isn't stored and " +
+      "offer to look it up.";
+  } // no memory system wired: omit scaffolding; the persona grounding rules still apply
 
   // --- History: rolling summary first, then newest verbatim turns ----------
   const historyMsgs: { role: Role; content: string }[] = [];

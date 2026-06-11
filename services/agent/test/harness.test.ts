@@ -14,6 +14,7 @@ import { z } from "zod";
 import {
   validateAndRetry,
   parseLlmToolCall,
+  buildToolCallPrompt,
   MAX_VALIDATION_RETRIES,
 } from "../src/core/harness.js";
 import {
@@ -66,6 +67,17 @@ describe("parseLlmToolCall", () => {
 
   it("returns null for JSON without tool/name", () => {
     expect(parseLlmToolCall('{"x": 1}')).toBeNull();
+  });
+});
+
+// ── buildToolCallPrompt grounding ────────────────────────────────────────────
+
+describe("buildToolCallPrompt", () => {
+  it("instructs the model to ground user claims in tool results, not invent them", () => {
+    const search = new FakeSearchTool();
+    const prompt = buildToolCallPrompt("find my next meeting", [], [search]);
+    expect(prompt).toContain("never invent personal details");
+    expect(prompt).toContain("tool");
   });
 });
 

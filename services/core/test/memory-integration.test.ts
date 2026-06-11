@@ -318,7 +318,7 @@ describe("memory-integration: graceful degradation", () => {
     expect(done).toBeDefined();
   });
 
-  it("empty retrieval produces no memory block in prompt (no wasted tokens)", async () => {
+  it("empty retrieval produces the grounding note instead of memory bullets", async () => {
     const memory = makeTempMemory();
     vi.spyOn(memory.retrieval, "retrieve").mockResolvedValue([]);
     vi.spyOn(memory.retrieval, "getProceduralBlock").mockReturnValue("");
@@ -333,6 +333,29 @@ describe("memory-integration: graceful degradation", () => {
 
     const store = new InMemoryConversationStore();
     const core = new ChatCore(gateway, store, memory);
+    await drain(core.send({ message: "Hi" }));
+
+    // Memory is wired but recall came up empty: the prompt carries an explicit
+    // "nothing stored" note so the model doesn't invent personal details.
+    const memBlock = capturedMessages.find(
+      (m) => m.content.includes("Relevant memories"),
+    );
+    expect(memBlock).toBeDefined();
+    expect(memBlock?.content).toContain("None found for this message");
+    expect(memBlock?.content).not.toContain("\n- ");
+  });
+
+  it("no memory system at all produces no memory block (no wasted tokens)", async () => {
+    let capturedMessages: { role: string; content: string }[] = [];
+    const { gateway } = makeGatewayStub();
+    vi.spyOn(gateway, "chat").mockImplementation(async function* (req: unknown) {
+      capturedMessages = (req as { messages: { role: string; content: string }[] }).messages;
+      yield { type: "token" as const, text: "ok" };
+      yield { type: "done" as const };
+    });
+
+    const store = new InMemoryConversationStore();
+    const core = new ChatCore(gateway, store, null);
     await drain(core.send({ message: "Hi" }));
 
     const memBlock = capturedMessages.find(
