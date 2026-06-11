@@ -1,9 +1,9 @@
 /**
  * Playwright MCP client (feature 18 — browser automation slice).
  *
- * Live dependency: spawns `npx @playwright/mcp@latest --headless --isolated`
- * over stdio via the official @modelcontextprotocol/sdk and exposes the one
- * method the tool layer needs. `--isolated` is load-bearing for safety: the
+ * Live dependency: spawns `npx @playwright/mcp@0.0.76 --headless --isolated`
+ * (pinned — see DEFAULT_CMD) over stdio via the official
+ * @modelcontextprotocol/sdk and exposes the one method the tool layer needs. `--isolated` is load-bearing for safety: the
  * fresh browser profile carries no cookies/sessions, so the agent can never
  * act with the user's logged-in identity.
  *
