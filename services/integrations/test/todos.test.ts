@@ -7,10 +7,22 @@
  *   - Snooze: increments snoozedCount, updates due date
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { applySchema } from "../src/db/schema.js";
 import { TodoStore, computeNextDue } from "../src/work/todos.js";
+
+// computeNextDue clamps the next occurrence to be strictly after the REAL
+// "today" (recurrence catch-up). The fixtures below hardcode June 2026 dates,
+// so pin the clock before all of them or the suite starts failing the moment
+// the wall clock passes the fixtures.
+beforeAll(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-06-08T12:00:00.000Z")); // Monday, before all fixtures
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 function makeDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
