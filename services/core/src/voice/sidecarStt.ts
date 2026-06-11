@@ -6,9 +6,10 @@
  * sidecar answers with JSON text frames (speech_start / partial / speech_end /
  * final / error) which are translated into @jarvis/voice SttEvents.
  *
- * Note: the sidecar's speech_end frame carries no silence measurement — we
- * emit silenceMs: 0 and rely on the orchestrator's wall-clock silence timer
- * for end-of-turn detection.
+ * Note: the sidecar's speech_end frame reports silence_ms — the time since
+ * the last voiced frame (VAD hangover + Whisper transcription) — which the
+ * orchestrator counts toward its end-of-turn silence threshold so silence the
+ * VAD already observed is not waited out twice.
  *
  * The WebSocket factory and mic process are injectable so tests run with no
  * network, no mic, and no ffmpeg.
@@ -119,6 +120,7 @@ interface SidecarFrame {
   stability?: number;
   confidence?: number;
   detail?: string;
+  silence_ms?: number;
 }
 
 export class SidecarSttEngine implements SttEngine {
@@ -201,9 +203,12 @@ export function translateFrame(frame: SidecarFrame): SttEvent | null {
     case "partial":
       return { type: "partial", text: frame.text ?? "", stability: frame.stability ?? 0.5 };
     case "speech_end":
-      // Sidecar reports no silence measurement; the orchestrator's wall-clock
-      // silence timer owns end-of-turn timing.
-      return { type: "speech_end", silenceMs: 0 };
+      // The sidecar reports silence since the last voiced frame (VAD hangover
+      // + transcription time); the orchestrator counts it toward end-of-turn.
+      return {
+        type: "speech_end",
+        silenceMs: typeof frame.silence_ms === "number" ? frame.silence_ms : 0,
+      };
     case "final":
       return { type: "final", text: frame.text ?? "", confidence: frame.confidence ?? 1 };
     default:

@@ -53,6 +53,7 @@ IMPORTANT: requires Python >= 3.11.  Do NOT run with the system python3 3.9.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np  # type: ignore[import]
@@ -65,7 +66,7 @@ log = logging.getLogger("stt")
 
 SAMPLE_RATE = 16000     # Hz
 FRAME_SAMPLES = 512     # Silero VAD window = 512 samples (32 ms at 16 kHz)
-SILENCE_HANGOVER = 20   # consecutive silent frames before speech_end fires
+SILENCE_HANGOVER = 15   # consecutive silent frames before speech_end fires (15 × 32 ms = 480 ms)
 MIN_SPEECH_FRAMES = 3   # ignore sub-frame blips
 
 
@@ -93,6 +94,7 @@ class AudioBuffer:
         self.pcm_bytes: bytearray = bytearray()
         self.speech_frames: bytearray = bytearray()
         self.in_speech: bool = False
+        self.last_voiced_monotonic: Optional[float] = None
         self._silent_frame_count: int = 0
         self._speech_frame_count: int = 0
 
@@ -177,6 +179,7 @@ def run_vad_and_transcribe(
             buf._silent_frame_count = 0
             buf._speech_frame_count += 1
             buf.speech_frames.extend(frame_raw)
+            buf.last_voiced_monotonic = time.monotonic()
 
             if not buf.in_speech and buf._speech_frame_count >= MIN_SPEECH_FRAMES:
                 buf.in_speech = True
@@ -191,12 +194,22 @@ def run_vad_and_transcribe(
 
                 if buf._silent_frame_count >= SILENCE_HANGOVER:
                     # End of speech segment — run Whisper on the accumulated frames.
-                    events.append({"type": "speech_end"})
+                    end_event: Dict[str, Any] = {"type": "speech_end"}
+                    events.append(end_event)
                     log.debug("speech_end (hangover=%d)", SILENCE_HANGOVER)
 
                     transcript, confidence = _transcribe(
                         bytes(buf.speech_frames), whisper_model
                     )
+                    # Honest silence measurement: time since the last voiced
+                    # frame, INCLUDING the transcription time that just elapsed.
+                    # The TS orchestrator counts this toward its end-of-turn
+                    # silence threshold instead of re-waiting silence the VAD
+                    # already observed (it previously received silenceMs: 0).
+                    if buf.last_voiced_monotonic is not None:
+                        end_event["silence_ms"] = int(
+                            (time.monotonic() - buf.last_voiced_monotonic) * 1000
+                        )
                     if transcript:
                         events.append({
                             "type": "final",
@@ -229,7 +242,7 @@ def _transcribe(pcm_bytes: bytes, whisper_model: Any) -> tuple[str, float]:
     segments, info = whisper_model.transcribe(
         audio_f32,
         language="en",
-        beam_size=3,
+        beam_size=1,        # greedy — ~30-40% faster on short utterances
         vad_filter=False,   # We already VAD-gated; avoid double-filtering.
         word_timestamps=False,
     )

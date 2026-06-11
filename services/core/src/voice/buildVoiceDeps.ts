@@ -33,12 +33,18 @@ export function buildVoiceDeps(opts: VoiceDepsOptions): Omit<OrchestratorDeps, "
 }
 
 /**
- * Shared turn tuning: whisper finals arrive after VAD speech_end, so the
- * wall-clock silence timer owns end-of-turn (the sidecar sends silenceMs: 0).
+ * Shared turn tuning. The sidecar reports honest silenceMs on speech_end
+ * (VAD hangover + Whisper time), so the orchestrator no longer re-waits
+ * silence the VAD already observed; 800ms matches the feature-7 stop-secs
+ * default. Chunk sizes: the first chunk flushes at the first sentence
+ * terminator (fast first audio); later chunks merge short sentences
+ * (~2-sentence prosody — Kokoro sounds flat on fragments).
  */
 export const VOICE_TURN_CONFIG: OrchestratorConfig = {
-  silenceThresholdMs: 900,
+  silenceThresholdMs: 800,
   forceEndMs: 2_500,
+  minCharsPerChunk: 60,
+  maxCharsPerChunk: 240,
 };
 
 /** Resolve core/sidecar URLs from env exactly like the CLI does. */

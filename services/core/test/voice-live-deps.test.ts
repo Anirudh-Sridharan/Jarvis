@@ -153,6 +153,20 @@ describe("SidecarSttEngine", () => {
   it("translateFrame returns null for unknown frame types", () => {
     expect(translateFrame({ type: "bogus" })).toBeNull();
   });
+
+  it("passes the sidecar's honest silence_ms through on speech_end", () => {
+    expect(translateFrame({ type: "speech_end", silence_ms: 780 })).toEqual({
+      type: "speech_end",
+      silenceMs: 780,
+    });
+  });
+
+  it("defaults silenceMs to 0 when the sidecar omits silence_ms", () => {
+    expect(translateFrame({ type: "speech_end" })).toEqual({
+      type: "speech_end",
+      silenceMs: 0,
+    });
+  });
 });
 
 // ── SidecarTtsEngine ──────────────────────────────────────────────────────────
