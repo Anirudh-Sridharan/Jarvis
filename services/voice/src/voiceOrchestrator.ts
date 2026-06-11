@@ -513,10 +513,8 @@ export class VoiceOrchestrator {
           if (firstSentence) {
             firstSentence = false;
             latency.markFirstChunk();
-            orchestrator.emit({ type: "sentence", text: sentence });
-          } else {
-            orchestrator.emit({ type: "sentence", text: sentence });
           }
+          orchestrator.emit({ type: "sentence", text: sentence });
           yield sentence;
         }
       }

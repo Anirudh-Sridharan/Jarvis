@@ -12,8 +12,7 @@ import type { MemorySystem } from "@jarvis/memory";
 import { GatewayEmbedder } from "./gatewayEmbedder.js";
 import { GatewayLlm } from "./gatewayLlm.js";
 import type { InferenceGateway } from "../inference/gateway.js";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { getDataDir } from "../dataDir.js";
 
 let instance: MemorySystem | null = null;
 let initialized = false;
@@ -27,8 +26,7 @@ export function getMemorySystem(gateway: InferenceGateway): MemorySystem | null 
   initialized = true;
 
   try {
-    const dataDir =
-      process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data");
+    const dataDir = getDataDir();
 
     const embedder = new GatewayEmbedder(gateway.mlx, gateway.registry);
     const llm = new GatewayLlm(gateway);

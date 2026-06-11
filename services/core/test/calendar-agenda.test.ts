@@ -14,6 +14,7 @@ import type { CalendarEvent } from "@jarvis/integrations";
 import { buildAgendaBlock, CALENDAR_INTENT } from "../src/chat/calendarAgenda.js";
 import { ChatCore } from "../src/chat/chatCore.js";
 import { InMemoryConversationStore } from "../src/chat/conversationStore.js";
+import { makeGatewayStub, drain } from "./chatTestKit.js";
 
 function makeEvent(overrides: Partial<CalendarEvent>): CalendarEvent {
   const now = new Date().toISOString();
@@ -39,28 +40,6 @@ function makeMirror(events: CalendarEvent[]) {
   return {
     getEvents: vi.fn((_cal: string, _from: string, _to: string) => events),
   };
-}
-
-function makeGatewayStub() {
-  let capturedMessages: { role: string; content: string }[] = [];
-  const gateway = {
-    chat: async function* (req: unknown) {
-      capturedMessages = (req as { messages: { role: string; content: string }[] }).messages;
-      yield { type: "token" as const, text: "ok" };
-      yield { type: "done" as const };
-    },
-    registry: {
-      defaultFor: () => ({ ctxWindow: 16_384, id: "test", modelRef: "test", kind: "chat", provider: "mlx" }),
-    },
-    modelManager: { isFallbackActive: () => false },
-  } as unknown as InstanceType<typeof import("../src/inference/gateway.js").InferenceGateway>;
-  return { gateway, messages: () => capturedMessages };
-}
-
-async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
-  const items: T[] = [];
-  for await (const item of gen) items.push(item);
-  return items;
 }
 
 describe("buildAgendaBlock", () => {

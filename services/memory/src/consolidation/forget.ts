@@ -61,7 +61,7 @@ export function computeForgetDecisions(
   nowMs: number = Date.now(),
 ): ForgetDecision[] {
   // Get all live facts from the DB
-  const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+  const db = store.rawDb;
   const factRows = db
     .prepare(
       `SELECT id, subject_id, importance, last_accessed_at, access_count
@@ -165,7 +165,7 @@ export async function applyForgetDecisions(
 
   // Compression: group by subject entity
   if (toCompress.length > 0 && llm) {
-    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const db = store.rawDb;
 
     // Group compress candidates by subject_id
     const groupsBySubject = new Map<string, ForgetDecision[]>();

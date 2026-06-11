@@ -289,12 +289,8 @@ Reply with JSON: {"importance": number}`;
       if (!match) return fact.importance;
       const parsed = JSON.parse(match[0]) as { importance?: number };
       const suggested = parsed.importance ?? fact.importance;
-      // Clamp: no more than ±3 drift from current importance
-      const clamped = Math.max(
-        1,
-        Math.min(10, Math.round(suggested)),
-      );
-      // Drift guard: clamp to ±3 of prior
+      // Clamp to the 1–10 scale, then guard drift to ±3 of the prior importance.
+      const clamped = Math.max(1, Math.min(10, Math.round(suggested)));
       return Math.max(fact.importance - 3, Math.min(fact.importance + 3, clamped));
     } catch {
       return fact.importance;

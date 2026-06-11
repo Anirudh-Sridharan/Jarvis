@@ -1,9 +1,8 @@
 /**
- * Conversation store (feature 2). Phase 1: in-memory Map.
- *
- * The durable implementation is SqliteConversationStore
- * (./sqliteConversationStore.ts) — the server uses it; tests and the
- * fake-friendly path keep InMemoryConversationStore.
+ * Conversation store (feature 2): the ConversationStore interface plus the
+ * in-memory implementation. The durable implementation is
+ * SqliteConversationStore (./sqliteConversationStore.ts) — the server uses
+ * it; tests and the fake-friendly path keep InMemoryConversationStore.
  */
 import { randomUUID } from "node:crypto";
 import { countTokens } from "./contextBudget.js";

@@ -86,7 +86,7 @@ function factToProfileFact(fact: Fact, description?: string): ProfileFact {
 // Access the raw DB via the store's internal db property to gather all live facts.
 
 function getAllLiveFacts(store: MemoryStore): Fact[] {
-  const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+  const db = store.rawDb;
   const rows = db
     .prepare(
       `SELECT id FROM facts

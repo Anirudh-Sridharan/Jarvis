@@ -16,7 +16,7 @@
 import type { WidgetEnvelope, ProfileContract } from "@/app/lib/contracts";
 import ProfileView from "@/app/components/ProfileView";
 
-const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
+import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
 
 async function fetchProfile(): Promise<WidgetEnvelope<ProfileContract>> {
   try {

@@ -7,7 +7,7 @@ import type { WidgetEnvelope, AgendaEvent, FreeSlotContract } from "@/app/lib/co
 import { localDateStr } from "@/app/lib/dates";
 import AgendaList from "@/app/components/AgendaList";
 
-const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
+import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
 
 async function fetchJson<T>(path: string): Promise<WidgetEnvelope<T>> {
   try {

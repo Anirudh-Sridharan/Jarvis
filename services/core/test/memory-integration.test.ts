@@ -19,6 +19,7 @@ import { FakeEmbedder, FakeLlm } from "@jarvis/memory/testing";
 import { ChatCore } from "../src/chat/chatCore.js";
 import { InMemoryConversationStore } from "../src/chat/conversationStore.js";
 import { assemblePrompt } from "../src/chat/promptAssembler.js";
+import { makeGatewayStub, drain } from "./chatTestKit.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -27,45 +28,6 @@ function makeTempMemory() {
   const embedder = new FakeEmbedder();
   const llm = new FakeLlm();
   return createMemorySystem({ embedder, llm, dataDir: dir });
-}
-
-/**
- * Minimal stub of InferenceGateway that streams a canned reply.
- * ChatCore only calls: gateway.chat(), gateway.registry.defaultFor(), gateway.modelManager.isFallbackActive()
- */
-function makeGatewayStub(reply = "Hello from Jarvis"): {
-  gateway: InstanceType<typeof import("../src/inference/gateway.js").InferenceGateway>;
-} {
-  const gateway = {
-    chat: async function* (_req: unknown, _signal?: AbortSignal) {
-      yield { type: "token" as const, text: reply };
-      yield { type: "done" as const };
-    },
-    registry: {
-      defaultFor: (_kind: string, _target: string) => ({
-        ctxWindow: 16_384,
-        id: "test-model",
-        modelRef: "test",
-        kind: "chat",
-        provider: "mlx",
-      }),
-    },
-    modelManager: {
-      isFallbackActive: () => false,
-    },
-    mlx: {
-      embed: async (_modelRef: string, texts: string[]) => texts.map(() => Array(256).fill(0)),
-    },
-  } as unknown as InstanceType<typeof import("../src/inference/gateway.js").InferenceGateway>;
-
-  return { gateway };
-}
-
-/** Consume an async generator into an array. */
-async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
-  const items: T[] = [];
-  for await (const item of gen) items.push(item);
-  return items;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

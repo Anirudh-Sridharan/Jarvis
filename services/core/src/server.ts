@@ -29,8 +29,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { InferenceGateway } from "./inference/gateway.js";
 import { ChatCore } from "./chat/chatCore.js";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { getDataDir } from "./dataDir.js";
 import { InMemoryConversationStore } from "./chat/conversationStore.js";
 import { createSqliteConversationStore } from "./chat/sqliteConversationStore.js";
 import { getAgentSystem } from "./agent/agentSystem.js";
@@ -54,9 +53,7 @@ const gateway = new InferenceGateway(config);
 // Tests keep the in-memory store — they must not touch ~/.jarvis/data.
 const store = process.env["VITEST"]
   ? new InMemoryConversationStore()
-  : createSqliteConversationStore(
-      process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data"),
-    );
+  : createSqliteConversationStore(getDataDir());
 // Wire the persistent memory system (SQLite-backed) so chat turns are captured
 // and prior memories retrieved. Without this, ChatCore.memory defaults to null
 // and the assistant has no cross-session memory (it can't remember your name
@@ -66,7 +63,7 @@ const memory = getMemorySystem(gateway);
 // In-memory DB under vitest so tests never touch ~/.jarvis/data.
 const telemetrySink = process.env["VITEST"]
   ? new TelemetrySink(new DatabaseSync(":memory:"))
-  : createTelemetrySink(process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data"));
+  : createTelemetrySink(getDataDir());
 setTelemetrySink(telemetrySink);
 // Connected-app agenda: calendar-shaped questions get a deterministic agenda
 // block rendered from the live Google Calendar mirror (lazy; null under tests

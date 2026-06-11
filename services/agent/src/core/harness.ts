@@ -104,12 +104,7 @@ export function buildToolCallPrompt(
   scratchpad: string[],
   tools: Tool[],
 ): string {
-  const toolDefs = tools
-    .map((t) => {
-      const shape = t.schema._def;
-      return `- ${t.name}: ${t.description}`;
-    })
-    .join("\n");
+  const toolDefs = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
 
   const scratch =
     scratchpad.length > 0

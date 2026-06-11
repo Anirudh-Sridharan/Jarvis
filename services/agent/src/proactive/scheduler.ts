@@ -224,17 +224,7 @@ export class Scheduler {
 
       const toRun = policy === "run-once" ? [missed[0]!] : missed;
       for (const scheduledFor of toRun) {
-        if (acquireLock(t.id)) {
-          try {
-            await this.fire(
-              t,
-              "catch-up",
-              new Date(scheduledFor).toISOString(),
-            );
-          } finally {
-            releaseLock(t.id);
-          }
-        }
+        await this.fireLocked(t, "catch-up", new Date(scheduledFor).toISOString());
       }
     }
   }
@@ -291,13 +281,7 @@ export class Scheduler {
       const current = this.triggerStore.get(t.id);
       if (!current?.enabled) return;
 
-      if (acquireLock(t.id)) {
-        try {
-          await this.fire(t, "cron", new Date(nextMs).toISOString());
-        } finally {
-          releaseLock(t.id);
-        }
-      }
+      await this.fireLocked(t, "cron", new Date(nextMs).toISOString());
 
       // Re-arm (unless one-shot)
       if (!t.cron?.oneShot) {
@@ -318,13 +302,7 @@ export class Scheduler {
       const current = this.triggerStore.get(t.id);
       if (!current?.enabled) return;
 
-      if (acquireLock(t.id)) {
-        try {
-          await this.fire(t, "event");
-        } finally {
-          releaseLock(t.id);
-        }
-      }
+      await this.fireLocked(t, "event");
     });
   }
 
@@ -358,13 +336,8 @@ export class Scheduler {
         if (heldMs >= t.condition!.debounceSec * 1000) {
           // Fire
           debounceSince = null;
-          if (acquireLock(t.id)) {
-            try {
-              await this.fire(t, "condition");
-            } finally {
-              releaseLock(t.id);
-            }
-            // Set cooldown
+          // Cooldown only starts when the fire actually happened (lock free).
+          if (await this.fireLocked(t, "condition")) {
             const cooldownUntil = new Date(
               this.opts.clock.now() + t.condition!.cooldownSec * 1000,
             ).toISOString();
@@ -426,6 +399,23 @@ export class Scheduler {
   }
 
   // ── Internal: execute a trigger ──────────────────────────────────────────
+
+  /**
+   * Fire under the per-trigger advisory lock. Returns null (without firing)
+   * when a previous fire for this trigger is still in flight.
+   */
+  private async fireLocked(
+    trigger: Trigger,
+    firedBy: TriggerRun["firedBy"],
+    scheduledFor?: string,
+  ): Promise<TriggerRun | null> {
+    if (!acquireLock(trigger.id)) return null;
+    try {
+      return await this.fire(trigger, firedBy, scheduledFor);
+    } finally {
+      releaseLock(trigger.id);
+    }
+  }
 
   private async fire(
     trigger: Trigger,
@@ -563,39 +553,9 @@ export class Scheduler {
   getRun(runId: string): TriggerRun | undefined {
     const row = this.runDb
       .prepare(`SELECT * FROM trigger_runs WHERE id = ?`)
-      .get(runId) as {
-      id: string;
-      trigger_id: string;
-      fired_at: string;
-      fired_by: string;
-      status: string;
-      ran_as: string;
-      context_summary: string;
-      result: string | null;
-      error: string | null;
-      started_at: string;
-      finished_at: string | null;
-      scheduled_for: string | null;
-    } | undefined;
+      .get(runId) as TriggerRunRow | undefined;
 
-    if (!row) return undefined;
-
-    return {
-      id: row.id,
-      triggerId: row.trigger_id,
-      firedAt: row.fired_at,
-      firedBy: row.fired_by as TriggerRun["firedBy"],
-      status: row.status as TriggerRun["status"],
-      ranAs: JSON.parse(row.ran_as) as TriggerRun["ranAs"],
-      contextSummary: row.context_summary,
-      result: row.result ? (JSON.parse(row.result) as unknown) : undefined,
-      error: row.error
-        ? (JSON.parse(row.error) as { code: string; message: string })
-        : undefined,
-      startedAt: row.started_at,
-      finishedAt: row.finished_at ?? undefined,
-      scheduledFor: row.scheduled_for ?? undefined,
-    };
+    return row ? rowToTriggerRun(row) : undefined;
   }
 
   listRuns(triggerId: string): TriggerRun[] {
@@ -603,38 +563,44 @@ export class Scheduler {
       .prepare(
         `SELECT * FROM trigger_runs WHERE trigger_id = ? ORDER BY fired_at DESC LIMIT 50`,
       )
-      .all(triggerId) as Array<{
-      id: string;
-      trigger_id: string;
-      fired_at: string;
-      fired_by: string;
-      status: string;
-      ran_as: string;
-      context_summary: string;
-      result: string | null;
-      error: string | null;
-      started_at: string;
-      finished_at: string | null;
-      scheduled_for: string | null;
-    }>;
+      .all(triggerId) as unknown as TriggerRunRow[];
 
-    return rows.map((row) => ({
-      id: row.id,
-      triggerId: row.trigger_id,
-      firedAt: row.fired_at,
-      firedBy: row.fired_by as TriggerRun["firedBy"],
-      status: row.status as TriggerRun["status"],
-      ranAs: JSON.parse(row.ran_as) as TriggerRun["ranAs"],
-      contextSummary: row.context_summary,
-      result: row.result ? (JSON.parse(row.result) as unknown) : undefined,
-      error: row.error
-        ? (JSON.parse(row.error) as { code: string; message: string })
-        : undefined,
-      startedAt: row.started_at,
-      finishedAt: row.finished_at ?? undefined,
-      scheduledFor: row.scheduled_for ?? undefined,
-    }));
+    return rows.map(rowToTriggerRun);
   }
+}
+
+interface TriggerRunRow {
+  id: string;
+  trigger_id: string;
+  fired_at: string;
+  fired_by: string;
+  status: string;
+  ran_as: string;
+  context_summary: string;
+  result: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+  scheduled_for: string | null;
+}
+
+function rowToTriggerRun(row: TriggerRunRow): TriggerRun {
+  return {
+    id: row.id,
+    triggerId: row.trigger_id,
+    firedAt: row.fired_at,
+    firedBy: row.fired_by as TriggerRun["firedBy"],
+    status: row.status as TriggerRun["status"],
+    ranAs: JSON.parse(row.ran_as) as TriggerRun["ranAs"],
+    contextSummary: row.context_summary,
+    result: row.result ? (JSON.parse(row.result) as unknown) : undefined,
+    error: row.error
+      ? (JSON.parse(row.error) as { code: string; message: string })
+      : undefined,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at ?? undefined,
+    scheduledFor: row.scheduled_for ?? undefined,
+  };
 }
 
 function matchesFilter(

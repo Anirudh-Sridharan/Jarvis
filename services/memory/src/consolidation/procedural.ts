@@ -39,26 +39,6 @@ Instructions:
 - Return ONLY the markdown, no commentary.`;
 
 /**
- * Extract procedural facts from all live semantic facts.
- */
-export function extractProceduralFacts(store: MemoryStore): Fact[] {
-  const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
-  const rows = db
-    .prepare(
-      `SELECT * FROM facts WHERE invalidated_at IS NULL AND (valid_to IS NULL OR valid_to > ?)`,
-    )
-    .all(new Date().toISOString()) as { predicate: string; id: string }[];
-
-  const proceduralIds = rows
-    .filter((r) => PROCEDURAL_PREDICATES.has(r.predicate))
-    .map((r) => r.id);
-
-  return proceduralIds
-    .map((id) => store.getFactById(id))
-    .filter((f): f is Fact => f !== null);
-}
-
-/**
  * Update the procedural block using the injected LLM.
  * If there are no new procedural signals, returns without writing.
  */

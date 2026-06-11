@@ -1,7 +1,7 @@
 /**
  * Chat page — feature 2.
- * Full-screen chat backed by the core service SSE stream.
- * The Chat component is preserved exactly from Phase 1.
+ * Page shell around the Chat component (components/Chat.tsx), which talks to
+ * the core service's /chat SSE stream directly from the browser.
  */
 
 import Chat from "@/app/components/Chat";

@@ -9,7 +9,7 @@ import KpiCard from "@/app/components/KpiCard";
 import TodoList from "@/app/components/TodoList";
 import { EmptyState, ErrorState } from "@/app/components/WidgetStates";
 
-const BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000";
+import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
 
 async function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
   try {

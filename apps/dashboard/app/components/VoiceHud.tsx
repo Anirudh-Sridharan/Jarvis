@@ -14,8 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const CORE_URL =
-  process.env.NEXT_PUBLIC_CORE_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8080";
+import { CORE_URL, uid } from "@/app/lib/clientEnv";
 
 // ---- Wire types (core /voice/* contract) -----------------------------------
 type OrchestratorEvent =
@@ -48,10 +47,6 @@ const STATE_LABEL: Record<string, string> = {
   speaking: "SPEAKING",
   error: "ERROR",
 };
-
-function uid(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
 
 export default function VoiceHud() {
   const [armed, setArmed] = useState(false);

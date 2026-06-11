@@ -21,7 +21,7 @@ import { countTokens, fitContextBudget } from "./contextBudget.js";
 import { PERSONA_SYSTEM_PROMPT } from "./persona.js";
 import { CALENDAR_INTENT, type AgendaSource } from "./calendarAgenda.js";
 import type { ConversationStore } from "./conversationStore.js";
-import type { Conversation, RetrievedMemory } from "./types.js";
+import type { RetrievedMemory } from "./types.js";
 import type { MemorySystem, RetrievedMemory as MemRetrievedMemory } from "@jarvis/memory";
 
 export interface ChatSendArgs {
@@ -70,7 +70,6 @@ function loadProceduralBlock(memory: MemorySystem | null): string {
  */
 async function retrieveMemories(
   query: string,
-  _conversation: Conversation,
   memory: MemorySystem | null,
 ): Promise<RetrievedMemory[]> {
   if (!memory) return [];
@@ -168,7 +167,7 @@ export class ChatCore {
 
     // 2. retrieval (Phase 2: hybrid memory retrieval) + 3. procedural block
     const now = new Date();
-    const memories = await retrieveMemories(args.message, conv, this.memory);
+    const memories = await retrieveMemories(args.message, this.memory);
     const procedural = loadProceduralBlock(this.memory);
     const agendaBlock = this.loadAgendaBlock(args.message, now);
 

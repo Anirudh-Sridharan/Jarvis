@@ -16,8 +16,7 @@ import type { IntegrationsSystem } from "@jarvis/integrations";
 import type { InferenceGateway } from "../inference/gateway.js";
 import { AgentLlm } from "./agentLlm.js";
 import { buildToolRegistry } from "./tools/index.js";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { getDataDir } from "../dataDir.js";
 
 // ── Real clock ────────────────────────────────────────────────────────────────
 
@@ -149,8 +148,7 @@ export function getAgentSystem(
   initialized = true;
 
   try {
-    const dataDir =
-      process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data");
+    const dataDir = getDataDir();
 
     const llm = new AgentLlm(gateway);
     const tools = buildToolRegistry(integrations);

@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const CORE_URL =
-  process.env.NEXT_PUBLIC_CORE_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8080";
+import { CORE_URL } from "@/app/lib/clientEnv";
 
 const POLL_MS = 15_000;
 

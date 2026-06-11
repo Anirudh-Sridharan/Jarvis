@@ -51,6 +51,32 @@ function hashEntry(e: Omit<AuditEntry, "hash">): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
+// ── Row mapping ───────────────────────────────────────────────────────────────
+
+interface AuditRow {
+  seq: number;
+  ts: string;
+  kind: string;
+  action_id: string;
+  run_id: string;
+  payload: string;
+  prev_hash: string;
+  hash: string;
+}
+
+/** Map a DB row to the hash-input entry shape (hash itself stays on the row). */
+function rowToEntry(row: AuditRow): Omit<AuditEntry, "hash"> {
+  return {
+    seq: row.seq,
+    ts: row.ts,
+    kind: row.kind as AuditEntry["kind"],
+    actionId: row.action_id,
+    runId: row.run_id,
+    payload: JSON.parse(row.payload) as Record<string, unknown>,
+    prevHash: row.prev_hash,
+  };
+}
+
 // ── AuditLog ──────────────────────────────────────────────────────────────────
 
 export class AuditLog {
@@ -139,28 +165,11 @@ export class AuditLog {
         `SELECT seq, ts, kind, action_id, run_id, payload, prev_hash, hash
          FROM audit_log ORDER BY seq ASC`,
       )
-      .all() as Array<{
-      seq: number;
-      ts: string;
-      kind: string;
-      action_id: string;
-      run_id: string;
-      payload: string;
-      prev_hash: string;
-      hash: string;
-    }>;
+      .all() as unknown as AuditRow[];
 
     let prevHash = GENESIS;
     for (const row of rows) {
-      const entry: Omit<AuditEntry, "hash"> = {
-        seq: row.seq,
-        ts: row.ts,
-        kind: row.kind as AuditEntry["kind"],
-        actionId: row.action_id,
-        runId: row.run_id,
-        payload: JSON.parse(row.payload) as Record<string, unknown>,
-        prevHash: row.prev_hash,
-      };
+      const entry = rowToEntry(row);
 
       if (row.prev_hash !== prevHash) {
         return { ok: false, brokenAt: row.seq };
@@ -186,27 +195,9 @@ export class AuditLog {
         `SELECT seq, ts, kind, action_id, run_id, payload, prev_hash, hash
          FROM audit_log WHERE run_id = ? ORDER BY seq ASC`,
       )
-      .all(runId) as Array<{
-      seq: number;
-      ts: string;
-      kind: string;
-      action_id: string;
-      run_id: string;
-      payload: string;
-      prev_hash: string;
-      hash: string;
-    }>;
+      .all(runId) as unknown as AuditRow[];
 
-    return rows.map((r) => ({
-      seq: r.seq,
-      ts: r.ts,
-      kind: r.kind as AuditEntry["kind"],
-      actionId: r.action_id,
-      runId: r.run_id,
-      payload: JSON.parse(r.payload) as Record<string, unknown>,
-      prevHash: r.prev_hash,
-      hash: r.hash,
-    }));
+    return rows.map((r) => ({ ...rowToEntry(r), hash: r.hash }));
   }
 
   /** Total entry count. */

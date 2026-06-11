@@ -114,6 +114,15 @@ export class MemoryStore {
     private readonly embedder: Embedder,
   ) {}
 
+  /**
+   * Escape hatch for sibling services (profile, forget) that run bespoke SQL
+   * against the store's database. Internal to @jarvis/memory — not part of
+   * the package's public surface.
+   */
+  get rawDb(): DatabaseSync {
+    return this.db;
+  }
+
   // ── Entity operations ──────────────────────────────────────────────────────
 
   /**

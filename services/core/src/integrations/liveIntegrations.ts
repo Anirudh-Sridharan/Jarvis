@@ -9,13 +9,14 @@
  * liveBootstrap passes a GatewayLlm so the morning-briefing trigger works.
  */
 
-import { homedir } from "node:os";
-import { join } from "node:path";
 import {
   createIntegrations,
   type IntegrationsSystem,
   type LlmClient,
 } from "@jarvis/integrations";
+import { getDataDir } from "../dataDir.js";
+
+export { getDataDir };
 import { FetchHttpClient } from "./fetchHttp.js";
 import { KeychainTokenStore } from "./keychainTokenStore.js";
 
@@ -30,10 +31,6 @@ const unavailableLlm: LlmClient = {
 export interface LiveIntegrationsOptions {
   llm?: LlmClient;
   dataDir?: string;
-}
-
-export function getDataDir(): string {
-  return process.env["JARVIS_DATA_DIR"] ?? join(homedir(), ".jarvis", "data");
 }
 
 export function createLiveIntegrations(
