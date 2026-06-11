@@ -80,9 +80,23 @@ export class FakeSttEngine implements SttEngine {
    */
   public holdOpenAfterScript = false;
 
+  private injected: SttEvent[] = [];
+
   /** Set the script of events to emit when startStream() is called. */
   setScript(events: SttEvent[]): void {
     this.script = [...events];
+  }
+
+  /**
+   * Test helper: push a live event into an open stream. Requires
+   * holdOpenAfterScript = true (the stream waits after the script and emits
+   * pushed events as they arrive) — used to simulate speech that happens
+   * while a reply is playing.
+   */
+  push(event: SttEvent): void {
+    this.injected.push(event);
+    this.resolve?.();
+    this.resolve = null;
   }
 
   get isStreaming(): boolean {
@@ -92,6 +106,7 @@ export class FakeSttEngine implements SttEngine {
   async *startStream(): AsyncGenerator<SttEvent> {
     this._streaming = true;
     this.stopped = false;
+    this.injected = []; // stale pushes from a previous stream do not leak
     this.streamCount++;
     this.activeStreams++;
     this.maxConcurrentStreams = Math.max(
@@ -105,7 +120,13 @@ export class FakeSttEngine implements SttEngine {
         // Tiny yield to allow event loop to process between events
         await new Promise<void>((r) => setTimeout(r, 0));
       }
-      if (this.holdOpenAfterScript && !this.stopped) {
+      while (this.holdOpenAfterScript && !this.stopped) {
+        const next = this.injected.shift();
+        if (next) {
+          yield next;
+          await new Promise<void>((r) => setTimeout(r, 0));
+          continue;
+        }
         await new Promise<void>((r) => {
           this.resolve = r;
         });

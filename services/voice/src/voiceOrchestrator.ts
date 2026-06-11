@@ -14,6 +14,7 @@
 import { chunkSentences } from "./sentenceChunker.js";
 import { SessionMachine } from "./sessionMachine.js";
 import { BargeInPolicy } from "./bargeIn.js";
+import { isLikelyEcho } from "./echoFilter.js";
 import { TurnLatencyTracker } from "./latency.js";
 import { DefaultTurnDetector } from "./turnDetector.js";
 import type {
@@ -41,6 +42,17 @@ export interface OrchestratorConfig {
   silenceThresholdMs?: number;
   /** Force-end silence. Default 2000ms. */
   forceEndMs?: number;
+  /**
+   * Barge-in mode. "confirmed" (default): a speech_start during speaking does
+   * NOT cancel the reply; only a final transcript that is not an echo of the
+   * assistant's own recent speech confirms the barge-in. The live mic has no
+   * AEC, so immediate cancellation lets Jarvis's speaker audio interrupt
+   * himself. "immediate": legacy behavior — speech_start cancels at once
+   * (only safe with echo-cancelled capture).
+   */
+  bargeInMode?: "immediate" | "confirmed";
+  /** How long after a reply finishes its text still counts as echo. Default 5000ms. */
+  echoGraceMs?: number;
 }
 
 export interface OrchestratorDeps {
@@ -89,6 +101,8 @@ export class VoiceOrchestrator {
     llmAbort: AbortController | null;
     speakingStartedAt: number | null;
   } | null = null;
+  /** Text of the last finished/cancelled reply, considered echo until `until`. */
+  private lastAssistantSpeech: { text: string; until: number } | null = null;
 
   constructor(
     private readonly deps: OrchestratorDeps,
@@ -101,6 +115,8 @@ export class VoiceOrchestrator {
       cancelLlmOnBargeIn: config.cancelLlmOnBargeIn ?? true,
       silenceThresholdMs: config.silenceThresholdMs ?? 800,
       forceEndMs: config.forceEndMs ?? 2000,
+      bargeInMode: config.bargeInMode ?? "confirmed",
+      echoGraceMs: config.echoGraceMs ?? 5000,
     };
 
     this.machine = new SessionMachine();
@@ -218,6 +234,39 @@ export class VoiceOrchestrator {
     }
   }
 
+  /** Side-effect hooks shared by the immediate and confirmed barge-in paths. */
+  private bargeInHooks() {
+    return {
+      cancelTts: () => this.deps.tts.cancel(),
+      cancelLlm: () => this.currentTurn?.llmAbort?.abort(),
+      transitionToListening: () => {
+        this.machine.trySend("BARGE_IN");
+      },
+      markBargedIn: () => {
+        if (this.currentTurn) this.currentTurn.bargedIn = true;
+        this.emit({ type: "barge_in", ts: Date.now() });
+      },
+    };
+  }
+
+  /** Assistant text the open mic could currently be hearing (or just heard). */
+  private recentAssistantText(): string {
+    const parts: string[] = [];
+    if (this.currentTurn?.assistantText) parts.push(this.currentTurn.assistantText);
+    if (this.lastAssistantSpeech && Date.now() <= this.lastAssistantSpeech.until) {
+      parts.push(this.lastAssistantSpeech.text);
+    }
+    return parts.join(" ");
+  }
+
+  /** True when a transcript is likely Jarvis's own voice from the speakers. */
+  private isEchoTranscript(text: string): boolean {
+    if (this.config.bargeInMode !== "confirmed") return false;
+    const source = this.recentAssistantText();
+    if (!source) return false;
+    return isLikelyEcho(text, source);
+  }
+
   private async runSttLoop(wakeEvent: WakeEvent): Promise<void> {
     const sessionId = wakeEvent.id;
     this.turnDetector.reset();
@@ -317,25 +366,19 @@ export class VoiceOrchestrator {
         if (event.type === "speech_start") {
           this.clearSilenceTimer();
           this.emit({ type: "partial_transcript", text: transcript });
-          const handled = this.bargeIn.evaluate(
-            this.machine.state,
-            {
-              cancelTts: () => this.deps.tts.cancel(),
-              cancelLlm: () => this.currentTurn?.llmAbort?.abort(),
-              transitionToListening: () => {
-                this.machine.trySend("BARGE_IN");
-              },
-              markBargedIn: () => {
-                if (this.currentTurn) this.currentTurn.bargedIn = true;
-                this.emit({ type: "barge_in", ts: Date.now() });
-              },
-            },
-            Date.now(),
-          );
-
-          if (handled.acted) {
-            // Reset for new turn
-            resetTurnTracking();
+          // Confirmed mode does NOT cancel on raw VAD — without AEC this event
+          // fires for Jarvis's own speaker audio. Cancellation waits for a
+          // non-echo final (below).
+          if (this.config.bargeInMode === "immediate") {
+            const handled = this.bargeIn.evaluate(
+              this.machine.state,
+              this.bargeInHooks(),
+              Date.now(),
+            );
+            if (handled.acted) {
+              // Reset for new turn
+              resetTurnTracking();
+            }
           }
           silenceStart = null;
           reportedSilenceMs = 0;
@@ -351,6 +394,7 @@ export class VoiceOrchestrator {
         }
 
         if (event.type === "partial") {
+          if (this.isEchoTranscript(event.text)) continue;
           // Partials are cumulative within the CURRENT segment only; prepend
           // the finals already committed this turn.
           transcript = committed ? `${committed} ${event.text}` : event.text;
@@ -358,6 +402,25 @@ export class VoiceOrchestrator {
         }
 
         if (event.type === "final") {
+          if (this.isEchoTranscript(event.text)) {
+            // Jarvis's own audio transcribed by the open mic — not the user.
+            continue;
+          }
+          if (this.config.bargeInMode === "confirmed") {
+            const handled = this.bargeIn.evaluate(
+              this.machine.state,
+              this.bargeInHooks(),
+              Date.now(),
+            );
+            if (handled.acted) {
+              // Fresh turn from this utterance: drop anything captured before
+              // the interruption. Do NOT reset the turn detector — it has
+              // already seen this utterance's speech_end, which is what lets
+              // end-of-turn fire for the interrupting speech.
+              transcript = "";
+              committed = "";
+            }
+          }
           committed = committed ? `${committed} ${event.text}` : event.text;
           transcript = committed;
           eosAt = eosAt ?? Date.now();
@@ -499,6 +562,14 @@ export class VoiceOrchestrator {
       // SECOND concurrent stream writing shared state.
       void this.deps.stt.stop();
     } finally {
+      if (this.currentTurn && this.currentTurn.assistantText.trim().length > 0) {
+        // Trailing-echo guard: the mic keeps hearing this reply for a while
+        // after playback (VAD hangover + Whisper lag).
+        this.lastAssistantSpeech = {
+          text: this.currentTurn.assistantText,
+          until: Date.now() + this.config.echoGraceMs,
+        };
+      }
       this.currentTurn = null;
     }
   }

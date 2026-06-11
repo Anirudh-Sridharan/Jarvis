@@ -210,6 +210,9 @@ describe("VoiceOrchestrator — barge-in mid-speech", () => {
         silenceThresholdMs: 100,
         forceEndMs: 500,
         bargeInDebounceMs: 0, // no debounce for test
+        // This test exercises the legacy speech_start-cancels mechanics.
+        // The default is "confirmed" (echo-resistant) — see confirmedBargeIn.test.ts.
+        bargeInMode: "immediate",
       },
     );
 
