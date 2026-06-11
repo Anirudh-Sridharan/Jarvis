@@ -11,7 +11,11 @@ import {
   type WsLike,
   type MicProcess,
 } from "../src/voice/sidecarStt.js";
-import { SidecarTtsEngine, type PlayerProcess } from "../src/voice/sidecarTts.js";
+import {
+  SidecarTtsEngine,
+  sanitizeForSpeech,
+  type PlayerProcess,
+} from "../src/voice/sidecarTts.js";
 import { CoreHttpClient } from "../src/voice/coreVoiceClient.js";
 import type { SttEvent } from "@jarvis/voice";
 
@@ -194,7 +198,7 @@ describe("SidecarTtsEngine", () => {
     for (const s of items) yield s;
   }
 
-  it("synthesizes each sentence via POST /tts and pipes PCM to the player", async () => {
+  it("synthesizes each sentence via POST /tts and pipes PCM into ONE player per turn", async () => {
     const players: ReturnType<typeof makePlayer>[] = [];
     const fetchImpl = vi.fn(async () => {
       return new Response(pcmStream(new Uint8Array([9, 9]), new Uint8Array([8])), { status: 200 });
@@ -220,10 +224,33 @@ describe("SidecarTtsEngine", () => {
     expect(sentBody["text"]).toBe("Good morning, sir.");
     expect(sentBody["voice"]).toBe("bm_fable");
     expect(sentBody["request_id"]).toBeTruthy();
+    expect(sentBody["speed"]).toBe(0.95); // engine default — slightly slower reads more naturally
 
-    expect(players).toHaveLength(2);
-    expect(players[0]!.written.flatMap((c) => [...c])).toEqual([9, 9, 8]);
+    // ONE player for the whole turn: no per-sentence respawn gaps.
+    expect(players).toHaveLength(1);
+    expect(players[0]!.written.flatMap((c) => [...c])).toEqual([9, 9, 8, 9, 9, 8]);
     expect(players[0]!.ended).toBe(true); // waited for playback drain
+  });
+
+  it("strips markdown before synthesis and skips empty results", async () => {
+    const texts: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      texts.push((JSON.parse(init?.body as string) as { text: string }).text);
+      return new Response(pcmStream(new Uint8Array([1])), { status: 200 });
+    });
+
+    const engine = new SidecarTtsEngine({
+      sidecarUrl: "http://127.0.0.1:8089",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      playerFactory: () => makePlayer(),
+      log: () => {},
+    });
+
+    await engine.speak(
+      sentences("**Bold** and `code` and [a link](http://x.com).", "* * *"),
+    );
+
+    expect(texts).toEqual(["Bold and code and a link."]);
   });
 
   it("cancel() aborts playback, fires /tts/cancel, and stops remaining sentences", async () => {
@@ -275,6 +302,25 @@ describe("SidecarTtsEngine", () => {
     expect(player.killed).toBe(true);
     await new Promise((r) => setTimeout(r, 10)); // best-effort cancel POST
     expect(cancelPosted).toBe(true);
+  });
+});
+
+// ── sanitizeForSpeech ─────────────────────────────────────────────────────────
+
+describe("sanitizeForSpeech", () => {
+  it("strips emphasis, inline code, links, headings, bullets", () => {
+    expect(sanitizeForSpeech("## Plan\n- **Do** `thing` via [docs](http://d)"))
+      .toBe("Plan Do thing via docs");
+  });
+
+  it("replaces fenced code blocks", () => {
+    expect(sanitizeForSpeech("Look:\n```js\nlet x = 1;\n```\nDone."))
+      .toBe("Look: code omitted Done.");
+  });
+
+  it("leaves plain prose untouched", () => {
+    expect(sanitizeForSpeech("Good evening. All systems are online."))
+      .toBe("Good evening. All systems are online.");
   });
 });
 

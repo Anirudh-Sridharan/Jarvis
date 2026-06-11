@@ -2,12 +2,17 @@
  * SidecarTtsEngine — real TtsEngine over the voice sidecar's POST /tts.
  *
  * Each sentence from the orchestrator's chunker is synthesized as one /tts
- * request (raw PCM-16 LE mono 24 kHz streamed back) and piped straight into a
- * speaker process (ffplay) as it arrives — playback starts on the first chunk,
- * not after the sentence completes.
+ * request (raw PCM-16 LE mono 24 kHz streamed back). All of a turn's PCM is
+ * piped into ONE speaker process (ffplay) spawned on the first sentence —
+ * playback starts on the first chunk and there are no per-sentence respawn
+ * gaps (which read as choppy, robotic delivery).
  *
- * Voice: the sidecar's default is bm_fable (British English). Override with
- * JARVIS_TTS_VOICE / the `voice` option.
+ * Voice: the sidecar's default is a British Kokoro blend. Override with
+ * JARVIS_TTS_VOICE / the `voice` option. Speed defaults to 0.95 (Kokoro
+ * sounds most natural slightly slowed); JARVIS_TTS_SPEED / `speed` override.
+ *
+ * Sentences are markdown-stripped before synthesis (sanitizeForSpeech) so
+ * Jarvis never reads out asterisks or backticks.
  *
  * cancel() — the barge-in path — aborts the in-flight fetch, fires
  * POST /tts/cancel for the active request_id, kills the player, and makes the
@@ -30,12 +35,31 @@ export interface PlayerProcess {
 
 export interface SidecarTtsOptions {
   sidecarUrl: string;
-  /** Kokoro voice id; omitted → sidecar default (bm_fable, British). */
+  /** Kokoro voice id or blend spec; omitted → sidecar default (British blend). */
   voice?: string;
+  /** Playback speed multiplier. Default 0.95 (Kokoro is most natural slightly slowed). */
   speed?: number;
   fetchImpl?: typeof fetch;
   playerFactory?: () => PlayerProcess;
   log?: (line: string) => void;
+}
+
+/**
+ * Strip markdown the LLM may emit — TTS should speak words, not syntax.
+ * Conservative: removes markers, keeps the content.
+ */
+export function sanitizeForSpeech(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " code omitted ")
+    .replace(/```\w*/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/(\*\*|__|\*|_)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function defaultPlayerFactory(): PlayerProcess {
@@ -46,6 +70,11 @@ function defaultPlayerFactory(): PlayerProcess {
       "-loglevel", "error",
       "-nodisp",
       "-autoexit",
+      // Raw PCM needs no probing; default demuxer buffering adds startup lag.
+      "-probesize", "32",
+      "-analyzeduration", "0",
+      "-fflags", "nobuffer",
+      "-flags", "low_delay",
       "-f", "s16le",
       "-ar", "24000",
       "-i", "pipe:0",
@@ -87,21 +116,40 @@ export class SidecarTtsEngine implements TtsEngine {
     this.cancelled = false;
     signal?.addEventListener("abort", () => this.cancel(), { once: true });
 
-    for await (const sentence of sentences) {
-      if (this.cancelled || signal?.aborted) break;
-      const text = sentence.trim();
-      if (!text) continue;
-      try {
-        await this.speakOne(text);
-      } catch (err) {
-        if (this.cancelled) break; // cancellation aborts the fetch — expected
-        this.log(`[tts] synthesis failed: ${err instanceof Error ? err.message : String(err)}`);
-        break;
+    // ONE player per turn: every sentence's PCM goes into the same stdin so
+    // there are no per-sentence respawn gaps.
+    let player: PlayerProcess | null = null;
+
+    try {
+      for await (const sentence of sentences) {
+        if (this.cancelled || signal?.aborted) break;
+        const text = sanitizeForSpeech(sentence);
+        if (!text) continue;
+        try {
+          if (!player) {
+            player = (this.opts.playerFactory ?? defaultPlayerFactory)();
+            this.currentPlayer = player;
+          }
+          await this.speakOne(text, player);
+        } catch (err) {
+          if (this.cancelled) break; // cancellation aborts the fetch — expected
+          this.log(`[tts] synthesis failed: ${err instanceof Error ? err.message : String(err)}`);
+          break;
+        }
       }
+    } finally {
+      if (player) {
+        if (this.cancelled) {
+          player.kill();
+        } else {
+          await player.end(); // wait for the speaker to drain
+        }
+      }
+      this.currentPlayer = null;
     }
   }
 
-  private async speakOne(text: string): Promise<void> {
+  private async speakOne(text: string, player: PlayerProcess): Promise<void> {
     const requestId = randomUUID();
     const abort = new AbortController();
     this.currentRequestId = requestId;
@@ -110,26 +158,23 @@ export class SidecarTtsEngine implements TtsEngine {
     const body: Record<string, unknown> = {
       text,
       request_id: requestId,
-      speed: this.opts.speed ?? 1.0,
+      speed: this.opts.speed ?? 0.95,
     };
     if (this.opts.voice) body["voice"] = this.opts.voice;
 
-    const res = await this.fetchImpl(`${this.opts.sidecarUrl}/tts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: abort.signal,
-    });
-
-    if (!res.ok || !res.body) {
-      throw new Error(`TTS HTTP ${res.status}`);
-    }
-
-    const player = (this.opts.playerFactory ?? defaultPlayerFactory)();
-    this.currentPlayer = player;
-
-    const reader = res.body.getReader();
     try {
+      const res = await this.fetchImpl(`${this.opts.sidecarUrl}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(`TTS HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -140,12 +185,6 @@ export class SidecarTtsEngine implements TtsEngine {
         if (value) player.write(value);
       }
     } finally {
-      if (this.cancelled) {
-        player.kill();
-      } else {
-        await player.end(); // wait for the speaker to drain
-      }
-      this.currentPlayer = null;
       this.currentRequestId = null;
       this.currentAbort = null;
     }
