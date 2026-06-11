@@ -57,12 +57,6 @@ const COMMUNICATION_PREDICATES = new Set([
   "responds_best_to",
 ]);
 
-// ── LiveFact helper (avoid circular dep with bitemporal module) ───────────────
-
-function isLive(fact: Fact): boolean {
-  return fact.validTo === null && fact.invalidatedAt === null;
-}
-
 // ── Deterministic fallback description builder ────────────────────────────────
 
 function buildFallbackDescription(facts: Fact[]): string {
@@ -418,7 +412,9 @@ export class ProfileService {
   async setPinned(factId: string, pinned: boolean): Promise<PersonalProfile> {
     const updated = this.store.setFactPinned(factId, pinned);
     if (!updated) {
-      throw new Error(`ProfileService.setPinned: fact ${factId} not found`);
+      throw new Error(
+        `ProfileService.setPinned: fact ${factId} not found or no longer live`,
+      );
     }
     const entityType = this.store.listEntityHeaders().get(updated.subjectId)?.entityType;
     if (entityType === "person" || entityType === "project") {
