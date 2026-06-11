@@ -74,6 +74,7 @@ export default async function CalendarPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">Schedule</div>
         <h1 className="page-title">Calendar</h1>
         <p className="text-dim text-sm">Agenda from your connected calendar</p>
       </div>

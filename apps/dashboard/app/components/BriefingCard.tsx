@@ -45,7 +45,7 @@ export default function BriefingCard({ envelope: initialEnvelope }: BriefingCard
   if (envelope.state === "error") {
     return (
       <div className="card card--error">
-        <div className="card__title">Daily Briefing</div>
+        <div className="card__title">Morning Briefing</div>
         <p className="text-dim">Couldn&apos;t build today&apos;s brief.</p>
         <p className="text-error text-sm">{envelope.error?.message}</p>
       </div>
@@ -55,7 +55,7 @@ export default function BriefingCard({ envelope: initialEnvelope }: BriefingCard
   if (envelope.state === "empty" || !envelope.data) {
     return (
       <div className="card">
-        <div className="card__title">Daily Briefing</div>
+        <div className="card__title">Morning Briefing</div>
         <p className="text-dim">
           Your brief will be ready after tonight&apos;s review.
         </p>
@@ -72,21 +72,23 @@ export default function BriefingCard({ envelope: initialEnvelope }: BriefingCard
   }
 
   const { data } = envelope;
+  const generatedAt = new Date(data.createdAt).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 
   return (
     <div className="card briefing-card">
-      <div className="card__header">
-        <div className="card__title">Today&apos;s Brief</div>
-        <div className="card__meta">
-          {data.generatedBy === "template" ? "template" : "AI"} &middot;{" "}
-          {new Date(data.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
-          {envelope.state === "stale" && <span className="badge-stale ml">T+1</span>}
-        </div>
-      </div>
+      <div className="card__title">Morning Briefing</div>
       <div
         className="briefing-card__body"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(data.markdown) }}
       />
+      <div className="briefing-card__footer">
+        Generated {generatedAt} · {data.generatedBy === "template" ? "Template" : "AI"}
+        {envelope.state === "stale" && <span className="badge-stale ml">T+1</span>}
+      </div>
     </div>
   );
 }

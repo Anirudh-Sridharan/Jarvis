@@ -87,19 +87,20 @@ export default async function HealthPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1 className="page-title">Health</h1>
+        <div className="page-eyebrow">Biometrics</div>
+        <h1 className="page-title">Health telemetry</h1>
         <p className="text-dim text-sm">30-day trends &middot; wearable data is T+1 (syncs overnight)</p>
       </div>
 
       <div className="chart-grid">
-        <MetricSection envelope={sleepEnv} label="Sleep Duration" kind="bar" color="#60a5fa" />
-        <MetricSection envelope={recoveryEnv} label="Recovery Score" kind="line" color="#3b82f6" />
-        <MetricSection envelope={hrvEnv} label="HRV" kind="line" color="#93c5fd" />
-        <MetricSection envelope={rhrEnv} label="Resting Heart Rate" kind="line" color="#38bdf8" />
-        <MetricSection envelope={stepsEnv} label="Steps" kind="bar" color="#2563eb" />
-        <MetricSection envelope={energyEnv} label="Active Energy" kind="bar" color="#60a5fa" />
-        <MetricSection envelope={weightEnv} label="Weight (90d)" kind="line" color="#93c5fd" />
-        <MetricSection envelope={spo2Env} label="Blood Oxygen" kind="line" color="#38bdf8" />
+        <MetricSection envelope={sleepEnv} label="Sleep Duration" kind="bar" color="#38c6ff" />
+        <MetricSection envelope={recoveryEnv} label="Recovery Score" kind="line" color="#7fdcff" />
+        <MetricSection envelope={hrvEnv} label="HRV" kind="line" color="#9fe8ff" />
+        <MetricSection envelope={rhrEnv} label="Resting Heart Rate" kind="line" color="#5fd4ff" />
+        <MetricSection envelope={stepsEnv} label="Steps" kind="bar" color="#1e9fd6" />
+        <MetricSection envelope={energyEnv} label="Active Energy" kind="bar" color="#38c6ff" />
+        <MetricSection envelope={weightEnv} label="Weight (90d)" kind="line" color="#9fe8ff" />
+        <MetricSection envelope={spo2Env} label="Blood Oxygen" kind="line" color="#5fd4ff" />
       </div>
     </div>
   );

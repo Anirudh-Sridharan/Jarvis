@@ -30,6 +30,7 @@ export default async function IntegrationsPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">System</div>
         <h1 className="page-title">Integrations</h1>
         <p className="text-dim text-sm">
           Connection status, sync history, and manual syncs per data source.

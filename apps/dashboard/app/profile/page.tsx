@@ -38,7 +38,8 @@ export default async function ProfilePage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1 className="page-title">Profile</h1>
+        <div className="page-eyebrow">Identity</div>
+        <h1 className="page-title">Personal profile</h1>
         <p className="text-dim text-sm">
           What Jarvis knows about you — derived from memory. Edit or remove any fact.
         </p>

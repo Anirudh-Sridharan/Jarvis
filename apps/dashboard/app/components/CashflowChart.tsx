@@ -14,13 +14,13 @@ import type { CashflowMonthContract } from "@/app/lib/contracts";
 import { toMajor } from "@/app/lib/money";
 
 // HUD theme tokens (mirror globals.css — Recharts needs literal values)
-const GRID_STROKE = "#16223a";
-const TICK_FILL = "#7d8ca6";
-const INCOME_COLOR = "#3b82f6";
-const EXPENSES_COLOR = "#fb923c";
+const GRID_STROKE = "rgba(74, 160, 255, 0.12)";
+const TICK_FILL = "#4d6781";
+const INCOME_COLOR = "#38c6ff";
+const EXPENSES_COLOR = "rgba(127, 160, 200, 0.55)";
 const TOOLTIP_STYLE = {
-  background: "#090e1a",
-  border: "1px solid #24385e",
+  background: "#081424",
+  border: "1px solid rgba(99, 201, 255, 0.45)",
   borderRadius: 3,
   fontSize: 12,
 } as const;
@@ -42,7 +42,7 @@ export default function CashflowChart({ months }: { months: CashflowMonthContrac
             <XAxis dataKey="month" tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} />
             <YAxis tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} width={48} />
             <Tooltip
-              cursor={{ fill: "rgba(59, 130, 246, 0.06)" }}
+              cursor={{ fill: "rgba(56, 198, 255, 0.06)" }}
               contentStyle={TOOLTIP_STYLE}
               labelStyle={{ color: TICK_FILL }}
             />

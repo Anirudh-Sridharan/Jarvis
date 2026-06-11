@@ -15,6 +15,7 @@ export default function SettingsPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">System</div>
         <h1 className="page-title">Settings</h1>
       </div>
       <div className="settings-list">

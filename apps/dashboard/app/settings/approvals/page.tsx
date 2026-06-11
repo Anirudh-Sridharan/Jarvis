@@ -6,6 +6,7 @@ export default function ApprovalsPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">System</div>
         <h1 className="page-title">Approvals</h1>
         <p className="text-dim text-sm">Pending actions and audit log.</p>
       </div>

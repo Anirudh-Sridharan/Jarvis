@@ -70,13 +70,15 @@ export default function ModelStatusBadge() {
   }, []);
 
   const label = LABELS[state] ?? state;
+  // Long repo ids ("mlx-community/Qwen3-4B-…") → short model name for the chip.
+  const shortId = modelId.split("/").pop() ?? "";
 
   return (
     <span className="badge" title={modelId ? `model: ${modelId}` : undefined}>
       <span className={`badge__dot badge__dot--${state}`} />
       {label}
       {fallback ? " · cloud" : ""}
-      {modelId && state !== "unreachable" ? ` · ${modelId}` : ""}
+      {shortId && state !== "unreachable" ? ` · ${shortId}` : ""}
     </span>
   );
 }

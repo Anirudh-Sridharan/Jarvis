@@ -106,8 +106,9 @@ export default async function WorkPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1 className="page-title">Work</h1>
-        <p className="text-dim text-sm">GitHub + Gmail activity (30d) &middot; todos</p>
+        <div className="page-eyebrow">Operations</div>
+        <h1 className="page-title">Work telemetry</h1>
+        <p className="text-dim text-sm">GitHub + Gmail activity (30d) &middot; directives</p>
       </div>
 
       <div className="kpi-row">
@@ -121,28 +122,28 @@ export default async function WorkPage() {
             label="Daily Commits"
             emptyMessage="No GitHub activity yet."
             ctaLabel="Connect GitHub"
-            color="#60a5fa"
+            color="#38c6ff"
           />
           <ChartSection
             envelope={prsEnv}
             label="PRs Merged"
             emptyMessage="No pull request data yet."
             ctaLabel="Connect GitHub"
-            color="#3b82f6"
+            color="#7fdcff"
           />
           <ChartSection
             envelope={receivedEnv}
             label="Emails Received"
             emptyMessage="No Gmail data yet."
             ctaLabel="Connect Gmail"
-            color="#93c5fd"
+            color="#9fe8ff"
           />
           <ChartSection
             envelope={sentEnv}
             label="Emails Sent"
             emptyMessage="No Gmail data yet."
             ctaLabel="Connect Gmail"
-            color="#2563eb"
+            color="#1e9fd6"
           />
         </div>
 

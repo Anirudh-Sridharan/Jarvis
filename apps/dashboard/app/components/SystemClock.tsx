@@ -1,37 +1,47 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 
 /**
- * Live HUD clock for the topbar: "TUE 09 JUN · 14:05:33".
- * Renders empty on the server and hydrates on mount so the
- * server/client markup never mismatches.
+ * Live HUD clock for the topbar: big HH:MM:SS over a small "WED · JUN 10 · 2026".
+ * Renders empty placeholders on the server and fills them on mount, so
+ * server/client markup never mismatches. Updates are direct DOM writes (no
+ * per-second setState) — per the design-template rendering notes, the React
+ * tree is never re-rendered by the clock.
  */
+
+const DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
 export default function SystemClock() {
-  const [now, setNow] = useState<Date | null>(null);
+  const timeRef = useRef<HTMLDivElement>(null);
+  const dateRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setNow(new Date());
-    const timer = setInterval(() => setNow(new Date()), 1000);
+    const tick = () => {
+      const n = new Date();
+      const time = `${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+      const date = `${DAYS[n.getDay()]} · ${MONTHS[n.getMonth()]} ${pad(n.getDate())} · ${n.getFullYear()}`;
+      if (timeRef.current && timeRef.current.textContent !== time) {
+        timeRef.current.textContent = time;
+      }
+      if (dateRef.current && dateRef.current.textContent !== date) {
+        dateRef.current.textContent = date;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, []);
 
-  if (!now) return <span className="sysclock" aria-hidden="true" />;
-
-  const date = now
-    .toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short" })
-    .replace(/,/g, "")
-    .toUpperCase();
-  const time = now.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-
   return (
-    <span className="sysclock">
-      {date} · {time}
-    </span>
+    <div className="sysclock">
+      <div className="sysclock__time" ref={timeRef} />
+      <div className="sysclock__date" ref={dateRef} />
+    </div>
   );
 }

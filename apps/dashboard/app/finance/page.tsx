@@ -84,7 +84,8 @@ export default async function FinancePage() {
     return (
       <div className="page">
         <div className="page-header">
-          <h1 className="page-title">Finance</h1>
+          <div className="page-eyebrow">Capital</div>
+          <h1 className="page-title">Finance telemetry</h1>
         </div>
         <ErrorState title="Finance" message={overviewEnv.error?.message} />
       </div>
@@ -95,7 +96,8 @@ export default async function FinancePage() {
     return (
       <div className="page">
         <div className="page-header">
-          <h1 className="page-title">Finance</h1>
+          <div className="page-eyebrow">Capital</div>
+          <h1 className="page-title">Finance telemetry</h1>
           <p className="text-dim text-sm">Accounts, spending, and cash flow via SimpleFIN</p>
         </div>
         <EmptyState
@@ -127,7 +129,8 @@ export default async function FinancePage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1 className="page-title">Finance</h1>
+        <div className="page-eyebrow">Capital</div>
+        <h1 className="page-title">Finance telemetry</h1>
         <p className="text-dim text-sm">
           {accounts.length} account{accounts.length === 1 ? "" : "s"} · spending over 30d · cash
           flow over 6mo
@@ -155,7 +158,7 @@ export default async function FinancePage() {
               label="Net Worth Trend"
               unit={netWorth[0]?.currency ?? ""}
               kind="line"
-              color="#60a5fa"
+              color="#38c6ff"
             />
           </div>
         ) : (

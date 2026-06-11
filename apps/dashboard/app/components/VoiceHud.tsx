@@ -1,20 +1,26 @@
 "use client";
 
 /**
- * VoiceHud — hands-free voice mode control for the home page.
+ * VoiceHud — hands-free voice mode for the home page.
  *
- * Arm → POST core /voice/start (core enables the sidecar wake-word listener on
- * the system mic) and attach to GET /voice/events (SSE). Say "Hey Jarvis" →
- * live state + transcript render here while audio plays on the Mac's speakers.
- * Disarm → POST /voice/stop. The session lives in core, so a reloaded tab
- * reattaches to a running session (GET /voice/status on mount) instead of
- * restarting it. Frames carry a monotonic `seq`; replayed frames after a
- * reconnect are deduped against the last seen seq.
+ * Renders as a slim "voice interface" strip; engaging it arms the wake-word
+ * listener and opens the full-screen takeover (orb, ripples, live state,
+ * waveform, transcript, streaming reply).
+ *
+ * Wire protocol (unchanged): Engage → POST core /voice/start (core enables the
+ * sidecar wake-word listener on the system mic) and attach to GET /voice/events
+ * (SSE). Say "Hey Jarvis" → live state + transcript render here while audio
+ * plays on the Mac's speakers. Disengage (✕ or Esc) → POST /voice/stop. The
+ * session lives in core, so a reloaded tab reattaches to a running session
+ * (GET /voice/status on mount) instead of restarting it. Frames carry a
+ * monotonic `seq`; replayed frames after a reconnect are deduped against the
+ * last seen seq.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CORE_URL, uid } from "@/app/lib/clientEnv";
+import Orb from "./Orb";
 
 // ---- Wire types (core /voice/* contract) -----------------------------------
 type OrchestratorEvent =
@@ -48,6 +54,13 @@ const STATE_LABEL: Record<string, string> = {
   error: "ERROR",
 };
 
+// Deterministic waveform bars (no Math.random — SSR-safe, stable captures).
+const WAVE_BARS = Array.from({ length: 28 }, (_, i) => ({
+  delay: `${(i * 0.05).toFixed(2)}s`,
+  dur: `${(0.7 + ((i * 37) % 55) / 100).toFixed(2)}s`,
+  h: 10 + ((i * 53) % 30),
+}));
+
 export default function VoiceHud() {
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -63,11 +76,6 @@ export default function VoiceHud() {
   const attachGenRef = useRef(0);
   const lastSeqRef = useRef(0);
   const assistantIdRef = useRef<string | null>(null);
-  const feedRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [feed, partial]);
 
   const handleEvent = useCallback((event: OrchestratorEvent) => {
     switch (event.type) {
@@ -159,7 +167,7 @@ export default function VoiceHud() {
                 armedRef.current = false;
                 setArmed(false);
                 setVoiceState("inactive");
-                setError("Voice session lost — arm again.");
+                setError("Voice session lost — engage again.");
                 abortRef.current?.abort();
                 break;
               }
@@ -233,7 +241,7 @@ export default function VoiceHud() {
           void attach();
         }
       } catch {
-        // core not running — HUD stays disarmed
+        // core not running — HUD stays disengaged
       }
     })();
     return () => {
@@ -243,44 +251,137 @@ export default function VoiceHud() {
     };
   }, [attach]);
 
+  // Esc disengages while the takeover is open.
+  useEffect(() => {
+    if (!armed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") void disarm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [armed, disarm]);
+
   const displayState = armed ? voiceState : "inactive";
   const label = STATE_LABEL[displayState] ?? displayState.toUpperCase();
+  const waveLive = displayState === "listening" || displayState === "speaking";
+  const lastReply = [...feed].reverse().find((e) => e.role === "assistant" && e.content !== "");
+  const logLines = feed.slice(-3);
 
   return (
-    <section className={`voice-hud${armed ? " voice-hud--armed" : ""}`}>
-      <div className="voice-hud__bar">
+    <>
+      <section className={`voice-strip${armed ? " voice-strip--armed" : ""}`}>
+        <Orb size={46} id="strip" />
+        <div className="voice-strip__text">
+          <div className="voice-strip__eyebrow">Voice Interface</div>
+          <div className="voice-strip__status">
+            {armed ? (
+              <>Live — say <em>&ldquo;Hey Jarvis&rdquo;</em>, it&rsquo;s listening</>
+            ) : (
+              <>Standby — engage to arm the <em>&ldquo;Hey Jarvis&rdquo;</em> wake-word</>
+            )}
+          </div>
+          {error ? <div className="voice-strip__error">{error}</div> : null}
+        </div>
+        <span
+          className={`voice-strip__chip${armed ? " voice-strip__chip--live" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          {label}
+        </span>
         <button
-          className="voice-hud__toggle"
+          className="voice-strip__engage"
           disabled={busy}
           aria-pressed={armed}
           onClick={() => void (armed ? disarm() : arm())}
         >
-          ◉ VOICE {armed ? "ON" : "OFF"}
+          <span
+            className={`voice-strip__engage-dot${armed ? " voice-strip__engage-dot--live" : ""}`}
+            aria-hidden
+          />
+          {armed ? "Disengage" : "Engage Voice"}
         </button>
-        <span className={`voice-hud__ring voice-hud__ring--${displayState}`} aria-hidden />
-        <span className="voice-hud__state" role="status" aria-live="polite">{label}</span>
-        {barged ? <span className="voice-hud__barge">BARGE-IN</span> : null}
-        {reconnecting ? <span className="voice-hud__conn">RECONNECTING…</span> : null}
-        {error ? <span className="voice-hud__error">{error}</span> : null}
-        {armed && !error ? (
-          <span className="voice-hud__hint">say “Hey Jarvis”</span>
-        ) : null}
-      </div>
+      </section>
 
-      {armed && partial ? <div className="voice-hud__partial">{partial}</div> : null}
+      {armed ? (
+        <div className="voice-takeover" role="dialog" aria-label="Voice interface">
+          <div className="voice-takeover__session">Voice Interface — Hands-Free</div>
+          <button
+            className="voice-takeover__close"
+            onClick={() => void disarm()}
+            aria-label="Disengage voice mode"
+            autoFocus
+          >
+            ✕
+          </button>
 
-      {armed && feed.length > 0 ? (
-        <div className="voice-hud__feed" ref={feedRef}>
-          {feed.map((entry) => (
-            <div key={entry.id} className={`voice-hud__line voice-hud__line--${entry.role}`}>
-              <span className="voice-hud__who">
-                {entry.role === "user" ? "🎙 you" : "jarvis"}
-              </span>
-              {entry.content}
+          <div className="voice-takeover__stage">
+            <div className="voice-takeover__ripple" />
+            <div className="voice-takeover__ripple" />
+            <div className="voice-takeover__ripple" />
+            <div className="voice-takeover__glow" />
+            <Orb size={280} id="takeover" />
+          </div>
+
+          <div className="voice-takeover__state-row">
+            <span className="voice-takeover__rule voice-takeover__rule--l" />
+            <span
+              className={`voice-takeover__state${displayState === "error" ? " voice-takeover__state--error" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              {label}
+            </span>
+            <span className="voice-takeover__rule voice-takeover__rule--r" />
+          </div>
+
+          <div className={`voice-takeover__wave${waveLive ? "" : " voice-takeover__wave--idle"}`} aria-hidden>
+            {WAVE_BARS.map((b, i) => (
+              <div
+                key={i}
+                className="voice-takeover__bar"
+                style={{ height: b.h, animationDuration: b.dur, animationDelay: b.delay }}
+              />
+            ))}
+          </div>
+
+          <div className="voice-takeover__partial">
+            {partial ? <>&ldquo;…{partial}&rdquo;</> : null}
+          </div>
+
+          {lastReply ? (
+            <div className="voice-takeover__reply">
+              <div className="voice-takeover__reply-label">
+                Jarvis{displayState === "thinking" || displayState === "speaking" ? " — streaming" : ""}
+              </div>
+              <div className="voice-takeover__reply-text">{lastReply.content}</div>
             </div>
-          ))}
+          ) : null}
+
+          <div className={`voice-takeover__hint${barged || reconnecting ? " voice-takeover__hint--warn" : ""}`}>
+            {error
+              ? error
+              : barged
+                ? "BARGE-IN — GO AHEAD"
+                : reconnecting
+                  ? "RECONNECTING…"
+                  : "BARGE-IN ENABLED — SPEAK ANYTIME · ESC TO DISENGAGE"}
+          </div>
+
+          {logLines.length > 0 ? (
+            <div className="voice-takeover__log" aria-hidden>
+              {logLines.map((entry) => (
+                <div
+                  key={entry.id}
+                  className={`voice-takeover__log-line${entry.role === "assistant" ? " voice-takeover__log-line--bright" : ""}`}
+                >
+                  {entry.role === "user" ? "YOU" : "JARVIS"} · {entry.content || "…"}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
-    </section>
+    </>
   );
 }

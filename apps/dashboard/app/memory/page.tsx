@@ -31,7 +31,8 @@ export default async function MemoryPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <h1 className="page-title">Memory Explorer</h1>
+        <div className="page-eyebrow">Memory Core</div>
+        <h1 className="page-title">Memory explorer</h1>
         <p className="text-dim text-sm">Recent memories captured from chat, notes, and integrations.</p>
       </div>
       <MemoryList envelope={env} />

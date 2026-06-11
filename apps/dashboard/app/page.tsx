@@ -141,18 +141,29 @@ export default async function HomePage() {
   }
 
   const now = new Date();
-  const dateLabel = now.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
+  const dateLabel = now
+    .toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    })
+    .replace(/,/g, "")
+    .toUpperCase();
 
   return (
     <div className="page-home">
-      <div className="page-header">
-        <h1 className="page-title">{greetingForHour(now.getHours())}</h1>
-        <p className="page-subtitle">{dateLabel}</p>
+      <div className="home-head">
+        <div>
+          <div className="page-eyebrow">Command Center</div>
+          <h1 className="page-title page-title--hero">
+            {greetingForHour(now.getHours())}, sir.
+          </h1>
+          <div className="page-status">
+            <span className="page-status__dot" aria-hidden />
+            <span>ALL SYSTEMS NOMINAL · {dateLabel}</span>
+          </div>
+        </div>
       </div>
 
       <VoiceHud />
@@ -164,7 +175,7 @@ export default async function HomePage() {
         ))}
       </div>
 
-      {/* Command-center grid: briefing | agenda | todos */}
+      {/* Command-center grid: briefing | agenda | directives */}
       <div className="home-grid">
         <div className="home-grid__briefing">
           <BriefingCard envelope={briefingEnv} />
@@ -180,7 +191,7 @@ export default async function HomePage() {
       {/* Chat console strip */}
       <a href="/chat" className="chat-strip">
         <span className="chat-strip__prompt">▸ Ask Jarvis</span>
-        <span>Open chat console →</span>
+        <span>Open console →</span>
       </a>
     </div>
   );

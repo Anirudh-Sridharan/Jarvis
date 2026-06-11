@@ -9,6 +9,7 @@ export default function ModelsPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">System</div>
         <h1 className="page-title">Models</h1>
         <p className="text-dim text-sm">Manage local inference models.</p>
       </div>

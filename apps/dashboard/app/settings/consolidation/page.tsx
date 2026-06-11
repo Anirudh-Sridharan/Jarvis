@@ -6,6 +6,7 @@ export default function ConsolidationPage() {
   return (
     <div className="page">
       <div className="page-header">
+        <div className="page-eyebrow">System</div>
         <h1 className="page-title">Consolidation</h1>
         <p className="text-dim text-sm">Nightly memory consolidation status.</p>
       </div>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef } from "react";
 
 type IconName =
   | "home"
@@ -100,12 +101,37 @@ function NavIcon({ name }: { name: IconName }) {
   );
 }
 
+/**
+ * Session uptime readout — direct DOM writes (no per-second setState), per the
+ * design-template rendering notes. Counts from sidebar mount.
+ */
+function UptimeStat() {
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const mountedAt = Date.now();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const tick = () => {
+      const up = Math.max(0, Math.floor((Date.now() - mountedAt) / 1000));
+      const text = `${pad(Math.floor(up / 3600))}:${pad(Math.floor((up % 3600) / 60))}:${pad(up % 60)}`;
+      if (ref.current && ref.current.textContent !== text) {
+        ref.current.textContent = text;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return <span className="sidebar__stat-value" ref={ref} />;
+}
+
 export default function Nav() {
   const pathname = usePathname();
 
   return (
     <nav className="sidebar" aria-label="Main navigation">
-      <div className="sidebar__brand">Navigation</div>
+      <div className="sidebar__brand">Modules</div>
       {NAV_ITEMS.map((item) => {
         const active = item.href === "/"
           ? pathname === "/"
@@ -124,6 +150,17 @@ export default function Nav() {
           </Link>
         );
       })}
+      <div className="sidebar__spacer" />
+      <div className="sidebar__footer">
+        <div className="sidebar__stat">
+          <span>UPTIME</span>
+          <UptimeStat />
+        </div>
+        <div className="sidebar__stat">
+          <span>SAFETY GATE</span>
+          <span className="sidebar__stat-value sidebar__stat-value--ok">ACTIVE</span>
+        </div>
+      </div>
     </nav>
   );
 }

@@ -23,11 +23,11 @@ interface MetricChartProps {
 }
 
 // HUD theme tokens (mirror globals.css — Recharts needs literal values)
-const GRID_STROKE = "#16223a";
-const TICK_FILL = "#7d8ca6";
+const GRID_STROKE = "rgba(74, 160, 255, 0.12)";
+const TICK_FILL = "#4d6781";
 const TOOLTIP_STYLE = {
-  background: "#090e1a",
-  border: "1px solid #24385e",
+  background: "#081424",
+  border: "1px solid rgba(99, 201, 255, 0.45)",
   borderRadius: 3,
   fontSize: 12,
 } as const;
@@ -42,7 +42,7 @@ export default function MetricChart({
   label,
   unit = "",
   kind = "line",
-  color = "#60a5fa",
+  color = "#38c6ff",
   downsampled,
 }: MetricChartProps) {
   const data = points.map((p) => ({
@@ -65,7 +65,7 @@ export default function MetricChart({
               <XAxis dataKey="ts" tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} width={36} />
               <Tooltip
-                cursor={{ fill: "rgba(59, 130, 246, 0.06)" }}
+                cursor={{ fill: "rgba(56, 198, 255, 0.06)" }}
                 contentStyle={TOOLTIP_STYLE}
                 labelStyle={{ color: TICK_FILL }}
                 itemStyle={{ color: color }}
@@ -78,7 +78,7 @@ export default function MetricChart({
               <XAxis dataKey="ts" tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fontSize: 10, fill: TICK_FILL }} tickLine={false} axisLine={false} width={36} />
               <Tooltip
-                cursor={{ stroke: "rgba(96, 165, 250, 0.25)" }}
+                cursor={{ stroke: "rgba(127, 220, 255, 0.25)" }}
                 contentStyle={TOOLTIP_STYLE}
                 labelStyle={{ color: TICK_FILL }}
                 itemStyle={{ color: color }}
@@ -89,7 +89,7 @@ export default function MetricChart({
                 stroke={color}
                 strokeWidth={2}
                 dot={false}
-                activeDot={{ r: 4, fill: color, stroke: "rgba(96, 165, 250, 0.35)", strokeWidth: 4 }}
+                activeDot={{ r: 4, fill: "#eaffff", stroke: "rgba(127, 220, 255, 0.45)", strokeWidth: 4 }}
                 connectNulls={false}
               />
             </LineChart>

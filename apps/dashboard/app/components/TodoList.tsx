@@ -94,14 +94,14 @@ export default function TodoList({ initialEnvelope }: TodoListProps) {
 
   return (
     <div className="card">
-      <div className="card__title">Todos</div>
+      <div className="card__title">Directives</div>
 
       {error && <p className="text-error text-sm">{error}</p>}
 
       <div className="todo-composer">
         <input
           className="todo-composer__input"
-          placeholder="Add a todo…"
+          placeholder="Add a directive…"
           value={newText}
           onChange={(e) => setNewText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void addTodo(); }}
