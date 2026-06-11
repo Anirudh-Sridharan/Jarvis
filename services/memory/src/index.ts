@@ -51,6 +51,8 @@ export type {
   ForgetEntityArgs,
 } from "./profile/types.js";
 export { ProfileService } from "./profile/profile.js";
+export { buildProfileContext } from "./profile/inject.js";
+export type { ProfileContextOptions } from "./profile/inject.js";
 export { MemoryStore } from "./store/memoryStore.js";
 export { BM25Index, buildBM25Index } from "./search/bm25.js";
 export { cosineSimilarity, topKCosine } from "./search/cosine.js";
