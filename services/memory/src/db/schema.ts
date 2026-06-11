@@ -75,7 +75,10 @@ export const DDL: string[] = [
     last_accessed_at INTEGER NOT NULL DEFAULT 0,
     access_count INTEGER NOT NULL DEFAULT 0,
     provenance TEXT NOT NULL DEFAULT '{}',
-    source_trust REAL NOT NULL DEFAULT 0.5
+    source_trust REAL NOT NULL DEFAULT 0.5,
+    -- User-confirmed pin (feature 20): consolidation must never supersede,
+    -- evict, or compress a pinned fact. Only explicit user action clears it.
+    pinned INTEGER NOT NULL DEFAULT 0
     -- NOTE: subject_id is a soft reference to entities(id).
     -- No FK enforced here to allow facts about entity keys that may not yet
     -- have a full entity record (e.g. "self", free-form subjects from LLM extraction).
@@ -160,12 +163,27 @@ export const DDL: string[] = [
   )`,
 ];
 
+/** Idempotent ALTER TABLE migration for columns added after first release. */
+function ensureColumn(
+  db: import("node:sqlite").DatabaseSync,
+  table: string,
+  column: string,
+  ddl: string,
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 /**
  * Run all DDL statements against an open DatabaseSync instance.
- * Idempotent (CREATE IF NOT EXISTS everywhere).
+ * Idempotent (CREATE IF NOT EXISTS everywhere; column migrations are guarded).
  */
 export function applySchema(db: import("node:sqlite").DatabaseSync): void {
   for (const stmt of DDL) {
     db.exec(stmt);
   }
+  // feature 20: pin column on databases created before the column existed
+  ensureColumn(db, "facts", "pinned", "pinned INTEGER NOT NULL DEFAULT 0");
 }

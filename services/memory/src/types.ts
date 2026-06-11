@@ -91,6 +91,8 @@ export interface Fact extends MemoryNode {
   supersedes: string | null; // factId this one replaced
   /** Trust of the originating source (0..1). User corrections are 1.0. */
   sourceTrust: number;
+  /** User-confirmed (feature 20): never auto-overwritten by consolidation. */
+  pinned: boolean;
 }
 
 // ─── Procedural block (singleton) ────────────────────────────────────────────

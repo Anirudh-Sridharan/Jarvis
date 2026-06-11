@@ -66,6 +66,8 @@ export interface FactInput {
   validTo?: ISO | null;
   supersedes?: string | null;
   sourceTrust?: number;
+  /** User-confirmed pin (feature 20). Defaults to false. */
+  pinned?: boolean;
   provenance: { source: SourceKind; sourceId: string; confidence: number };
   embedding?: number[];
 }
@@ -352,8 +354,9 @@ export class MemoryStore {
       INSERT INTO facts
         (id, subject_id, predicate, object_id, object_literal, text, embedding,
          valid_from, valid_to, ingested_at, invalidated_at, invalidated_by,
-         supersedes, importance, last_accessed_at, access_count, provenance, source_trust)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         supersedes, importance, last_accessed_at, access_count, provenance, source_trust,
+         pinned)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.subjectId,
@@ -373,6 +376,7 @@ export class MemoryStore {
       0,
       toJson(prov),
       input.sourceTrust ?? 0.5,
+      input.pinned ? 1 : 0,
     );
 
     this.invalidateBm25();
@@ -403,6 +407,15 @@ export class MemoryStore {
     this.invalidateBm25();
 
     return this.getFactById(args.factId);
+  }
+
+  /** Set/clear the user pin on a fact (feature 20). Returns null if not found. */
+  setFactPinned(factId: string, pinned: boolean): Fact | null {
+    const res = this.db
+      .prepare(`UPDATE facts SET pinned = ? WHERE id = ?`)
+      .run(pinned ? 1 : 0, factId);
+    if (Number(res.changes) === 0) return null;
+    return this.getFactById(factId);
   }
 
   getFactById(id: string): Fact | null {
@@ -845,6 +858,7 @@ export class MemoryStore {
       invalidatedBy: row.invalidated_by ?? null,
       supersedes: row.supersedes ?? null,
       sourceTrust: row.source_trust,
+      pinned: row.pinned === 1,
       importance: row.importance,
       lastAccessedAt: row.last_accessed_at,
       accessCount: row.access_count,
@@ -954,6 +968,7 @@ interface RawFact {
   access_count: number;
   provenance: string;
   source_trust: number;
+  pinned: number;
 }
 
 interface RawProcedural {
