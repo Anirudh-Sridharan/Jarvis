@@ -64,7 +64,7 @@ export function computeForgetDecisions(
   const db = store.rawDb;
   const factRows = db
     .prepare(
-      `SELECT id, subject_id, importance, last_accessed_at, access_count
+      `SELECT id, subject_id, importance, last_accessed_at, access_count, pinned
        FROM facts
        WHERE invalidated_at IS NULL AND (valid_to IS NULL OR valid_to > ?)`,
     )
@@ -74,6 +74,7 @@ export function computeForgetDecisions(
     importance: number;
     last_accessed_at: number;
     access_count: number;
+    pinned: number;
   }[];
 
   // Count live facts per entity
@@ -93,7 +94,9 @@ export function computeForgetDecisions(
     });
 
     const entityFactCount = factsPerEntity.get(f.subject_id) ?? 0;
+    // Feature 20: a user pin is an absolute floor — never evict or compress.
     const protectedByFloor =
+      f.pinned === 1 ||
       f.importance >= IMPORTANCE_FLOOR ||
       entityFactCount <= MIN_FACTS_PER_ENTITY;
 
@@ -102,9 +105,11 @@ export function computeForgetDecisions(
 
     if (protectedByFloor) {
       action = "keep";
-      reason = f.importance >= IMPORTANCE_FLOOR
-        ? `importance ${f.importance} >= floor ${IMPORTANCE_FLOOR}`
-        : `entity below min facts floor (${entityFactCount}/${MIN_FACTS_PER_ENTITY})`;
+      reason = f.pinned === 1
+        ? "pinned by user"
+        : f.importance >= IMPORTANCE_FLOOR
+          ? `importance ${f.importance} >= floor ${IMPORTANCE_FLOOR}`
+          : `entity below min facts floor (${entityFactCount}/${MIN_FACTS_PER_ENTITY})`;
     } else if (decayScore < EVICT_THRESHOLD) {
       action = "evict";
       reason = `decayScore ${decayScore.toFixed(4)} < evictThreshold ${EVICT_THRESHOLD}`;

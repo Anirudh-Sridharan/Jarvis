@@ -110,6 +110,17 @@ export async function resolveFact(
       return { invalidatedIds: [], conflictFlagged: false, factId: prior.id };
     }
 
+    if (prior.pinned) {
+      // Feature 20: a user-confirmed fact is never superseded by consolidation.
+      // Record the incoming fact as historical (closed interval) and flag the
+      // conflict so the run reports it and the UI can surface it.
+      const closedFact = await store.upsertFact({
+        ...buildFactInput(incoming, entityId),
+        validTo: incoming.validFrom,
+      });
+      return { invalidatedIds: [], conflictFlagged: true, factId: closedFact.id };
+    }
+
     const winner = pickWinner(priorAsExtracted, incoming);
 
     if (winner === "tie" && sameDay(priorAsExtracted.validFrom, incoming.validFrom)) {
