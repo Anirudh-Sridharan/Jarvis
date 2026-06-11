@@ -409,13 +409,45 @@ export class MemoryStore {
     return this.getFactById(args.factId);
   }
 
-  /** Set/clear the user pin on a fact (feature 20). Returns null if not found. */
+  /**
+   * Set/clear the user pin on a fact (feature 20). Returns null if the fact
+   * does not exist or is no longer live — pinning an invalidated fact would
+   * report success for a fact the profile no longer shows.
+   */
   setFactPinned(factId: string, pinned: boolean): Fact | null {
     const res = this.db
-      .prepare(`UPDATE facts SET pinned = ? WHERE id = ?`)
+      .prepare(`UPDATE facts SET pinned = ? WHERE id = ? AND invalidated_at IS NULL`)
       .run(pinned ? 1 : 0, factId);
     if (Number(res.changes) === 0) return null;
     return this.getFactById(factId);
+  }
+
+  /**
+   * All live facts WITHOUT their embedding vectors (feature 20 derivation runs
+   * per chat turn — parsing every fact's embedding JSON there is pure waste).
+   * Single query; returned facts carry `embedding: undefined`.
+   */
+  listLiveFacts(): Fact[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, subject_id, predicate, object_id, object_literal, text,
+                valid_from, valid_to, ingested_at, invalidated_at, invalidated_by,
+                supersedes, importance, last_accessed_at, access_count,
+                provenance, source_trust, pinned
+         FROM facts
+         WHERE invalidated_at IS NULL
+           AND (valid_to IS NULL OR valid_to > ?)`,
+      )
+      .all(new Date().toISOString()) as unknown as Omit<RawFact, "embedding">[];
+    return rows.map((r) => this.rowToFact({ ...r, embedding: null }));
+  }
+
+  /** id → name/entityType for all entities, one query (no embedding parse). */
+  listEntityHeaders(): Map<string, { name: string; entityType: string }> {
+    const rows = this.db
+      .prepare(`SELECT id, name, entity_type FROM entities`)
+      .all() as { id: string; name: string; entity_type: string }[];
+    return new Map(rows.map((r) => [r.id, { name: r.name, entityType: r.entity_type }]));
   }
 
   getFactById(id: string): Fact | null {

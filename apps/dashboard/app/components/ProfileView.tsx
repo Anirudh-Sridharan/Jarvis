@@ -46,8 +46,11 @@ interface FactCardProps<T> {
   label: string;
   onCorrect: (factId: string, correction: string) => void;
   onPin: (factId: string, pinned: boolean) => void;
+  /** Entity-level forget (people/projects): invalidates the whole group. */
   onForget?: (entityName: string) => void;
   entityName?: string;
+  /** Per-fact forget (preferences/routines/style): invalidates this fact only. */
+  onForgetFact?: (factId: string) => void;
 }
 
 function FactCard<T extends string | PersonContract | ProjectContract | RoutineContract>({
@@ -57,6 +60,7 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
   onPin,
   onForget,
   entityName,
+  onForgetFact,
 }: FactCardProps<T>) {
   const [editing, setEditing] = useState(false);
   const [correction, setCorrection] = useState("");
@@ -129,7 +133,7 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
           >
             This is wrong
           </button>
-          {onForget && entityName && (
+          {onForget && entityName ? (
             <button
               className="btn btn--sm btn--ghost btn--danger"
               onClick={() => onForget(entityName)}
@@ -137,7 +141,15 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
             >
               Forget
             </button>
-          )}
+          ) : onForgetFact ? (
+            <button
+              className="btn btn--sm btn--ghost btn--danger"
+              onClick={() => onForgetFact(fact.id)}
+              title="Forget this fact"
+            >
+              Forget
+            </button>
+          ) : null}
         </div>
       )}
     </div>
@@ -228,6 +240,24 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
     });
   }
 
+  async function handleForgetFact(factId: string) {
+    setError(null);
+    startTransition(async () => {
+      try {
+        const res = await fetch("/api/profile", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ factId }),
+        });
+        const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
+        if (env.data) setProfile(env.data);
+        else if (env.error) setError(env.error.message);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Forget failed");
+      }
+    });
+  }
+
   // ── Empty / error states ────────────────────────────────────────────────────
 
   if (error && !profile) {
@@ -279,6 +309,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                 label={f.value}
                 onCorrect={handleCorrect}
                 onPin={handlePin}
+                onForgetFact={handleForgetFact}
               />
             ))}
           </div>
@@ -350,6 +381,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                 }
                 onCorrect={handleCorrect}
                 onPin={handlePin}
+                onForgetFact={handleForgetFact}
               />
             ))}
           </div>
@@ -369,6 +401,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                 label={f.value}
                 onCorrect={handleCorrect}
                 onPin={handlePin}
+                onForgetFact={handleForgetFact}
               />
             ))}
           </div>

@@ -55,6 +55,7 @@ const EMPTY_COUNTS = () => ({
   factsCompressed: 0,
   insightsGenerated: 0,
   embeddingsWritten: 0,
+  conflictsFlagged: 0,
 });
 
 export class ConsolidationService {
@@ -140,6 +141,7 @@ export class ConsolidationService {
         const fact = this.store.getFactById(result.factId);
         if (fact) newFacts.push(fact);
         if (result.invalidatedIds.length > 0) run.counts.factsInvalidated += result.invalidatedIds.length;
+        if (result.conflictFlagged) run.counts.conflictsFlagged += 1;
       } catch (err) {
         run.errors.push({ stage: 4, message: String(err), recordId: extracted.sourceRecordId });
       }

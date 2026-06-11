@@ -244,6 +244,8 @@ export interface ConsolidationRun {
     factsCompressed: number;
     insightsGenerated: number;
     embeddingsWritten: number;
+    /** Feature 20: incoming facts kept live alongside a conflicting/pinned prior. */
+    conflictsFlagged: number;
   };
   errors: { stage: number; message: string; recordId?: string }[];
   trigger: "scheduler" | "manual";

@@ -130,3 +130,96 @@ describe("ProfileService pin behavior", () => {
     await expect(new ProfileService(store).setPinned("nope", true)).rejects.toThrow(/not found/);
   });
 });
+
+describe("review fixes", () => {
+  it("setFactPinned refuses an invalidated fact (liveness guard)", async () => {
+    const { store } = makeStore();
+    const fact = await seedFact(store);
+    store.invalidateFact({
+      factId: fact.id,
+      validTo: new Date().toISOString(),
+      reason: "test",
+    });
+    expect(store.setFactPinned(fact.id, true)).toBeNull();
+  });
+
+  it("Confirm on a person card pins the whole entity group, not just the anchor", async () => {
+    const { store } = makeStore();
+    const person = await store.upsertEntity({
+      name: "Maya",
+      entityType: "person",
+      text: "Person: Maya",
+      provenance: { source: "chat", sourceId: "p1", confidence: 0.8 },
+    });
+    const f1 = await store.upsertFact({
+      subjectId: person.id, predicate: "relationship_is", objectLiteral: "manager",
+      text: "Maya is the user's manager", validFrom: new Date().toISOString(),
+      provenance: { source: "chat", sourceId: "m1", confidence: 0.9 },
+    });
+    const f2 = await store.upsertFact({
+      subjectId: person.id, predicate: "works_at", objectLiteral: "Acme",
+      text: "Maya works at Acme", validFrom: new Date().toISOString(),
+      provenance: { source: "chat", sourceId: "m2", confidence: 0.7 },
+    });
+
+    const svc = new ProfileService(store);
+    const profile = await svc.deriveProfile();
+    const anchorId = profile.people[0]!.id;
+    await svc.setPinned(anchorId, true);
+
+    expect(store.getFactById(f1.id)?.pinned).toBe(true);
+    expect(store.getFactById(f2.id)?.pinned).toBe(true);
+
+    await svc.setPinned(anchorId, false);
+    expect(store.getFactById(f1.id)?.pinned).toBe(false);
+    expect(store.getFactById(f2.id)?.pinned).toBe(false);
+  });
+
+  it("forgetFact closes out a single fact bi-temporally and drops it from the profile", async () => {
+    const { store } = makeStore();
+    const keep = await seedFact(store, "dark roast");
+    const drop = await store.upsertFact({
+      subjectId: keep.subjectId, predicate: "likes", objectLiteral: "jazz",
+      text: "User likes jazz", validFrom: new Date().toISOString(),
+      provenance: { source: "chat", sourceId: "m9", confidence: 0.8 },
+    });
+
+    const svc = new ProfileService(store);
+    const after = await svc.forgetFact(drop.id);
+
+    expect(after.preferences.find((f) => f.id === drop.id)).toBeUndefined();
+    expect(after.preferences.find((f) => f.id === keep.id)).toBeDefined();
+    const closed = store.getFactById(drop.id)!;
+    expect(closed.invalidatedAt).not.toBeNull(); // soft delete, never hard
+    await expect(svc.forgetFact("nope")).rejects.toThrow(/not found/);
+  });
+
+  it("editFacet rejects object-value edits instead of silently caching them", async () => {
+    const { store } = makeStore();
+    const fact = await seedFact(store);
+    const svc = new ProfileService(store);
+    await svc.deriveProfile();
+    await expect(
+      svc.editFacet({
+        facet: "people",
+        factId: fact.id,
+        updates: { value: { name: "X" } as never },
+      }),
+    ).rejects.toThrow(/not supported/);
+  });
+
+  it("getProfileContext does not clobber the cached profile or bump the version", async () => {
+    const { store } = makeStore();
+    await seedFact(store);
+    const svc = new ProfileService(store);
+    const cached = await svc.deriveProfile();
+    const versionBefore = cached.version;
+
+    await svc.getProfileContext("coffee");
+    await svc.getProfileContext("coffee again");
+
+    const after = await svc.getProfile();
+    expect(after).toBe(cached); // same object — cache untouched
+    expect(after.version).toBe(versionBefore);
+  });
+});

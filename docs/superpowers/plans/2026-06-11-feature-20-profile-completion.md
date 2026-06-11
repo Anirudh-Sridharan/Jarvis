@@ -570,7 +570,7 @@ describe("ProfileService - conflict surfacing", () => {
       const groups = new Map<string, Fact[]>();
       for (const f of liveFacts) {
         if (f.predicate === "summary") continue;
-        const key = `${f.subjectId} ${f.predicate}`;
+        const key = `${f.subjectId}\u0000${f.predicate}`;
         const g = groups.get(key) ?? [];
         g.push(f);
         groups.set(key, g);

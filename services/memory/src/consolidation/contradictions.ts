@@ -89,6 +89,23 @@ export async function resolveFact(
     // No conflict — insert fresh
     const fact = await store.upsertFact(buildFactInput(incoming, entityId));
     factId = fact.id;
+  } else if (livePriors.some((p) => p.pinned)) {
+    // Feature 20: a user-confirmed fact is never superseded by consolidation —
+    // checked across ALL live priors, not just the oldest. Spec: "keep both
+    // with timestamps and surface the conflict rather than silently picking",
+    // so unless the incoming value duplicates a live prior, it is inserted
+    // LIVE: deriveProfile cross-flags the pair for the UI, while injection's
+    // conflict-winner rule (pinned first) keeps the pinned fact in prompts.
+    const duplicateOf = livePriors.find(
+      (p) =>
+        (p.objectLiteral ?? p.objectId ?? "").toLowerCase().trim() ===
+        incoming.object.toLowerCase().trim(),
+    );
+    if (duplicateOf) {
+      return { invalidatedIds: [], conflictFlagged: false, factId: duplicateOf.id };
+    }
+    const liveFact = await store.upsertFact(buildFactInput(incoming, entityId));
+    return { invalidatedIds: [], conflictFlagged: true, factId: liveFact.id };
   } else {
     const prior = livePriors[0]!;
     const priorAsExtracted: ExtractedFact = {
@@ -108,17 +125,6 @@ export async function resolveFact(
     if (sameValue(priorAsExtracted, incoming)) {
       // Exact duplicate — no new fact needed; return existing
       return { invalidatedIds: [], conflictFlagged: false, factId: prior.id };
-    }
-
-    if (prior.pinned) {
-      // Feature 20: a user-confirmed fact is never superseded by consolidation.
-      // Record the incoming fact as historical (closed interval) and flag the
-      // conflict so the run reports it and the UI can surface it.
-      const closedFact = await store.upsertFact({
-        ...buildFactInput(incoming, entityId),
-        validTo: incoming.validFrom,
-      });
-      return { invalidatedIds: [], conflictFlagged: true, factId: closedFact.id };
     }
 
     const winner = pickWinner(priorAsExtracted, incoming);

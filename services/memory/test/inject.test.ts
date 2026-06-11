@@ -3,7 +3,13 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildProfileContext } from "../src/profile/inject.js";
-import type { PersonalProfile, ProfileFact } from "../src/profile/types.js";
+import type {
+  PersonalProfile,
+  ProfileFact,
+  Person,
+  Project,
+  Routine,
+} from "../src/profile/types.js";
 
 const NOW = new Date("2026-06-11T12:00:00.000Z");
 
@@ -16,6 +22,17 @@ function fact(over: Partial<ProfileFact> & { value: string }): ProfileFact {
     source: over.source ?? "derived",
     updatedAt: over.updatedAt ?? "2026-06-01T00:00:00.000Z",
     ...(over.conflictsWith ? { conflictsWith: over.conflictsWith } : {}),
+  };
+}
+
+function typedFact<T>(id: string, value: T): ProfileFact<T> {
+  return {
+    id,
+    value,
+    confidence: 0.8,
+    pinned: false,
+    source: "derived",
+    updatedAt: "2026-06-01T00:00:00.000Z",
   };
 }
 
@@ -101,38 +118,25 @@ describe("buildProfileContext", () => {
     expect(out2).not.toContain("emacs");
   });
 
-  it("respects maxChars", () => {
+  it("respects maxChars exactly (header + newline-joined bullets ≤ cap)", () => {
     const p = profileWith({
       preferences: Array.from({ length: 10 }, (_, i) =>
         fact({ id: `f${i}`, value: `coffee preference number ${i} with a long tail` })),
     });
     const out = buildProfileContext(p, "coffee", { maxChars: 120, now: NOW });
-    expect(out.length).toBeLessThanOrEqual(140); // header + capped bullets
+    expect(out.length).toBeLessThanOrEqual(120);
+    expect(out.split("\n").filter((l) => l.startsWith("- ")).length).toBeGreaterThan(0);
   });
 
   it("renders people/projects/routines with names", () => {
     const p = profileWith({
       people: [
-        {
-          ...fact({ value: "x" }),
-          id: "p1",
-          value: { name: "Maya", relationship: "manager", notes: "weekly 1:1s" },
-        } as never,
+        typedFact<Person>("p1", { name: "Maya", relationship: "manager", notes: "weekly 1:1s" }),
       ],
       projects: [
-        {
-          ...fact({ value: "x" }),
-          id: "pr1",
-          value: { name: "Jarvis", status: "active", description: "second brain" },
-        } as never,
+        typedFact<Project>("pr1", { name: "Jarvis", status: "active", description: "second brain" }),
       ],
-      routines: [
-        {
-          ...fact({ value: "x" }),
-          id: "r1",
-          value: { description: "gym", cadence: "Tue/Thu" },
-        } as never,
-      ],
+      routines: [typedFact<Routine>("r1", { description: "gym", cadence: "Tue/Thu" })],
     });
     const out = buildProfileContext(p, "when do I see Maya at the gym for Jarvis?", { now: NOW });
     expect(out).toContain("Maya");

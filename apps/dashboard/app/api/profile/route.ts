@@ -181,6 +181,12 @@ export async function PATCH(req: NextRequest) {
         { status: 400 },
       );
     }
+    if (typeof correction === "string" && typeof pinned === "boolean") {
+      return NextResponse.json(
+        { error: { code: "BAD_REQUEST", message: "send either correction or pinned, not both" } },
+        { status: 400 },
+      );
+    }
 
     const mem = getMemory();
     const profile =
@@ -217,23 +223,28 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
-// ── DELETE — forgetEntity ──────────────────────────────────────────────────────
+// ── DELETE — forgetEntity (by name) or forgetFact (by fact id) ────────────────
 
 export async function DELETE(req: NextRequest) {
   const t0 = Date.now();
   try {
-    const body = (await req.json()) as { entityName?: string };
-    const { entityName } = body;
+    const body = (await req.json()) as { entityName?: string; factId?: string };
+    const { entityName, factId } = body;
 
-    if (!entityName || typeof entityName !== "string") {
+    const hasEntity = typeof entityName === "string" && entityName.length > 0;
+    const hasFact = typeof factId === "string" && factId.length > 0;
+    if (hasEntity === hasFact) {
+      // neither, or ambiguously both
       return NextResponse.json(
-        { error: { code: "BAD_REQUEST", message: "entityName is required" } },
+        { error: { code: "BAD_REQUEST", message: "send exactly one of entityName or factId" } },
         { status: 400 },
       );
     }
 
     const mem = getMemory();
-    const profile = await mem.profile.forgetEntity({ entityName });
+    const profile = hasFact
+      ? await mem.profile.forgetFact(factId!)
+      : await mem.profile.forgetEntity({ entityName: entityName! });
     const contract = toContract(profile);
 
     const envelope: WidgetEnvelope<ProfileContract> = {
