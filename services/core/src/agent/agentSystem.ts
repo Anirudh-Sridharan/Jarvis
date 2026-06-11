@@ -13,6 +13,7 @@
 import { createAgentSystem } from "@jarvis/agent";
 import type { AgentSystem, ApprovalRequest, ApprovalDecision, Clock } from "@jarvis/agent";
 import type { IntegrationsSystem } from "@jarvis/integrations";
+import type { MemorySystem } from "@jarvis/memory";
 import type { InferenceGateway } from "../inference/gateway.js";
 import { AgentLlm } from "./agentLlm.js";
 import { buildToolRegistry } from "./tools/index.js";
@@ -126,6 +127,8 @@ export interface AgentSystemBag {
 export function getAgentSystem(
   gateway: InferenceGateway,
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email"> | null,
+  /** Feature 20: when provided, agent runs are grounded in the user profile. */
+  memory: MemorySystem | null = null,
 ): AgentSystemBag | null {
   if (initialized) {
     if (!agentSystemInstance || !approvalQueueInstance) return null;
@@ -160,6 +163,10 @@ export function getAgentSystem(
       clock: realClock,
       dataDir,
       approvalSink: queue.sink,
+      // Feature 20: query-relevant profile facets ground agent runs.
+      userContext: memory
+        ? (goal: string) => memory.profile.getProfileContext(goal)
+        : undefined,
     });
     approvalQueueInstance = queue;
 

@@ -39,6 +39,8 @@ export interface ReactLoopOptions {
   /** The actual agent run id — used for approval/audit records. */
   runId: string;
   maxSteps?: number;
+  /** Feature 20: resolved user-profile block ("" = none) for tool-call prompts. */
+  userContext?: string;
 }
 
 /**
@@ -59,6 +61,7 @@ export async function runReactLoop(
     clock,
     runId,
     maxSteps = MAX_STEPS,
+    userContext,
   } = opts;
 
   state.status = "running";
@@ -72,6 +75,7 @@ export async function runReactLoop(
       goal: stepDescription,
       scratchpad: state.scratchpad,
       tools,
+      userContext,
     });
 
     if (isAborted(harnessResult)) {

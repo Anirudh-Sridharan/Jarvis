@@ -33,6 +33,7 @@ import type {
   Clock,
   LlmClient,
   ToolRegistry,
+  UserContextProvider,
 } from "../types.js";
 import { TriggerStore } from "./triggers.js";
 import { EpisodicStateStore } from "./episodicState.js";
@@ -94,6 +95,8 @@ export interface SchedulerOptions {
   parseCronNext?: (expr: string, tz: string, after?: number) => number | null;
   /** Optional event bus */
   eventBus?: EventBus;
+  /** Feature 20: optional profile-context provider for agent-goal triggers. */
+  userContext?: UserContextProvider;
 }
 
 export interface EventBus {
@@ -135,6 +138,7 @@ export class Scheduler {
       approvalService: this.approvalService,
       auditLog: this.auditLog,
       clock: opts.clock,
+      userContext: opts.userContext,
     });
   }
 

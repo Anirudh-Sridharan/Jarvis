@@ -103,8 +103,12 @@ export function buildToolCallPrompt(
   goal: string,
   scratchpad: string[],
   tools: Tool[],
+  userContext?: string,
 ): string {
   const toolDefs = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+
+  // Feature 20: short profile block grounding tool selection in who the user is.
+  const context = userContext ? `\nUser context:\n${userContext}\n` : "";
 
   const scratch =
     scratchpad.length > 0
@@ -113,6 +117,7 @@ export function buildToolCallPrompt(
 
   return (
     `You are a reasoning agent. Your goal: ${goal}` +
+    context +
     scratch +
     `\n\nAvailable tools:\n${toolDefs}\n\n` +
     `Ground every claim about the user in the goal, the previous steps, or tool ` +
@@ -137,9 +142,17 @@ export async function validateAndRetry(opts: {
   scratchpad: string[];
   tools: ToolRegistry;
   maxRetries?: number;
+  /** Feature 20: resolved user-profile block ("" / undefined = none). */
+  userContext?: string;
 }): Promise<HarnessResult> {
-  const { llm, goal, scratchpad, tools, maxRetries = MAX_VALIDATION_RETRIES } =
-    opts;
+  const {
+    llm,
+    goal,
+    scratchpad,
+    tools,
+    maxRetries = MAX_VALIDATION_RETRIES,
+    userContext,
+  } = opts;
   const toolList = [...tools.values()];
   const feedback: string[] = [];
 
@@ -149,7 +162,8 @@ export async function validateAndRetry(opts: {
         ? `\n\nPrevious attempt failed:\n${feedback[feedback.length - 1]}\nPlease correct and try again.`
         : "";
 
-    const prompt = buildToolCallPrompt(goal, scratchpad, toolList) + feedbackNote;
+    const prompt =
+      buildToolCallPrompt(goal, scratchpad, toolList, userContext) + feedbackNote;
     const raw = await llm.complete({ prompt });
 
     // 1. Parse

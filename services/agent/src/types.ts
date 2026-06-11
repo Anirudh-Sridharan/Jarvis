@@ -361,3 +361,11 @@ export interface Clock {
   now(): number; // ms since epoch
   isoNow(): string;
 }
+
+/**
+ * Optional per-run user context (feature 20): given the run's goal, return a
+ * short profile/preference block to ground the agent's planning and tool
+ * selection. Injected by core (memory profile); this leaf package never
+ * imports the memory system.
+ */
+export type UserContextProvider = (goal: string) => string | Promise<string>;

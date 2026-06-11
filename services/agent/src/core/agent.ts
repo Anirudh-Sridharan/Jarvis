@@ -24,6 +24,7 @@ import type {
   ToolRegistry,
   ApprovalSink,
   Clock,
+  UserContextProvider,
 } from "../types.js";
 import { Checkpointer } from "./checkpointer.js";
 import { producePlan } from "./planner.js";
@@ -38,6 +39,26 @@ export interface AgentRunnerOptions {
   approvalService: ApprovalService;
   auditLog: AuditLog;
   clock: Clock;
+  /** Feature 20: optional profile-context provider (resolved once per run). */
+  userContext?: UserContextProvider;
+}
+
+const USER_CONTEXT_MAX_CHARS = 1_200;
+
+/** Resolve the user-context provider; failures and oversize degrade silently. */
+async function resolveUserContext(
+  provider: UserContextProvider | undefined,
+  goal: string,
+): Promise<string> {
+  if (!provider) return "";
+  try {
+    const raw = await provider(goal);
+    return raw.length > USER_CONTEXT_MAX_CHARS
+      ? raw.slice(0, USER_CONTEXT_MAX_CHARS)
+      : raw;
+  } catch {
+    return "";
+  }
 }
 
 export interface AgentRunResult {
@@ -59,6 +80,7 @@ export class AgentRunner {
     const { llm, tools, checkpointer, approvalService, auditLog, clock } = this.opts;
     const runId = runOpts.runId ?? randomUUID();
     const source = runOpts.source ?? "manual";
+    const userContext = await resolveUserContext(this.opts.userContext, goal);
 
     // ── Check for existing checkpoint (resume) ────────────────────────────
     const existing = checkpointer.load(runId);
@@ -121,7 +143,7 @@ export class AgentRunner {
         payload: { event: "run.started", goal },
       });
 
-      state.plan = await producePlan(llm, goal, []);
+      state.plan = await producePlan(llm, goal, userContext ? [userContext] : []);
       run.plan = state.plan;
       checkpointer.save(runId, 0, state);
     }
@@ -141,6 +163,7 @@ export class AgentRunner {
         auditLog,
         clock,
         runId,
+        userContext,
       });
 
       const finalStatus = state.status as string;

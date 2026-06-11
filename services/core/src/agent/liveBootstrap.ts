@@ -52,10 +52,10 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     // shape) — the morning-briefing trigger can generate via HF.
     const { system } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
     cachedCalendarMirror = system.calendar.mirror;
-    const bag = getAgentSystem(gateway, system);
-    if (!bag) return null; // getAgentSystem already logged; stay memoized-null
-
+    // Memory first: the agent system grounds its runs in the profile (feature 20).
     const memory = getMemorySystem(gateway);
+    const bag = getAgentSystem(gateway, system, memory);
+    if (!bag) return null; // getAgentSystem already logged; stay memoized-null
     if (memory) {
       // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
       startIngestBridge({ memory, integrations: system });

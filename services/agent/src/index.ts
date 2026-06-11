@@ -63,6 +63,7 @@ export type {
   ToolSpec,
   ApprovalSink,
   Clock,
+  UserContextProvider,
 } from "./types.js";
 
 // ── Core exports ──────────────────────────────────────────────────────────────
@@ -142,6 +143,8 @@ export interface AgentSystemConfig {
   eventBus?: import("./proactive/scheduler.js").EventBus;
   /** Optional DST-aware cron parser for production use. */
   parseCronNext?: (expr: string, tz: string, after?: number) => number | null;
+  /** Feature 20: optional profile-context provider for agent runs. */
+  userContext?: import("./types.js").UserContextProvider;
 }
 
 export interface AgentSystem {
@@ -175,6 +178,7 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
     approvalService,
     auditLog,
     clock,
+    userContext: config.userContext,
   });
 
   // Register default skills
@@ -198,6 +202,7 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
     checkpointer,
     eventBus: config.eventBus,
     parseCronNext: config.parseCronNext,
+    userContext: config.userContext,
   });
 
   return { agent, approvals: approvalService, skills, triggers, audit: auditLog };
