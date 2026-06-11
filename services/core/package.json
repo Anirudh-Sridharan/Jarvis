@@ -23,6 +23,7 @@
     "@jarvis/integrations": "*",
     "@jarvis/memory": "*",
     "@jarvis/voice": "*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "gpt-tokenizer": "^3.4.0",
     "hono": "^4.6.14",
     "yaml": "^2.6.1",
