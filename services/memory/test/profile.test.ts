@@ -481,3 +481,31 @@ describe("ProfileService - conflict surfacing", () => {
     expect(flagged).toHaveLength(0);
   });
 });
+
+describe("ProfileService - forgetEntity", () => {
+  it("invalidates all live facts for the named entity (case-insensitive) and drops the facet", async () => {
+    const { store } = makeStore();
+    const person = await seedPersonEntity(store, "Maya");
+    await store.upsertFact({
+      subjectId: person.id, predicate: "relationship_is", objectLiteral: "manager",
+      text: "Maya is the user's manager", validFrom: new Date().toISOString(),
+      provenance: { source: "chat", sourceId: "m1", confidence: 0.8 },
+    });
+    const svc = new ProfileService(store);
+    expect((await svc.deriveProfile()).people).toHaveLength(1);
+
+    const after = await svc.forgetEntity({ entityName: "maya" });
+    expect(after.people).toHaveLength(0);
+    // Bi-temporal: facts are closed out, not deleted.
+    const history = store.getFactHistory(person.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]!.validTo).not.toBeNull();
+  });
+
+  it("is a no-op for an unknown entity", async () => {
+    const { store } = makeStore();
+    await seedPreferenceFact(store, "dark roast");
+    const after = await new ProfileService(store).forgetEntity({ entityName: "nobody" });
+    expect(after.preferences).toHaveLength(1);
+  });
+});
