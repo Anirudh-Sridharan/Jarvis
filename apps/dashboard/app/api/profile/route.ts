@@ -1,6 +1,7 @@
 /**
  * GET  /api/profile       — derive + return the PersonalProfile
  * PATCH /api/profile      — correctFact: { factId, correction } → re-derive profile
+ *                           or pin:     { factId, pinned } → setPinned
  * DELETE /api/profile     — forgetEntity: { entityName } → invalidate all its facts
  *
  * Uses the ProfileService via the memory system (read-instance pattern from services.ts).
@@ -24,6 +25,7 @@ function toContract(profile: PersonalProfile): ProfileContract {
       source: f.source,
       provenance: f.provenance,
       updatedAt: f.updatedAt,
+      conflictsWith: f.conflictsWith,
     })),
     people: profile.people.map((f) => ({
       id: f.id,
@@ -37,6 +39,7 @@ function toContract(profile: PersonalProfile): ProfileContract {
       source: f.source,
       provenance: f.provenance,
       updatedAt: f.updatedAt,
+      conflictsWith: f.conflictsWith,
     })),
     projects: profile.projects.map((f) => ({
       id: f.id,
@@ -50,6 +53,7 @@ function toContract(profile: PersonalProfile): ProfileContract {
       source: f.source,
       provenance: f.provenance,
       updatedAt: f.updatedAt,
+      conflictsWith: f.conflictsWith,
     })),
     routines: profile.routines.map((f) => ({
       id: f.id,
@@ -62,6 +66,7 @@ function toContract(profile: PersonalProfile): ProfileContract {
       source: f.source,
       provenance: f.provenance,
       updatedAt: f.updatedAt,
+      conflictsWith: f.conflictsWith,
     })),
     communicationStyle: profile.communicationStyle.map((f) => ({
       id: f.id,
@@ -71,6 +76,7 @@ function toContract(profile: PersonalProfile): ProfileContract {
       source: f.source,
       provenance: f.provenance,
       updatedAt: f.updatedAt,
+      conflictsWith: f.conflictsWith,
     })),
     proceduralBlock: profile.proceduralBlock,
     version: profile.version,
@@ -162,18 +168,25 @@ export async function GET(_req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const t0 = Date.now();
   try {
-    const body = (await req.json()) as { factId?: string; correction?: string };
-    const { factId, correction } = body;
+    const body = (await req.json()) as {
+      factId?: string;
+      correction?: string;
+      pinned?: boolean;
+    };
+    const { factId, correction, pinned } = body;
 
-    if (!factId || typeof correction !== "string") {
+    if (!factId || (typeof correction !== "string" && typeof pinned !== "boolean")) {
       return NextResponse.json(
-        { error: { code: "BAD_REQUEST", message: "factId and correction are required" } },
+        { error: { code: "BAD_REQUEST", message: "factId plus correction or pinned is required" } },
         { status: 400 },
       );
     }
 
     const mem = getMemory();
-    const profile = await mem.profile.correctFact({ factId, correction });
+    const profile =
+      typeof pinned === "boolean"
+        ? await mem.profile.setPinned(factId, pinned)
+        : await mem.profile.correctFact({ factId, correction: correction! });
     const contract = toContract(profile);
 
     const envelope: WidgetEnvelope<ProfileContract> = {

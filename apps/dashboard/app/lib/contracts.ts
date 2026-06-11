@@ -98,6 +98,8 @@ export interface ProfileFactContract<T = string> {
   source: "derived" | "user";
   provenance?: string;
   updatedAt: string;
+  /** Ids of live facts holding a contradictory value (user resolves in UI). */
+  conflictsWith?: string[];
 }
 
 export interface PersonContract {

@@ -45,6 +45,7 @@ interface FactCardProps<T> {
   fact: ProfileFactContract<T>;
   label: string;
   onCorrect: (factId: string, correction: string) => void;
+  onPin: (factId: string, pinned: boolean) => void;
   onForget?: (entityName: string) => void;
   entityName?: string;
 }
@@ -53,6 +54,7 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
   fact,
   label,
   onCorrect,
+  onPin,
   onForget,
   entityName,
 }: FactCardProps<T>) {
@@ -76,6 +78,14 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
           <ConfidenceBadge confidence={fact.confidence} />
           <SourceBadge source={fact.source} />
           {fact.pinned && <span className="badge-pinned">pinned</span>}
+          {fact.conflictsWith && fact.conflictsWith.length > 0 && (
+            <span
+              className="badge-conflict"
+              title="Conflicts with another learned fact — correct or forget the wrong one"
+            >
+              conflict
+            </span>
+          )}
         </div>
       </div>
 
@@ -101,6 +111,17 @@ function FactCard<T extends string | PersonContract | ProjectContract | RoutineC
         </form>
       ) : (
         <div className="fact-card__actions">
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={() => onPin(fact.id, !fact.pinned)}
+            title={
+              fact.pinned
+                ? "Unpin — allow consolidation to update this"
+                : "Confirm — never auto-overwritten by consolidation"
+            }
+          >
+            {fact.pinned ? "Unpin" : "Confirm"}
+          </button>
           <button
             className="btn btn--sm btn--ghost"
             onClick={() => setEditing(true)}
@@ -167,6 +188,24 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
         else if (env.error) setError(env.error.message);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Correction failed");
+      }
+    });
+  }
+
+  async function handlePin(factId: string, pinned: boolean) {
+    setError(null);
+    startTransition(async () => {
+      try {
+        const res = await fetch("/api/profile", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ factId, pinned }),
+        });
+        const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
+        if (env.data) setProfile(env.data);
+        else if (env.error) setError(env.error.message);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Pin update failed");
       }
     });
   }
@@ -239,6 +278,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                 fact={f}
                 label={f.value}
                 onCorrect={handleCorrect}
+                onPin={handlePin}
               />
             ))}
           </div>
@@ -261,6 +301,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                   }`
                 }
                 onCorrect={handleCorrect}
+                onPin={handlePin}
                 onForget={handleForget}
                 entityName={f.value.name}
               />
@@ -285,6 +326,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                   }`
                 }
                 onCorrect={handleCorrect}
+                onPin={handlePin}
                 onForget={handleForget}
                 entityName={f.value.name}
               />
@@ -307,6 +349,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                   `${f.value.description}${f.value.cadence ? ` (${f.value.cadence})` : ""}`
                 }
                 onCorrect={handleCorrect}
+                onPin={handlePin}
               />
             ))}
           </div>
@@ -325,6 +368,7 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
                 fact={f}
                 label={f.value}
                 onCorrect={handleCorrect}
+                onPin={handlePin}
               />
             ))}
           </div>
