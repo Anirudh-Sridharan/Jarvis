@@ -22,6 +22,14 @@
  *     email_get             readOnly:true
  *     email_send            readOnly:false  → GATED (outward_comm)
  *     email_draft           readOnly:false  → auto_allow (internal_write)
+ *
+ *   Browser (Playwright MCP, isolated headless profile — optional):
+ *     browser_navigate      readOnly:true
+ *     browser_snapshot      readOnly:true
+ *     browser_go_back       readOnly:true
+ *     browser_click         readOnly:false  → GATED (browser_action)
+ *     browser_type          readOnly:false  → GATED (browser_action)
+ *     browser_press_key     readOnly:false  → GATED (browser_action)
  */
 
 import type { ToolRegistry } from "@jarvis/agent";
@@ -43,9 +51,13 @@ import {
   makeEmailSendTool,
   makeEmailDraftTool,
 } from "./emailTools.js";
+import { makeBrowserTools } from "./browserTools.js";
+import type { McpToolClient } from "../../mcp/playwrightMcp.js";
 
 export function buildToolRegistry(
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email">,
+  /** Feature 18 browser slice: when provided, the six browser tools are added. */
+  browser?: McpToolClient | null,
 ): ToolRegistry {
   const tools = [
     // Calendar
@@ -64,6 +76,8 @@ export function buildToolRegistry(
     makeEmailGetTool(integrations),
     makeEmailSendTool(integrations),
     makeEmailDraftTool(integrations),
+    // Browser (Playwright MCP) — only when a client is wired
+    ...(browser ? makeBrowserTools(browser) : []),
   ];
 
   const registry: ToolRegistry = new Map(tools.map((t) => [t.name, t]));

@@ -20,6 +20,7 @@ import type { InferenceGateway } from "../inference/gateway.js";
 import { getAgentSystem, type AgentSystemBag } from "./agentSystem.js";
 import { createLiveIntegrations } from "../integrations/liveIntegrations.js";
 import { getMemorySystem } from "../memory/memorySystem.js";
+import { PlaywrightMcpProcess } from "../mcp/playwrightMcp.js";
 import { startIngestBridge } from "../memory/ingestBridge.js";
 import { GatewayLlm } from "../memory/gatewayLlm.js";
 import { registerProactiveTriggers } from "./proactiveBootstrap.js";
@@ -54,7 +55,11 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     cachedCalendarMirror = system.calendar.mirror;
     // Memory first: the agent system grounds its runs in the profile (feature 20).
     const memory = getMemorySystem(gateway);
-    const bag = getAgentSystem(gateway, system, memory);
+    // Browser tools (feature 18): lazy MCP subprocess — nothing spawns until
+    // the agent first uses a browser tool. JARVIS_BROWSER_MCP=0 disables.
+    const browser =
+      process.env["JARVIS_BROWSER_MCP"] === "0" ? null : new PlaywrightMcpProcess();
+    const bag = getAgentSystem(gateway, system, memory, browser);
     if (!bag) return null; // getAgentSystem already logged; stay memoized-null
     if (memory) {
       // External data → memory capture (feature 9→3 bridge): periodic, idempotent.

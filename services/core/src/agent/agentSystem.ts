@@ -14,6 +14,7 @@ import { createAgentSystem } from "@jarvis/agent";
 import type { AgentSystem, ApprovalRequest, ApprovalDecision, Clock } from "@jarvis/agent";
 import type { IntegrationsSystem } from "@jarvis/integrations";
 import type { MemorySystem } from "@jarvis/memory";
+import type { McpToolClient } from "../mcp/playwrightMcp.js";
 import type { InferenceGateway } from "../inference/gateway.js";
 import { AgentLlm } from "./agentLlm.js";
 import { buildToolRegistry } from "./tools/index.js";
@@ -129,6 +130,8 @@ export function getAgentSystem(
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email"> | null,
   /** Feature 20: when provided, agent runs are grounded in the user profile. */
   memory: MemorySystem | null = null,
+  /** Feature 18: when provided, the browser tools are registered. */
+  browser: McpToolClient | null = null,
 ): AgentSystemBag | null {
   if (initialized) {
     if (!agentSystemInstance || !approvalQueueInstance) return null;
@@ -154,7 +157,7 @@ export function getAgentSystem(
     const dataDir = getDataDir();
 
     const llm = new AgentLlm(gateway);
-    const tools = buildToolRegistry(integrations);
+    const tools = buildToolRegistry(integrations, browser);
     const queue = new ApprovalQueue();
 
     agentSystemInstance = createAgentSystem({
