@@ -661,6 +661,61 @@ async def unload(req: UnloadRequest) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# /warmup
+# ---------------------------------------------------------------------------
+
+
+@app.post("/warmup")
+async def warmup() -> Dict[str, Any]:
+    """Pre-load STT + TTS and run one tiny inference each.
+
+    Loading alone is not enough — the first faster-whisper transcribe and the
+    first Kokoro synthesis JIT-compile kernels and allocate buffers, which
+    costs hundreds of ms.  Warming here keeps the first real turn fast.
+    Components warm independently; a failure degrades, never 500s.
+    """
+    loop = asyncio.get_running_loop()
+    components: Dict[str, str] = {}
+
+    try:
+        await stt_mgr.ensure_ready()
+
+        def _warm_stt() -> None:
+            import numpy as np  # type: ignore[import]
+
+            silence = np.zeros(8000, dtype=np.float32)  # 0.5 s @ 16 kHz
+            segments, _info = stt_mgr.get_whisper().transcribe(
+                silence, language="en", beam_size=1
+            )
+            for _ in segments:
+                pass
+
+        await loop.run_in_executor(None, _warm_stt)
+        components["stt"] = "ready"
+    except Exception as exc:  # noqa: BLE001
+        components["stt"] = f"error: {exc}"
+
+    try:
+        await tts_mgr.ensure_ready()
+        from tts import synthesize_streaming  # type: ignore[import]
+
+        async for _chunk in synthesize_streaming(
+            text="Ready.",
+            pipeline=tts_mgr.get_pipeline(),
+            voice=TTS_VOICE,
+            speed=1.0,
+            loop=loop,
+        ):
+            break  # first chunk is enough to JIT-warm
+        components["tts"] = "ready"
+    except Exception as exc:  # noqa: BLE001
+        components["tts"] = f"error: {exc}"
+
+    ok = all(v == "ready" for v in components.values())
+    return {"state": "ready" if ok else "degraded", "components": components}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

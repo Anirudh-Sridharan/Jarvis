@@ -103,6 +103,8 @@ echo ""
 # Sidecars install deps on first run — allow generous startup windows.
 wait_healthy "MLX sidecar" "$MLX_URL/health" 300 || true
 wait_healthy "voice sidecar" "$VOICE_URL/health" 600 || true
+# Pre-warm STT/TTS models in the background so the first turn is fast.
+curl -s -m 300 -X POST "$VOICE_URL/warmup" >/dev/null 2>&1 &
 wait_healthy "core" "$CORE_URL/healthz" 120 || cleanup
 if [ "$WITH_DASHBOARD" -eq 1 ]; then
   wait_healthy "dashboard" "$DASH_URL" 120 || true

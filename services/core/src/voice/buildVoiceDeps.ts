@@ -4,7 +4,7 @@
  * the dashboard voice session (voiceSessionManager.ts) so mic/TTS/core wiring
  * and turn tuning can't drift between the two entry points.
  */
-import type { OrchestratorConfig, OrchestratorDeps } from "@jarvis/voice";
+import type { CoreClient, OrchestratorConfig, OrchestratorDeps } from "@jarvis/voice";
 import { createVoiceOrchestrator } from "@jarvis/voice";
 import { SidecarSttEngine } from "./sidecarStt.js";
 import { SidecarTtsEngine } from "./sidecarTts.js";
@@ -17,8 +17,35 @@ export interface VoiceDepsOptions {
   sidecarUrl: string;
 }
 
+/**
+ * Wrap a CoreClient so warmup() also fires the voice sidecar's /warmup in
+ * parallel (loads + JIT-warms whisper/Kokoro). Sidecar warmup is best-effort:
+ * its failure must never block the wake path — core's warmup result wins.
+ */
+export function withSidecarWarmup(
+  core: CoreClient,
+  sidecarUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): CoreClient {
+  return {
+    warmup: async () => {
+      const sidecar = fetchImpl(`${sidecarUrl}/warmup`, { method: "POST" }).catch(
+        () => undefined,
+      );
+      const result = await core.warmup();
+      await sidecar;
+      return result;
+    },
+    chatStream: (message, conversationId, signal) =>
+      core.chatStream(message, conversationId, signal),
+  };
+}
+
 /** Everything the orchestrator needs except the wake source (entry-point specific). */
-export function buildVoiceDeps(opts: VoiceDepsOptions): Omit<OrchestratorDeps, "wakeWord"> {
+export function buildVoiceDeps(
+  opts: VoiceDepsOptions,
+  fetchImpl: typeof fetch = fetch,
+): Omit<OrchestratorDeps, "wakeWord"> {
   return {
     stt: new SidecarSttEngine({
       sidecarUrl: opts.sidecarUrl,
@@ -26,9 +53,16 @@ export function buildVoiceDeps(opts: VoiceDepsOptions): Omit<OrchestratorDeps, "
     }),
     tts: new SidecarTtsEngine({
       sidecarUrl: opts.sidecarUrl,
-      voice: process.env["JARVIS_TTS_VOICE"], // undefined → sidecar default (bm_fable)
+      voice: process.env["JARVIS_TTS_VOICE"], // undefined → sidecar default (British blend)
+      speed: process.env["JARVIS_TTS_SPEED"]
+        ? Number(process.env["JARVIS_TTS_SPEED"])
+        : undefined, // undefined → engine default 0.95
     }),
-    core: new CoreHttpClient(opts.coreUrl),
+    core: withSidecarWarmup(
+      new CoreHttpClient(opts.coreUrl, fetchImpl),
+      opts.sidecarUrl,
+      fetchImpl,
+    ),
   };
 }
 

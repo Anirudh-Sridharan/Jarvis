@@ -17,7 +17,8 @@ import {
   type PlayerProcess,
 } from "../src/voice/sidecarTts.js";
 import { CoreHttpClient } from "../src/voice/coreVoiceClient.js";
-import type { SttEvent } from "@jarvis/voice";
+import { withSidecarWarmup } from "../src/voice/buildVoiceDeps.js";
+import type { CoreClient, SttEvent } from "@jarvis/voice";
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 
@@ -378,5 +379,52 @@ describe("CoreHttpClient", () => {
     );
     const client = new CoreHttpClient("http://127.0.0.1:8080", fetchImpl as unknown as typeof fetch);
     expect(await client.warmup()).toEqual({ ok: true, state: "loading", modelId: "qwen" });
+  });
+});
+
+// ── withSidecarWarmup ─────────────────────────────────────────────────────────
+
+describe("withSidecarWarmup", () => {
+  function fakeCore(): CoreClient & { warmups: number } {
+    const core = {
+      warmups: 0,
+      async warmup() {
+        core.warmups++;
+        return { ok: true, state: "ready" };
+      },
+      async *chatStream(): AsyncIterable<string> {
+        yield "tok";
+      },
+    };
+    return core as CoreClient & { warmups: number };
+  }
+
+  it("fires the sidecar /warmup alongside core warmup", async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const core = fakeCore();
+
+    const wrapped = withSidecarWarmup(core, "http://127.0.0.1:8089", fetchImpl);
+    const result = await wrapped.warmup();
+
+    expect(result).toEqual({ ok: true, state: "ready" });
+    expect(core.warmups).toBe(1);
+    expect(urls).toEqual(["http://127.0.0.1:8089/warmup"]);
+  });
+
+  it("sidecar warmup failure never blocks the wake path", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("sidecar down");
+    }) as unknown as typeof fetch;
+    const core = fakeCore();
+
+    const wrapped = withSidecarWarmup(core, "http://127.0.0.1:8089", fetchImpl);
+    const result = await wrapped.warmup();
+
+    expect(result.ok).toBe(true);
+    expect(core.warmups).toBe(1);
   });
 });
