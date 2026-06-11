@@ -210,11 +210,20 @@ export async function runReactLoop(
       // Injection scan on the result before feeding back to the loop.
       // Any flags taint the rest of the run: subsequent ProposedActions carry
       // them in provenance so the policy escalates/blocks (see APPROVAL GATE).
+      // Tools marked returnsExternalContent taint UNCONDITIONALLY — a hostile
+      // page that avoids the scanner's phrasings is still untrusted content.
       const resultStr = JSON.stringify(result);
       const injectionFlags = scanToolOutput(resultStr);
-      if (injectionFlags.length > 0) {
+      const externalSource = tool.returnsExternalContent === true;
+      if (injectionFlags.length > 0 || externalSource) {
         state.taint = {
-          flags: [...new Set([...(state.taint?.flags ?? []), ...injectionFlags])],
+          flags: [
+            ...new Set([
+              ...(state.taint?.flags ?? []),
+              ...injectionFlags,
+              ...(externalSource ? ["external_content_source"] : []),
+            ]),
+          ],
           sources: [...new Set([...(state.taint?.sources ?? []), toolName])],
         };
       }

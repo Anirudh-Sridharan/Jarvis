@@ -346,6 +346,14 @@ export interface Tool {
   description: string;
   schema: import("zod").ZodTypeAny;
   readOnly: boolean;
+  /**
+   * True for tools whose output is external, untrusted content (web pages,
+   * browser snapshots). Their results taint the run UNCONDITIONALLY — not
+   * only when the injection scanner pattern-matches — so later side-effecting
+   * actions escalate and always-allow grants stop applying (feature 17:
+   * "web pages are tagged untrusted").
+   */
+  returnsExternalContent?: boolean;
   run(args: unknown): Promise<unknown>;
 }
 

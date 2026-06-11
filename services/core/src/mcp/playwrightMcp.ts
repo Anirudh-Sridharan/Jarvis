@@ -35,13 +35,29 @@ export interface McpToolClient {
 
 // ── Live implementation ───────────────────────────────────────────────────────
 
-const DEFAULT_CMD = "npx @playwright/mcp@latest --headless --isolated";
+// Pinned: the tool arg schemas drift across versions (ref→target rename
+// already happened once) — bump deliberately, re-running the live smoke.
+const DEFAULT_CMD = "npx @playwright/mcp@0.0.76 --headless --isolated";
 const IDLE_STOP_MS = 5 * 60 * 1000;
+
+/** Optional egress restriction (feature-17 sandbox row): semicolon-separated
+ * origin list passed through to @playwright/mcp. Unset = open (parity with
+ * web_fetch; single-user box). */
+function originArgs(): string[] {
+  const args: string[] = [];
+  const allowed = process.env["JARVIS_BROWSER_ALLOWED_ORIGINS"];
+  const blocked = process.env["JARVIS_BROWSER_BLOCKED_ORIGINS"];
+  if (allowed) args.push(`--allowed-origins=${allowed}`);
+  if (blocked) args.push(`--blocked-origins=${blocked}`);
+  return args;
+}
 
 export class PlaywrightMcpProcess implements McpToolClient {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by stop(); a connect from an older generation discards itself. */
+  private generation = 0;
   /** Serializes tool calls — the browser session is single-threaded state. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -70,6 +86,7 @@ export class PlaywrightMcpProcess implements McpToolClient {
 
   /** Close the subprocess (idle timeout or shutdown). Safe to call repeatedly. */
   async stop(): Promise<void> {
+    this.generation += 1; // an in-flight connect must not resurrect the client
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
@@ -89,12 +106,21 @@ export class PlaywrightMcpProcess implements McpToolClient {
   private async ensureConnected(): Promise<Client> {
     if (this.client) return this.client;
     if (!this.connecting) {
+      const gen = this.generation;
       this.connecting = (async () => {
         const [cmd, ...cmdArgs] = this.command.split(/\s+/).filter(Boolean);
         if (!cmd) throw new Error("empty JARVIS_BROWSER_MCP_CMD");
-        const transport = new StdioClientTransport({ command: cmd, args: cmdArgs });
+        const transport = new StdioClientTransport({
+          command: cmd,
+          args: [...cmdArgs, ...originArgs()],
+        });
         const client = new Client({ name: "jarvis-core", version: "1.0.0" });
         await client.connect(transport);
+        if (gen !== this.generation) {
+          // stop() ran while we were connecting — discard, don't resurrect.
+          await client.close().catch(() => undefined);
+          throw new Error("browser MCP stopped during connect");
+        }
         this.client = client;
         return client;
       })();

@@ -20,7 +20,9 @@ only if the deterministic path proves insufficient).
    library; the SDK handles protocol-version negotiation, which is the part
    most likely to drift. Live-only dependency — tests never touch it (DI).
 
-2. **Server: `npx @playwright/mcp@latest --headless --isolated`**, spawned
+2. **Server: `npx @playwright/mcp@0.0.76 --headless --isolated`** (pinned —
+   the tool arg schemas drift across versions; the `ref`→`target` rename was
+   caught by review against the live server), spawned
    lazily on first browser-tool call. `--isolated` is load-bearing for
    safety: a fresh browser profile carries no cookies/sessions/credentials,
    so the agent can never act with the user's logged-in identity. The
@@ -44,7 +46,17 @@ only if the deterministic path proves insufficient).
    upload, downloads, tab management, screenshots (the local chat model is
    text-only; the accessibility snapshot is the agent's "eyes").
 
-4. **Safety posture follows the LOCKED feature-17 table — not weakened.**
+4. **Safety posture follows the LOCKED feature-17 table — strengthened.**
+   All six tools are `returnsExternalContent`: page content taints the run
+   UNCONDITIONALLY (not only when the injection scanner pattern-matches), so
+   after any browser read, later side-effecting actions escalate and
+   always-allow grants stop applying. The feature-17 "sandbox + egress
+   allow-list" row is satisfied partially: `--isolated` covers identity;
+   egress restriction is available via `JARVIS_BROWSER_ALLOWED_ORIGINS` /
+   `JARVIS_BROWSER_BLOCKED_ORIGINS` (passed through to the server) but
+   defaults to open — parity with the pre-existing `web_fetch` envelope on a
+   single-user box. This is a documented, accepted risk.
+
    `browser_action → require_approval (always)` already exists in
    `DECISION_TABLE`. Interactions (click/type/press) are non-readOnly and
    gated through the existing approval flow; reads (navigate/snapshot/back)
@@ -63,7 +75,8 @@ only if the deterministic path proves insufficient).
 ## Architecture
 
 ```
-@jarvis/agent (leaf, UNCHANGED)            services/core
+@jarvis/agent (leaf; gains Tool.returnsExternalContent     services/core
+               + unconditional taint in the ReAct loop)
   ReAct loop ── approval gate ──┐   ┌── agent/tools/browserTools.ts
   ToolRegistry (injected) ◄─────┴───┤     makeBrowserTools(client): Tool[]
                                     │     zod schemas + registerToolMeta

@@ -11,8 +11,9 @@
  *   browser_press_key  readOnly:false    always)
  *
  * Not exposed v1: evaluate/JS (code_exec-adjacent), uploads, downloads, tabs,
- * screenshots. Tool output flows through the ReAct loop's injection scan, so
- * hostile page content taints the run and escalates approval (already wired).
+ * screenshots. All six tools are returnsExternalContent — page content taints
+ * the run UNCONDITIONALLY (not only on injection-scanner matches), so later
+ * side-effecting actions escalate and always-allow grants stop applying.
  *
  * Degrade, never crash: a dead/unspawnable MCP server returns a structured
  * { ok:false, error:"browser unavailable: …" } result (web_search pattern).
@@ -50,14 +51,18 @@ async function callBrowser(
     return { ok: true, text: capText(result.text) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `browser unavailable: ${message}` };
+    return { ok: false, error: capText(`browser unavailable: ${message}`) };
   }
 }
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
 const NavigateSchema = z.object({
-  url: z.string().url().describe("Absolute URL to open"),
+  url: z
+    .string()
+    .url()
+    .refine((u) => /^https?:\/\//i.test(u), "only http(s) URLs are allowed")
+    .describe("Absolute http(s) URL to open"),
 });
 
 const EmptySchema = z.object({});
@@ -93,6 +98,7 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
         "Follow with browser_snapshot to read the page.",
       schema: NavigateSchema,
       readOnly: true,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         const { url } = NavigateSchema.parse(args);
         return callBrowser(client, "browser_navigate", { url });
@@ -105,6 +111,7 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
         "element refs used by browser_click/browser_type.",
       schema: EmptySchema,
       readOnly: true,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         EmptySchema.parse(args ?? {});
         return callBrowser(client, "browser_snapshot", {});
@@ -115,6 +122,7 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
       description: "Go back to the previous page in the headless browser.",
       schema: EmptySchema,
       readOnly: true,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         EmptySchema.parse(args ?? {});
         return callBrowser(client, "browser_navigate_back", {});
@@ -127,9 +135,14 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
         "ref from the latest browser_snapshot.",
       schema: ClickSchema,
       readOnly: false,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         const parsed = ClickSchema.parse(args);
-        return callBrowser(client, "browser_click", parsed);
+        // @playwright/mcp expects the snapshot ref under "target".
+        return callBrowser(client, "browser_click", {
+          element: parsed.element,
+          target: parsed.ref,
+        });
       },
     },
     {
@@ -139,11 +152,13 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
         "Never enter credentials or payment details.",
       schema: TypeSchema,
       readOnly: false,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         const parsed = TypeSchema.parse(args);
+        // @playwright/mcp expects the snapshot ref under "target".
         const mcpArgs: Record<string, unknown> = {
           element: parsed.element,
-          ref: parsed.ref,
+          target: parsed.ref,
           text: parsed.text,
         };
         if (parsed.submit !== undefined) mcpArgs["submit"] = parsed.submit;
@@ -155,6 +170,7 @@ export function makeBrowserTools(client: McpToolClient): Tool[] {
       description: "Press a keyboard key in the browser (requires approval).",
       schema: PressKeySchema,
       readOnly: false,
+      returnsExternalContent: true,
       run: async (args: unknown) => {
         const parsed = PressKeySchema.parse(args);
         return callBrowser(client, "browser_press_key", parsed);

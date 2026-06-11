@@ -255,3 +255,30 @@ describe("Policy decision table", () => {
     }
   });
 });
+
+describe("browser_action decisions (feature 18 browser slice)", () => {
+  it("browser_action → require_approval, even from a clean (untainted) run", () => {
+    const decision = classifyAndDecide(makeAction("browser_click"), {
+      sideEffects: "browser_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.riskClass).toBe("browser_action");
+  });
+
+  it("browser_action from an external-content-tainted run still requires approval", () => {
+    const action = makeAction("browser_click", { element: "Buy", ref: "e9" }, {
+      provenance: {
+        derivedFromExternal: true,
+        sources: ["browser_snapshot"],
+        injectionFlags: ["external_content_source"],
+      },
+    });
+    const decision = classifyAndDecide(action, {
+      sideEffects: "browser_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.reasons.join(" ")).toMatch(/untrusted|external/i);
+  });
+});

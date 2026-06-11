@@ -355,3 +355,67 @@ describe("ReAct loop — tool-output injection taint", () => {
 
 // workaround for dynamic require in test
 declare const require: (id: string) => { z: typeof import("zod").z };
+
+describe("external-content taint (feature 18 browser slice)", () => {
+  it("a returnsExternalContent tool taints the run even with benign output", async () => {
+    const tmpDir = makeTempDir();
+    try {
+      const llm = new FakeLlm().setScript([
+        '{"tool": "page_reader", "args": {"query": "benign"}}',
+        '{"tool": "__done__", "args": {"result": "read it"}}',
+      ]);
+      const pageReader = new FakeSearchTool() as FakeSearchTool & {
+        name: string;
+        returnsExternalContent: boolean;
+      };
+      Object.defineProperty(pageReader, "name", { value: "page_reader" });
+      pageReader.returnsExternalContent = true;
+      const tools = makeToolRegistry([pageReader]);
+      const clock = new FixedClock(Date.now());
+      const { sink } = makeAutoApproveSink();
+
+      const state = makeState("read the page");
+      await runReactLoop(state, "read the page", {
+        llm,
+        tools,
+        approvalService: new ApprovalService(sink, clock),
+        auditLog: new AuditLog(tmpDir),
+        clock,
+        runId: "run-ext-taint",
+      });
+
+      expect(state.status).toBe("done");
+      expect(state.taint?.flags).toContain("external_content_source");
+      expect(state.taint?.sources).toContain("page_reader");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("an ordinary tool with benign output does NOT taint the run", async () => {
+    const tmpDir = makeTempDir();
+    try {
+      const llm = new FakeLlm().setScript([
+        '{"tool": "search", "args": {"query": "benign"}}',
+        '{"tool": "__done__", "args": {"result": "ok"}}',
+      ]);
+      const tools = makeToolRegistry([new FakeSearchTool()]);
+      const clock = new FixedClock(Date.now());
+      const { sink } = makeAutoApproveSink();
+
+      const state = makeState("search");
+      await runReactLoop(state, "search", {
+        llm,
+        tools,
+        approvalService: new ApprovalService(sink, clock),
+        auditLog: new AuditLog(tmpDir),
+        clock,
+        runId: "run-no-taint",
+      });
+
+      expect(state.taint).toBeUndefined();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
