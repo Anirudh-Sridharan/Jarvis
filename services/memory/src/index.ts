@@ -21,10 +21,10 @@ import type { buildExternalRecord } from "./capture/experience.js";
 import { RetrievalService } from "./retrieval/retrieval.js";
 import { ConsolidationService } from "./consolidation/consolidation.js";
 import { ProfileService } from "./profile/profile.js";
-import type { Embedder, LlmClient, RetrievalOptions, RetrievedMemory } from "./types.js";
+import type { Embedder, LlmClient, Reranker, RetrievalOptions, RetrievedMemory } from "./types.js";
 import type { ConsolidationResult } from "./consolidation/consolidation.js";
 
-export type { Embedder, LlmClient };
+export type { Embedder, LlmClient, Reranker };
 export type {
   ExperienceRecord,
   Entity,
@@ -73,6 +73,8 @@ export interface MemorySystemConfig {
   embedder: Embedder;
   llm: LlmClient;
   dataDir: string;
+  /** Optional second-stage reranker for sharper retrieval. Omit to disable. */
+  reranker?: Reranker;
 }
 
 export interface MemorySystem {
@@ -122,7 +124,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
   const db = openDatabase(config.dataDir);
   const store = new MemoryStore(db, config.embedder);
   const captureService = new CaptureService(store, config.embedder);
-  const retrievalService = new RetrievalService(store, config.embedder);
+  const retrievalService = new RetrievalService(store, config.embedder, undefined, config.reranker);
   const consolidationService = new ConsolidationService(store, config.llm, config.embedder);
   const profileService = new ProfileService(store, config.llm);
 

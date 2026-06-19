@@ -117,13 +117,14 @@ export class ConsolidationService {
     this.checkpoint(run, 2);
 
     // ── Stage 3: REFLECT ──────────────────────────────────────────────────
+    // Generate deduped insights now, grounded in the freshly-extracted facts.
+    // Evidence linkage + indexing are deferred to after RESOLVE (stage 4), where
+    // the persisted facts (with stable ids) exist — so insights can cite real
+    // fact ids and be written into the searchable graph.
     const insights: Insight[] = [];
     try {
-      const reflectInsights = await this.reflectInsights(pending, runId);
-      insights.push(...reflectInsights);
-      for (const ins of insights) {
-        this.store.insertInsight(ins);
-      }
+      const generated = await this.reflectInsights(pending, extractedFacts, runId);
+      insights.push(...generated);
       run.counts.insightsGenerated = insights.length;
     } catch (err) {
       run.errors.push({ stage: 3, message: String(err) });
@@ -144,6 +145,19 @@ export class ConsolidationService {
         if (result.conflictFlagged) run.counts.conflictsFlagged += 1;
       } catch (err) {
         run.errors.push({ stage: 4, message: String(err), recordId: extracted.sourceRecordId });
+      }
+    }
+
+    // Ground each insight in the persisted facts it draws on, then index it as a
+    // consolidation-sourced episode so the second brain can recall its own
+    // conclusions — not just the raw facts underneath them.
+    for (const ins of insights) {
+      try {
+        ins.evidenceFactIds = matchEvidence(ins.text, newFacts);
+        this.store.insertInsight(ins);
+        await this.indexInsightAsEpisode(ins);
+      } catch (err) {
+        run.errors.push({ stage: 3, message: `index insight ${ins.id}: ${String(err)}` });
       }
     }
     this.checkpoint(run, 4);
@@ -234,49 +248,87 @@ export class ConsolidationService {
 
   private async reflectInsights(
     records: ExperienceRecord[],
+    extractedFacts: ExtractedFact[],
     runId: string,
   ): Promise<Insight[]> {
-    if (records.length === 0) return [];
+    if (records.length === 0 && extractedFacts.length === 0) return [];
 
+    // Ground reflection in the structured facts extracted this run, with a
+    // sample of raw experience text for nuance the facts may have dropped.
+    const factLines = extractedFacts
+      .slice(0, 30)
+      .map((f, i) => `[${i}] ${f.text}`)
+      .join("\n");
     const bodySample = records
-      .slice(0, 10)
+      .slice(0, 8)
       .map((r) => r.text.slice(0, 200))
       .join("\n---\n");
 
-    const prompt = `Analyze these recent experiences and identify meaningful patterns, trends, or insights.
+    const prompt = `Analyze the user's recent facts and experiences and identify meaningful patterns, trends, or insights — synthesis that goes beyond any single fact.
 Return a JSON array of insights: [{"text": string, "kind": "pattern"|"trend"|"preference"|"anomaly", "importance": number 1-10}]
 If no clear patterns, return [].
 
-Experiences:
+Facts:
 """
-${bodySample}
+${factLines || "(none)"}
+"""
+
+Recent experiences:
+"""
+${bodySample || "(none)"}
 """`;
 
+    let parsed: Array<{ text?: string; kind?: string; importance?: number }>;
     try {
       const raw = await this.llm.complete({ prompt, json: true });
       const match = raw.match(/\[[\s\S]*\]/);
       if (!match) return [];
-      const parsed = JSON.parse(match[0]) as Array<{
-        text?: string;
-        kind?: string;
-        importance?: number;
-      }>;
-      return parsed
-        .filter((i) => typeof i.text === "string" && i.text.length > 0)
-        .map((i) => ({
-          id: newId(),
-          runId,
-          text: i.text!,
-          kind: (i.kind ?? "pattern") as Insight["kind"],
-          evidenceFactIds: [],
-          windowDays: 1,
-          importance: i.importance ?? 5,
-          surfacedInBriefing: false,
-          createdAt: new Date().toISOString(),
-        }));
+      parsed = JSON.parse(match[0]);
     } catch {
       return [];
     }
+    if (!Array.isArray(parsed)) return [];
+
+    // Dedup against recently-generated insights so the same observation is not
+    // regenerated every consolidation pass.
+    const recentNorm = this.store.getRecentInsights(50).map((r) => normalizeText(r.text));
+    const seen = new Set<string>();
+    const out: Insight[] = [];
+    for (const i of parsed) {
+      if (typeof i.text !== "string" || i.text.trim().length === 0) continue;
+      const norm = normalizeText(i.text);
+      if (seen.has(norm)) continue;
+      if (recentNorm.some((r) => isNearDuplicate(norm, r))) continue;
+      seen.add(norm);
+      out.push({
+        id: newId(),
+        runId,
+        text: i.text,
+        kind: (i.kind ?? "pattern") as Insight["kind"],
+        evidenceFactIds: [], // linked to persisted facts after RESOLVE
+        windowDays: 1,
+        importance: clampImportance(i.importance),
+        surfacedInBriefing: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Write an insight into the searchable graph as a consolidation-sourced
+   * episode, so retrieval (and the chat/agent memory it feeds) can surface the
+   * brain's own conclusions — not only the raw facts underneath them.
+   */
+  private async indexInsightAsEpisode(ins: Insight): Promise<void> {
+    const ep = await this.store.upsertEpisode({
+      text: ins.text,
+      occurredAt: ins.createdAt,
+      provenance: { source: "consolidation", sourceId: `insight:${ins.id}`, confidence: 0.7 },
+    });
+    // Carry the insight's salience onto the episode for retrieval weighting.
+    const db = (this.store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    db.prepare(`UPDATE episodes SET importance = ? WHERE id = ?`).run(ins.importance, ep.id);
   }
 
   private async scoreImportance(fact: Fact): Promise<number> {
@@ -298,4 +350,48 @@ Reply with JSON: {"importance": number}`;
       return fact.importance;
     }
   }
+}
+
+// ── REFLECT helpers (deterministic) ───────────────────────────────────────────
+
+function normalizeText(t: string): string {
+  return t.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2),
+  );
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/** Two insight texts are near-duplicates if identical or ≥0.8 token-Jaccard. */
+function isNearDuplicate(a: string, b: string): boolean {
+  if (a === b) return true;
+  return jaccard(tokenize(a), tokenize(b)) >= 0.8;
+}
+
+/** Link an insight to the persisted facts whose text it draws on (top matches). */
+function matchEvidence(insightText: string, facts: Fact[], max = 3): string[] {
+  const it = tokenize(insightText);
+  return facts
+    .map((f) => ({ id: f.id, score: jaccard(it, tokenize(f.text)) }))
+    .filter((x) => x.score >= 0.12)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((x) => x.id);
+}
+
+function clampImportance(n: number | undefined): number {
+  const v = Math.round(typeof n === "number" && Number.isFinite(n) ? n : 5);
+  return Math.max(1, Math.min(10, v));
 }

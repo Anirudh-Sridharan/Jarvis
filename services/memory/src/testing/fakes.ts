@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Embedder, LlmClient } from "../types.js";
+import type { Embedder, LlmClient, Reranker } from "../types.js";
 
 const EMBEDDING_DIM = 256;
 
@@ -112,4 +112,50 @@ export class FakeLlm implements LlmClient {
     // Default: empty JSON array (safe fallback)
     return "[]";
   }
+}
+
+/**
+ * FakeReranker — deterministic second-stage scorer for tests.
+ *
+ * Default scoring: Jaccard token overlap between query and document (a stand-in
+ * for a real cross-encoder's relevance — fully deterministic, same inputs →
+ * same scores). Pass a custom `scoreFn` for precise control over ordering in a
+ * test, or set `failNext`/`throwAlways` to exercise the graceful-fallback path.
+ */
+export class FakeReranker implements Reranker {
+  private throwAlways = false;
+  constructor(
+    private readonly scoreFn: (query: string, doc: string) => number = jaccardOverlap,
+  ) {}
+
+  /** Make every rerank() call reject — exercises the fallback-to-first-stage path. */
+  alwaysThrow(): this {
+    this.throwAlways = true;
+    return this;
+  }
+
+  async rerank(query: string, documents: string[]): Promise<number[]> {
+    if (this.throwAlways) throw new Error("FakeReranker: forced failure");
+    return documents.map((doc) => this.scoreFn(query, doc));
+  }
+}
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 0),
+  );
+}
+
+/** Jaccard similarity of token sets — deterministic, in [0, 1]. */
+function jaccardOverlap(query: string, doc: string): number {
+  const q = tokenize(query);
+  const d = tokenize(doc);
+  if (q.size === 0 || d.size === 0) return 0;
+  let inter = 0;
+  for (const t of q) if (d.has(t)) inter++;
+  const union = q.size + d.size - inter;
+  return union === 0 ? 0 : inter / union;
 }

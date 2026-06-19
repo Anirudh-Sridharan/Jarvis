@@ -11,6 +11,7 @@ import { createMemorySystem } from "@jarvis/memory";
 import type { MemorySystem } from "@jarvis/memory";
 import { GatewayEmbedder } from "./gatewayEmbedder.js";
 import { GatewayLlm } from "./gatewayLlm.js";
+import { GatewayReranker } from "./gatewayReranker.js";
 import type { InferenceGateway } from "../inference/gateway.js";
 import { getDataDir } from "../dataDir.js";
 
@@ -31,7 +32,13 @@ export function getMemorySystem(gateway: InferenceGateway): MemorySystem | null 
     const embedder = new GatewayEmbedder(gateway.mlx, gateway.registry);
     const llm = new GatewayLlm(gateway);
 
-    instance = createMemorySystem({ embedder, llm, dataDir });
+    // Second-stage reranker (sharper retrieval) is opt-in: it adds an LLM call
+    // to the retrieval path, so it stays off unless JARVIS_RERANK=1. Retrieval
+    // degrades gracefully to first-stage ranking when it is absent or fails.
+    const reranker =
+      process.env.JARVIS_RERANK === "1" ? new GatewayReranker(gateway) : undefined;
+
+    instance = createMemorySystem({ embedder, llm, dataDir, reranker });
     return instance;
   } catch (err) {
     console.warn(

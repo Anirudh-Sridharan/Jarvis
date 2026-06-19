@@ -778,6 +778,34 @@ export class MemoryStore {
     );
   }
 
+  /** Most-recently-created insights first — used by REFLECT to dedup. */
+  getRecentInsights(limit: number): import("../types.js").Insight[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM insights ORDER BY created_at DESC LIMIT ?`)
+      .all(limit) as unknown as {
+        id: string;
+        run_id: string;
+        text: string;
+        kind: string;
+        evidence_fact_ids: string;
+        window_days: number;
+        importance: number;
+        surfaced_in_briefing: number;
+        created_at: string;
+      }[];
+    return rows.map((r) => ({
+      id: r.id,
+      runId: r.run_id,
+      text: r.text,
+      kind: r.kind as import("../types.js").Insight["kind"],
+      evidenceFactIds: fromJson<string[]>(r.evidence_fact_ids, []),
+      windowDays: r.window_days,
+      importance: r.importance,
+      surfacedInBriefing: r.surfaced_in_briefing === 1,
+      createdAt: r.created_at,
+    }));
+  }
+
   // ── BM25 index (lazy, invalidated on writes) ──────────────────────────────
 
   private invalidateBm25(): void {

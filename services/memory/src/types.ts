@@ -271,3 +271,22 @@ export interface LlmClient {
     json?: boolean;
   }): Promise<string>;
 }
+
+/**
+ * Reranker interface — an optional second-stage relevance model (cross-encoder).
+ *
+ * First-stage retrieval (vector + BM25 + entity) produces a candidate set; the
+ * reranker re-scores the top candidates jointly against the query for sharper
+ * relevance than the lexical/vector blend can give. Injected (DI) so @jarvis/memory
+ * stays free of @jarvis/core and any model server — core wires the real one,
+ * tests use FakeReranker.
+ *
+ * Contract:
+ *  - Returns one score per input document, in the SAME order as `documents`.
+ *  - Higher = more relevant. Scores may be any real number (logits); the caller
+ *    normalizes. Returning fewer/more scores than docs, or throwing, is treated
+ *    as "reranker unavailable" and retrieval falls back to first-stage order.
+ */
+export interface Reranker {
+  rerank(query: string, documents: string[]): Promise<number[]>;
+}

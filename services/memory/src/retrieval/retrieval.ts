@@ -9,7 +9,7 @@
  * No LLM is in the hot path.
  */
 
-import type { RetrievedMemory, RetrievalOptions, Embedder, MemoryNode } from "../types.js";
+import type { RetrievedMemory, RetrievalOptions, Embedder, Reranker, MemoryNode } from "../types.js";
 import type { MemoryStore } from "../store/memoryStore.js";
 import {
   scoreMemory,
@@ -43,6 +43,7 @@ interface InternalCandidate {
   rawSignals: { vecCosine?: number; bm25Raw?: number; entityHits?: number };
   relevance?: number;
   fusedScore?: number;
+  rerankerScore?: number;
   scoreBreakdown?: {
     recency: number;
     importance: number;
@@ -55,6 +56,8 @@ export class RetrievalService {
     private readonly store: MemoryStore,
     private readonly embedder: Embedder,
     private readonly cfg: ScoringConfig = DEFAULT_SCORING_CONFIG,
+    /** Optional second-stage reranker. When absent, retrieval is unchanged. */
+    private readonly reranker?: Reranker,
   ) {}
 
   /** Get the current procedural block markdown (or empty string). */
@@ -191,9 +194,21 @@ export class RetrievalService {
     kept.sort((a, b) => (b.fusedScore ?? 0) - (a.fusedScore ?? 0));
     const preMMR = kept.slice(0, RERANK_CAP);
 
-    // 8. MMR de-dup — greedy Maximal Marginal Relevance
-    // (mmrSelect falls back to precomputed queryScores when queryVec is empty)
-    const selected = mmrSelect(preMMR, queryVec ?? [], { lambda: MMR_LAMBDA, k });
+    // 7b. Optional second-stage rerank of the top candidates. A cross-encoder
+    // scores query↔doc jointly — sharper relevance than the first-stage blend —
+    // and folds into the relevance slot of the fused score (recency/importance
+    // are preserved). No-op + graceful fallback when no reranker is configured.
+    const reranked = await this.applyReranker(query, preMMR);
+
+    // 8. MMR de-dup — greedy Maximal Marginal Relevance.
+    // When reranked, pass an empty queryVec so MMR's relevance term reads each
+    // candidate's queryScore (now the reranker score); candidate-candidate
+    // diversity still uses embeddings. Otherwise use the query embedding.
+    const selected = mmrSelect(
+      reranked.candidates,
+      reranked.applied ? [] : (queryVec ?? []),
+      { lambda: MMR_LAMBDA, k },
+    );
 
     // 9. Build results with placement hints
     const results: RetrievedMemory[] = selected.map((c, i) => ({
@@ -210,6 +225,7 @@ export class RetrievalService {
           bm25: c.signals.bm25 ?? 0,
           entity: c.signals.entity ?? 0,
         },
+        ...(c.rerankerScore !== undefined ? { rerankerScore: c.rerankerScore } : {}),
       },
       placementHint: placementHint(i),
       validFrom: new Date(c.validFrom).getTime(),
@@ -225,6 +241,53 @@ export class RetrievalService {
     }
 
     return results;
+  }
+
+  /**
+   * Second-stage rerank: re-score the top candidates with the injected reranker
+   * and fold the result into the relevance slot of the fused score.
+   *
+   * Fails safe — if no reranker is configured, it throws, or it returns the
+   * wrong number of scores, the candidates are returned untouched and
+   * `applied=false`, so retrieval degrades exactly to first-stage behavior.
+   */
+  private async applyReranker(
+    query: string,
+    candidates: InternalCandidate[],
+  ): Promise<{ candidates: InternalCandidate[]; applied: boolean }> {
+    if (!this.reranker || candidates.length === 0) {
+      return { candidates, applied: false };
+    }
+
+    let scores: number[];
+    try {
+      scores = await this.reranker.rerank(query, candidates.map((c) => c.text));
+    } catch {
+      return { candidates, applied: false }; // reranker unavailable → keep order
+    }
+    // Contract guard: one score per document, else ignore the whole result.
+    if (!Array.isArray(scores) || scores.length !== candidates.length) {
+      return { candidates, applied: false };
+    }
+
+    // Min-max normalize the reranker scores to [0, 1] (all-equal → 1.0).
+    const norm = normalizeBm25(scores);
+    candidates.forEach((c, i) => {
+      const r = norm[i] ?? 0;
+      c.rerankerScore = r;
+      const recency = c.scoreBreakdown?.recency ?? 0;
+      const importance = c.scoreBreakdown?.importance ?? 0;
+      // Swap the reranker score into the relevance term; keep recency/importance.
+      c.fusedScore =
+        this.cfg.weights.recency * recency +
+        this.cfg.weights.importance * importance +
+        this.cfg.weights.relevance * r;
+      // MMR reads queryScore as its relevance term — point it at the reranker.
+      c.queryScore = r;
+    });
+
+    candidates.sort((a, b) => (b.fusedScore ?? 0) - (a.fusedScore ?? 0));
+    return { candidates, applied: true };
   }
 
   // ── Private retrievers ────────────────────────────────────────────────────
