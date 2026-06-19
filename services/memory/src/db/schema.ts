@@ -115,7 +115,8 @@ export const DDL: string[] = [
     ON experience_records (consolidation_pending)`,
 
   // ── embeddings table (for deferred embed queue) ──────────────────────────
-  // TODO(phase4: feature 9) replace brute-force cosine with sqlite-vec or LanceDB
+  // Vector KNN is accelerated by sqlite-vec when available (see db/vecIndex.ts):
+  // a vec0 mirror table is created at runtime over episode/fact embeddings.
   `CREATE TABLE IF NOT EXISTS embeddings (
     node_id TEXT PRIMARY KEY,
     node_kind TEXT NOT NULL,               -- 'episode' | 'entity' | 'fact' | 'experience'

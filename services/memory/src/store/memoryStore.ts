@@ -8,8 +8,10 @@
  * (MENTIONS, ABOUT, RELATES_TO, DERIVED_FROM) are encoded as foreign-key
  * columns + junction tables in SQLite. At scale, swap to FalkorDB/Neo4j Cypher.
  *
- * NOTE(scale): Vector search is brute-force cosine over embeddings stored as
- * JSON in SQLite. TODO: swap to sqlite-vec or LanceDB at >50k entries.
+ * NOTE(scale): Vector search uses sqlite-vec (exact cosine KNN in C) when the
+ * loadable extension is available, mirroring episode/fact embeddings into a vec0
+ * table; it falls back to brute-force JS cosine over the JSON embedding columns
+ * (which stay the source of truth) when the extension is absent. See db/vecIndex.ts.
  */
 
 import type { DatabaseSync } from "node:sqlite";
@@ -25,6 +27,7 @@ import type {
   SourceKind,
 } from "../types.js";
 import { fromJson, toJson, newId } from "../db/database.js";
+import { VecIndex } from "../db/vecIndex.js";
 import { topKCosine, type VectorEntry } from "../search/cosine.js";
 import {
   buildBM25Index,
@@ -110,11 +113,24 @@ export class MemoryStore {
   private bm25Index: BM25Index | null = null;
   /** BM25 index including invalidated facts (includeInvalidated searches). */
   private bm25IndexAll: BM25Index | null = null;
+  /** Optional sqlite-vec accelerator for vector search (no-op if unavailable). */
+  private readonly vec: VecIndex;
 
   constructor(
     private readonly db: DatabaseSync,
     private readonly embedder: Embedder,
-  ) {}
+  ) {
+    this.vec = new VecIndex(db);
+    if (this.vec.tryLoad()) {
+      // Backfill the mirror from existing embedding columns (idempotent).
+      this.vec.reconcile();
+    }
+  }
+
+  /** Sync the vector index with the embedding columns (no-op without sqlite-vec). */
+  reconcileVecIndex(): void {
+    this.vec.reconcile();
+  }
 
   /**
    * Escape hatch for sibling services (profile, forget) that run bespoke SQL
@@ -317,6 +333,9 @@ export class MemoryStore {
       );
     }
 
+    // Mirror the embedding into the vector index (no-op without sqlite-vec).
+    if (embedding) this.vec.upsert(`ep:${id}`, embedding);
+
     // Update BM25 index
     this.invalidateBm25();
 
@@ -378,6 +397,9 @@ export class MemoryStore {
       input.sourceTrust ?? 0.5,
       input.pinned ? 1 : 0,
     );
+
+    // Mirror the embedding into the vector index (no-op without sqlite-vec).
+    if (embedding) this.vec.upsert(`fact:${id}`, embedding);
 
     this.invalidateBm25();
     return this.getFactById(id)!;
@@ -516,8 +538,56 @@ export class MemoryStore {
 
   // ── Search ────────────────────────────────────────────────────────────────
 
-  /** Brute-force cosine vector search over all memory nodes. */
+  /**
+   * Vector search over episodes + live facts. Uses sqlite-vec (exact cosine KNN
+   * in C) when available, else brute-force JS cosine. Both apply identical
+   * validity filtering, so results match — sqlite-vec is a transparent speedup.
+   */
   vectorSearch(args: VectorSearchArgs): SearchResult[] {
+    if (this.vec.isAvailable()) {
+      return this.vectorSearchVec(args);
+    }
+    return this.vectorSearchBruteForce(args);
+  }
+
+  /** sqlite-vec path: KNN then resolve nodes + apply the same validity filter. */
+  private vectorSearchVec(args: VectorSearchArgs): SearchResult[] {
+    const { query, k, includeInvalidated = false, asOf } = args;
+    const now = new Date().toISOString();
+
+    // Over-fetch: invalidated/stale facts live in the mirror and are filtered
+    // out here, so ask for more than k to ensure enough live nodes survive.
+    const hits = this.vec.search(query, Math.max(k * 5, 100));
+    const out: SearchResult[] = [];
+    for (const h of hits) {
+      const sep = h.id.indexOf(":");
+      const kind = h.id.slice(0, sep);
+      const id = h.id.slice(sep + 1);
+      let node: MemoryNode | null = null;
+      if (kind === "ep") {
+        node = this.getEpisodeById(id);
+      } else if (kind === "fact") {
+        const f = this.getFactById(id);
+        if (f) {
+          if (!includeInvalidated) {
+            if (f.invalidatedAt !== null) continue;
+            if (asOf && f.validFrom > asOf) continue;
+            if (asOf && f.validTo !== null && f.validTo <= asOf) continue;
+            if (!asOf && f.validTo !== null && f.validTo <= now) continue;
+          }
+          node = f;
+        }
+      }
+      if (node) {
+        out.push({ node, score: h.score });
+        if (out.length >= k) break;
+      }
+    }
+    return out;
+  }
+
+  /** Brute-force cosine vector search over all memory nodes. */
+  private vectorSearchBruteForce(args: VectorSearchArgs): SearchResult[] {
     const { query, k, includeInvalidated = false, asOf } = args;
     const now = new Date().toISOString();
 

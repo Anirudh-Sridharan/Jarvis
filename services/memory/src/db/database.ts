@@ -15,7 +15,13 @@ export type DB = DatabaseSync;
 export function openDatabase(dataDir: string): DatabaseSync {
   mkdirSync(dataDir, { recursive: true });
   const dbPath = join(dataDir, "memory.db");
-  const db = new DatabaseSync(dbPath);
+  // allowExtension lets MemoryStore load sqlite-vec (optional accelerator).
+  // Cast keeps the build robust across @types/node versions that may not yet
+  // type the option; loading itself is attempted defensively in VecIndex.
+  const db = new DatabaseSync(
+    dbPath,
+    { allowExtension: true } as unknown as ConstructorParameters<typeof DatabaseSync>[1],
+  );
 
   // WAL mode for better concurrent read performance.
   db.exec("PRAGMA journal_mode=WAL");

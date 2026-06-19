@@ -214,6 +214,14 @@ export class ConsolidationService {
     } catch (err) {
       run.errors.push({ stage: 8, message: String(err) });
     }
+    // Sync the vector index with all embeddings written this pass (covers facts
+    // created via non-upsert paths, e.g. forget's compression summaries).
+    // No-op when sqlite-vec is unavailable.
+    try {
+      this.store.reconcileVecIndex();
+    } catch (err) {
+      run.errors.push({ stage: 8, message: `vec reconcile: ${String(err)}` });
+    }
     this.checkpoint(run, 8);
 
     // ── Stage 9: BRIEFING PREP / CLEAR FLAGS ─────────────────────────────
