@@ -89,4 +89,15 @@ export class CaptureService {
   ): Promise<CaptureResult> {
     return this.capture(buildExternalRecord(opts));
   }
+
+  /** Capture a markdown / Obsidian note (second-brain vault ingest). */
+  async captureMarkdown(opts: {
+    path: string;
+    raw: string;
+    mtime?: string;
+    title?: string;
+  }): Promise<CaptureResult> {
+    const { buildMarkdownRecord } = await import("./adapters/markdown.js");
+    return this.capture(buildMarkdownRecord(opts));
+  }
 }

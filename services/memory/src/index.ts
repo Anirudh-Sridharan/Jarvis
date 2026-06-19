@@ -66,6 +66,8 @@ export {
 } from "./retrieval/scoring.js";
 export { isLiveFact, wasTrueAt, wasBelivedAt, factsBelivedAt, factsTrueAt, liveFacts } from "./store/bitemporal.js";
 export { computeDedupKey, buildConversationRecord, buildNoteRecord, buildExternalRecord } from "./capture/experience.js";
+export { parseMarkdownNote, buildMarkdownRecord } from "./capture/adapters/markdown.js";
+export type { ParsedMarkdown } from "./capture/adapters/markdown.js";
 
 // ── Memory system factory ──────────────────────────────────────────────────────
 
@@ -97,6 +99,13 @@ export interface MemorySystem {
     captureExternal(
       opts: Parameters<typeof buildExternalRecord>[0],
     ): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
+
+    captureMarkdown(opts: {
+      path: string;
+      raw: string;
+      mtime?: string;
+      title?: string;
+    }): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
   };
 
   store: MemoryStore;
@@ -133,6 +142,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
       captureConversationTurn: (opts) => captureService.captureConversationTurn(opts),
       captureNote: (opts) => captureService.captureNote(opts),
       captureExternal: (opts) => captureService.captureExternal(opts),
+      captureMarkdown: (opts) => captureService.captureMarkdown(opts),
     },
     store,
     retrieval: {

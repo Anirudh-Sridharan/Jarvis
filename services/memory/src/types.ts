@@ -109,6 +109,7 @@ export interface ProceduralBlock {
 export type SourceId =
   | "conversation"
   | "note"
+  | "obsidian"
   | "gmail"
   | "gcal"
   | "github"

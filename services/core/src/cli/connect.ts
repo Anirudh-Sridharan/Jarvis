@@ -39,6 +39,7 @@ function usage(): never {
       "  whoop | gcal | gmail     authorize a source (loopback OAuth consent)",
       "  status                   show token + last-sync state for all sources",
       "  sync <source>            run one manual sync (whoop|gcal|gmail|github|simplefin)",
+      "  sync obsidian <path>     ingest a markdown/Obsidian vault into memory",
       "  disconnect <source>      remove a source's tokens from the Keychain",
       "",
       `OAuth redirect: http://127.0.0.1:${oauthPort()}/callback (set JARVIS_OAUTH_PORT to change)`,
@@ -114,6 +115,7 @@ function printRun(run: SyncRun): void {
 
 async function sync(arg: string | undefined): Promise<void> {
   if (arg === "simplefin") return syncFinance();
+  if (arg === "obsidian") return syncObsidian(process.argv.slice(2)[2]);
 
   if (!arg || !SYNCABLE_SOURCES.includes(arg as SourceId)) {
     console.error(
@@ -149,6 +151,39 @@ async function syncFinance(): Promise<void> {
   for (const nw of result.netWorth) {
     console.log(`  net worth: ${(nw.amountMinor / 100).toFixed(2)} ${nw.currency}`);
   }
+  process.exit(0);
+}
+
+async function syncObsidian(vaultArg: string | undefined): Promise<void> {
+  const vaultDir = vaultArg ?? process.env["JARVIS_OBSIDIAN_VAULT"];
+  if (!vaultDir) {
+    console.error(
+      "Provide a vault path: npm run connect -- sync obsidian <path>\n" +
+        "  (or set JARVIS_OBSIDIAN_VAULT in .env)",
+    );
+    process.exit(1);
+  }
+
+  const { loadConfig } = await import("../config.js");
+  const { InferenceGateway } = await import("../inference/gateway.js");
+  const { getMemorySystem } = await import("../memory/memorySystem.js");
+  const { runVaultIngest } = await import("../memory/vaultIngest.js");
+
+  const memory = getMemorySystem(new InferenceGateway(loadConfig()));
+  if (!memory) {
+    console.error("Memory system unavailable — check config/models.yaml (embedding entry).");
+    process.exit(1);
+  }
+
+  console.log(`Ingesting Obsidian vault: ${vaultDir}…`);
+  const r = await runVaultIngest({ memory, vaultDir });
+  console.log(`\nSync obsidian: ok`);
+  console.log(`  scanned:  ${r.scanned}`);
+  console.log(
+    `  captured: +${r.captured} new, ${r.duplicates} unchanged` +
+      (r.errors ? `, ${r.errors} errors` : ""),
+  );
+  console.log(`  next: run consolidation to make them recallable (POST /consolidate)`);
   process.exit(0);
 }
 
