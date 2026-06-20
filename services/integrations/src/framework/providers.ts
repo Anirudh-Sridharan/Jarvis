@@ -14,7 +14,8 @@
  *    `access_type=offline&prompt=consent` so a refresh token is issued.
  */
 
-import type { SourceId } from "../types.js";
+import type { SourceId, HttpClient, TokenStore } from "../types.js";
+import { getAccessToken } from "./oauth.js";
 
 export type OAuthSourceId = Extract<SourceId, "whoop" | "gcal" | "gmail">;
 
@@ -151,4 +152,30 @@ export function getRefreshConfig(source: OAuthSourceId): {
     clientSecret: process.env[p.clientSecretEnv] ?? `${source}_secret`,
     extraRefreshParams: p.extraRefreshParams,
   };
+}
+
+/**
+ * Get a valid OAuth access token for a catalog source — the single auth call a
+ * connector's sync() needs.
+ *
+ * This is the catalog-aware convenience layer over {@link getAccessToken}: it
+ * looks up the token URL, client credentials, refresh params, AND the
+ * rotating-refresh flag from the provider catalog. Connectors therefore never
+ * have to remember to pass `isRotating` — forgetting it on a rotating provider
+ * (Whoop) would silently corrupt the refresh-token chain, which is exactly the
+ * kind of foot-gun a new connector author would hit.
+ */
+export function getOAuthAccessToken(
+  source: OAuthSourceId,
+  tokenStore: TokenStore,
+  http: HttpClient,
+): Promise<string> {
+  const provider = getOAuthProvider(source);
+  return getAccessToken(
+    source,
+    tokenStore,
+    http,
+    getRefreshConfig(source),
+    provider.rotatingRefresh,
+  );
 }

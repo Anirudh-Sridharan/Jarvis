@@ -7,23 +7,12 @@ import type { WidgetEnvelope, MetricSeriesContract } from "@/app/lib/contracts";
 import MetricChart from "@/app/components/MetricChart";
 import { EmptyState, ErrorState } from "@/app/components/WidgetStates";
 
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
+import { fetchEnvelope } from "@/app/lib/fetchEnvelope";
 
-async function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
-  try {
-    const res = await fetch(
-      `${BASE}/api/metrics?metric=${encodeURIComponent(metric)}&range=${range}&domain=health`,
-      { cache: "no-store" }
-    );
-    return (await res.json()) as WidgetEnvelope<MetricSeriesContract>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
+function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
+  return fetchEnvelope<MetricSeriesContract>(
+    `/api/metrics?metric=${encodeURIComponent(metric)}&range=${range}&domain=health`,
+  );
 }
 
 function MetricSection({

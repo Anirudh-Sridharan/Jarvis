@@ -17,9 +17,7 @@ import type {
   TokenStore,
   WorkEvent,
 } from "../types.js";
-import { makeMetricId } from "../framework/metricStore.js";
-
-const ADAPTER_VERSION = "1";
+import { metricPointFactory } from "../framework/normalize.js";
 
 export const githubConnector: Connector = {
   id: "github",
@@ -175,7 +173,7 @@ async function syncRepo(
 
 /** Convert WorkEvents → MetricPoints (daily counts). */
 export function workEventsToMetricPoints(events: WorkEvent[]): MetricPoint[] {
-  const now = new Date().toISOString();
+  const point = metricPointFactory("github");
   const points: MetricPoint[] = [];
 
   // Group by (type, ts-day)
@@ -213,17 +211,7 @@ export function workEventsToMetricPoints(events: WorkEvent[]): MetricPoint[] {
     const dims: Record<string, string> = {};
     if (repo) dims["repo"] = repo;
 
-    points.push({
-      id: makeMetricId({ source: "github", metric, ts, dims }),
-      source: "github",
-      metric,
-      value: count,
-      unit: "count",
-      ts,
-      dims,
-      ingestedAt: now,
-      adapterVersion: ADAPTER_VERSION,
-    });
+    points.push(point({ metric, value: count, unit: "count", ts, dims }));
   }
 
   return points;

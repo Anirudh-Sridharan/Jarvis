@@ -1,8 +1,15 @@
 "use client";
 
+/**
+ * TodoList — the home-page "Directives" widget (one of the dashboard's two write
+ * surfaces). Add/complete/snooze/delete each hit the BFF's /api/todos route and
+ * optimistically patch local state from the returned envelope. Only open todos
+ * are shown; "overdue" is decided by the local-time helper, not raw Date parsing.
+ */
+
 import { useState, useCallback } from "react";
 import type { TodoContract, WidgetEnvelope } from "@/app/lib/contracts";
-import { isOverdue } from "@/app/lib/dates";
+import { isOverdue, localDateStr } from "@/app/lib/dates";
 
 interface TodoListProps {
   initialEnvelope: WidgetEnvelope<TodoContract[]>;
@@ -60,8 +67,7 @@ export default function TodoList({ initialEnvelope }: TodoListProps) {
   }, []);
 
   const snoozeTodo = useCallback(async (id: string) => {
-    const tomorrow = new Date(Date.now() + 86_400_000);
-    const due = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+    const due = localDateStr(new Date(Date.now() + 86_400_000)); // tomorrow, local
     try {
       const res = await fetch("/api/todos", {
         method: "PATCH",

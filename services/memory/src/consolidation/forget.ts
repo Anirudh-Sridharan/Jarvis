@@ -29,6 +29,18 @@ const COMPRESS_THRESHOLD = 0.15; // below this → compress (summarize into one)
 const COMPRESS_CLUSTER_THRESHOLD = 3; // min facts on the same subject to trigger compression
 const RECENCY_HALF_LIFE_DAYS = 30;
 
+/** A compress-candidate fact, with the columns needed to build a summary. */
+interface CompressFactRow {
+  id: string;
+  text: string;
+  valid_from: string;
+  subject_id: string;
+  predicate: string;
+  object_literal: string | null;
+  source_trust: number;
+  provenance: string;
+}
+
 function recencyDecay(lastAccessedAt: number, nowMs: number): number {
   const ageDays = (nowMs - lastAccessedAt) / (1000 * 60 * 60 * 24);
   return Math.exp((-Math.LN2 * ageDays) / RECENCY_HALF_LIFE_DAYS);
@@ -49,6 +61,42 @@ function computeDecayScore(opts: {
   const recency = recencyDecay(opts.lastAccessedAt, opts.nowMs);
   const frequency = frequencyWeight(opts.accessCount);
   return importanceWeight * recency * (0.5 + 0.5 * frequency);
+}
+
+/**
+ * Classify a single fact into keep / evict / compress and explain why.
+ * Safety floors (pin, high importance, per-entity minimum) win first and always
+ * map to "keep"; otherwise the decay score decides. The human-readable `reason`
+ * is surfaced in the consolidation run's audit trail.
+ */
+function classifyForgetAction(opts: {
+  pinned: boolean;
+  importance: number;
+  entityFactCount: number;
+  decayScore: number;
+  protectedByFloor: boolean;
+}): { action: ForgetDecision["action"]; reason: string } {
+  const { pinned, importance, entityFactCount, decayScore, protectedByFloor } = opts;
+
+  if (protectedByFloor) {
+    if (pinned) return { action: "keep", reason: "pinned by user" };
+    if (importance >= IMPORTANCE_FLOOR) {
+      return { action: "keep", reason: `importance ${importance} >= floor ${IMPORTANCE_FLOOR}` };
+    }
+    return {
+      action: "keep",
+      reason: `entity below min facts floor (${entityFactCount}/${MIN_FACTS_PER_ENTITY})`,
+    };
+  }
+
+  const score = decayScore.toFixed(4);
+  if (decayScore < EVICT_THRESHOLD) {
+    return { action: "evict", reason: `decayScore ${score} < evictThreshold ${EVICT_THRESHOLD}` };
+  }
+  if (decayScore < COMPRESS_THRESHOLD) {
+    return { action: "compress", reason: `decayScore ${score} < compressThreshold ${COMPRESS_THRESHOLD}` };
+  }
+  return { action: "keep", reason: `decayScore ${score} above thresholds` };
 }
 
 /**
@@ -85,55 +133,114 @@ export function computeForgetDecisions(
 
   const decisions: ForgetDecision[] = [];
 
-  for (const f of factRows) {
+  for (const factRow of factRows) {
     const decayScore = computeDecayScore({
-      importance: f.importance,
-      lastAccessedAt: f.last_accessed_at,
-      accessCount: f.access_count,
+      importance: factRow.importance,
+      lastAccessedAt: factRow.last_accessed_at,
+      accessCount: factRow.access_count,
       nowMs,
     });
 
-    const entityFactCount = factsPerEntity.get(f.subject_id) ?? 0;
+    const entityFactCount = factsPerEntity.get(factRow.subject_id) ?? 0;
     // Feature 20: a user pin is an absolute floor — never evict or compress.
     const protectedByFloor =
-      f.pinned === 1 ||
-      f.importance >= IMPORTANCE_FLOOR ||
+      factRow.pinned === 1 ||
+      factRow.importance >= IMPORTANCE_FLOOR ||
       entityFactCount <= MIN_FACTS_PER_ENTITY;
 
-    let action: "keep" | "evict" | "compress";
-    let reason: string;
-
-    if (protectedByFloor) {
-      action = "keep";
-      reason = f.pinned === 1
-        ? "pinned by user"
-        : f.importance >= IMPORTANCE_FLOOR
-          ? `importance ${f.importance} >= floor ${IMPORTANCE_FLOOR}`
-          : `entity below min facts floor (${entityFactCount}/${MIN_FACTS_PER_ENTITY})`;
-    } else if (decayScore < EVICT_THRESHOLD) {
-      action = "evict";
-      reason = `decayScore ${decayScore.toFixed(4)} < evictThreshold ${EVICT_THRESHOLD}`;
-    } else if (decayScore < COMPRESS_THRESHOLD) {
-      action = "compress";
-      reason = `decayScore ${decayScore.toFixed(4)} < compressThreshold ${COMPRESS_THRESHOLD}`;
-    } else {
-      action = "keep";
-      reason = `decayScore ${decayScore.toFixed(4)} above thresholds`;
-    }
+    const { action, reason } = classifyForgetAction({
+      pinned: factRow.pinned === 1,
+      importance: factRow.importance,
+      entityFactCount,
+      decayScore,
+      protectedByFloor,
+    });
 
     decisions.push({
-      factId: f.id,
+      factId: factRow.id,
       action,
       decayScore,
-      lastAccessedAt: new Date(f.last_accessed_at).toISOString(),
-      accessCount: f.access_count,
-      importance: f.importance,
+      lastAccessedAt: new Date(factRow.last_accessed_at).toISOString(),
+      accessCount: factRow.access_count,
+      importance: factRow.importance,
       protectedByFloor,
       reason,
     });
   }
 
   return decisions;
+}
+
+/**
+ * Group compress-candidate decisions by the subject entity of their fact, so
+ * compression operates per-entity (we only summarize facts that share a
+ * subject). Decisions whose fact no longer exists are dropped.
+ */
+function groupCompressCandidatesBySubject(
+  store: MemoryStore,
+  toCompress: ForgetDecision[],
+): Map<string, ForgetDecision[]> {
+  const db = store.rawDb;
+  const groupsBySubject = new Map<string, ForgetDecision[]>();
+  for (const decision of toCompress) {
+    const row = db
+      .prepare(`SELECT subject_id FROM facts WHERE id = ?`)
+      .get(decision.factId) as { subject_id: string } | null | undefined;
+    if (!row) continue;
+    const group = groupsBySubject.get(row.subject_id) ?? [];
+    group.push(decision);
+    groupsBySubject.set(row.subject_id, group);
+  }
+  return groupsBySubject;
+}
+
+/**
+ * Insert the compression summary as a fresh live fact (predicate "summary").
+ * It inherits the first source fact's provenance but is re-stamped as
+ * consolidation/forget-compression output, and carries no embedding (stage 8's
+ * vec reconcile picks it up). The summary intentionally has no `supersedes`
+ * link — it stands in for a whole cluster, not a single prior fact.
+ */
+function insertSummaryFact(
+  store: MemoryStore,
+  subjectId: string,
+  summaryText: string,
+  sourceFactRows: CompressFactRow[],
+  nowIso: string,
+): void {
+  const summaryProvenance = sourceFactRows[0]
+    ? fromJson<Record<string, unknown>>(sourceFactRows[0].provenance, {})
+    : {};
+  summaryProvenance["capturedBy"] = "feature-6";
+  summaryProvenance["source"] = "consolidation";
+  summaryProvenance["sourceId"] = "forget-compression";
+
+  store.rawDb.prepare(`
+    INSERT INTO facts
+      (id, subject_id, predicate, object_id, object_literal, text, embedding,
+       valid_from, valid_to, ingested_at, invalidated_at, invalidated_by,
+       supersedes, importance, last_accessed_at, access_count, provenance, source_trust)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    newId(),
+    subjectId,
+    "summary",
+    null,
+    null,
+    summaryText,
+    null,
+    sourceFactRows[0]?.valid_from ?? nowIso,
+    null,
+    nowIso,
+    null,
+    null,
+    null,
+    5,
+    Date.now(),
+    0,
+    toJson(summaryProvenance),
+    0.5,
+  );
 }
 
 /**
@@ -168,32 +275,17 @@ export async function applyForgetDecisions(
     evicted++;
   }
 
-  // Compression: group by subject entity
+  // Compression needs an LLM to write the summary — without one, compress
+  // candidates are simply left live (never evicted as a side effect).
   if (toCompress.length > 0 && llm) {
     const db = store.rawDb;
+    const groupsBySubject = groupCompressCandidatesBySubject(store, toCompress);
 
-    // Group compress candidates by subject_id
-    const groupsBySubject = new Map<string, ForgetDecision[]>();
-    for (const d of toCompress) {
-      // Look up the subject_id for this factId
-      const row = db
-        .prepare(`SELECT subject_id FROM facts WHERE id = ?`)
-        .get(d.factId) as { subject_id: string } | null | undefined;
-      if (!row) continue;
-      const subjectId = row.subject_id;
-      const group = groupsBySubject.get(subjectId) ?? [];
-      group.push(d);
-      groupsBySubject.set(subjectId, group);
-    }
-
-    // For each group that meets the threshold, compress
     for (const [subjectId, group] of groupsBySubject.entries()) {
-      if (group.length < COMPRESS_CLUSTER_THRESHOLD) {
-        // Not enough facts to compress — leave them as-is (no eviction)
-        continue;
-      }
+      // Only compress a cluster that's actually noisy; smaller groups stay as-is.
+      if (group.length < COMPRESS_CLUSTER_THRESHOLD) continue;
 
-      // Fetch the full fact texts
+      // Fetch the full fact texts for the cluster.
       const factIds = group.map((d) => d.factId);
       const placeholders = factIds.map(() => "?").join(",");
       const factRows = db
@@ -201,20 +293,10 @@ export async function applyForgetDecisions(
           `SELECT id, text, valid_from, subject_id, predicate, object_literal, source_trust, provenance
            FROM facts WHERE id IN (${placeholders})`,
         )
-        .all(...factIds) as {
-        id: string;
-        text: string;
-        valid_from: string;
-        subject_id: string;
-        predicate: string;
-        object_literal: string | null;
-        source_trust: number;
-        provenance: string;
-      }[];
+        .all(...factIds) as unknown as CompressFactRow[];
 
       if (factRows.length === 0) continue;
 
-      // Build summary prompt
       const factBullets = factRows.map((f) => `- ${f.text}`).join("\n");
       const prompt = `Summarize the following related facts about entity "${subjectId}" into a single concise summary fact.
 Return only the summary text (one sentence), no JSON, no bullet points.
@@ -226,15 +308,16 @@ ${factBullets}`;
       try {
         summaryText = (await llm.complete({ prompt })).trim();
         if (!summaryText || summaryText === "[]") {
-          // Fallback if LLM returns empty / JSON stub
+          // LLM returned empty / a JSON stub — fall back to a deterministic join.
           summaryText = `Summary of ${factRows.length} facts about ${subjectId}: ${factRows.map((f) => f.text).join("; ")}`;
         }
       } catch {
-        // Skip compression for this group if LLM fails
+        // LLM failed — skip compression for this group (leave facts live).
         continue;
       }
 
-      // Invalidate originals (soft-delete, journal entry preserved)
+      // Soft-delete the originals (journal entry preserved), then persist the
+      // summary as a new live fact.
       for (const factRow of factRows) {
         store.invalidateFact({
           factId: factRow.id,
@@ -242,43 +325,7 @@ ${factBullets}`;
           reason: "compressed into summary fact",
         });
       }
-
-      // Insert summary fact
-      const summaryId = newId();
-      const summaryProvenance = factRows[0]
-        ? fromJson<Record<string, unknown>>(factRows[0].provenance, {})
-        : {};
-      summaryProvenance["capturedBy"] = "feature-6";
-      summaryProvenance["source"] = "consolidation";
-      summaryProvenance["sourceId"] = "forget-compression";
-
-      db.prepare(`
-        INSERT INTO facts
-          (id, subject_id, predicate, object_id, object_literal, text, embedding,
-           valid_from, valid_to, ingested_at, invalidated_at, invalidated_by,
-           supersedes, importance, last_accessed_at, access_count, provenance, source_trust)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        summaryId,
-        subjectId,
-        "summary",
-        null,
-        null,
-        summaryText,
-        null,
-        factRows[0]?.valid_from ?? nowIso,
-        null,
-        nowIso,
-        null,
-        null,
-        null,
-        5,
-        Date.now(),
-        0,
-        toJson(summaryProvenance),
-        0.5,
-      );
-
+      insertSummaryFact(store, subjectId, summaryText, factRows, nowIso);
       compressed += factRows.length;
     }
   }

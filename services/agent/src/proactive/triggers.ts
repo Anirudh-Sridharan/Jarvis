@@ -71,8 +71,14 @@ export class TriggerStore {
     return t;
   }
 
-  private _insert(t: Trigger): void {
-    const config = JSON.stringify({
+  /**
+   * Serialize the variable-shape parts of a trigger into the `config` JSON
+   * column. The fixed columns (id, name, kind, status, timestamps, run refs)
+   * are stored directly; everything kind-specific lives here as one blob so the
+   * schema stays stable as new trigger shapes are added.
+   */
+  private serializeConfig(t: Trigger): string {
+    return JSON.stringify({
       cron: t.cron,
       event: t.event,
       condition: t.condition,
@@ -80,6 +86,10 @@ export class TriggerStore {
       tags: t.tags,
       catchUp: t.catchUp,
     });
+  }
+
+  private _insert(t: Trigger): void {
+    const config = this.serializeConfig(t);
     this.db
       .prepare(
         `INSERT INTO triggers (id, name, kind, enabled, config, status, next_run_at, last_run_at, last_run_id, created_at, updated_at)
@@ -128,14 +138,7 @@ export class TriggerStore {
     if (!existing) return;
 
     const merged = { ...existing, ...updates, updatedAt: now };
-    const config = JSON.stringify({
-      cron: merged.cron,
-      event: merged.event,
-      condition: merged.condition,
-      action: merged.action,
-      tags: merged.tags,
-      catchUp: merged.catchUp,
-    });
+    const config = this.serializeConfig(merged);
 
     this.db
       .prepare(

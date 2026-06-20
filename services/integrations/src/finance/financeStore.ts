@@ -13,6 +13,9 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Account, AccountBalance, Category, Transaction } from "./types.js";
 import { BUILT_IN_CATEGORIES } from "./categorize.js";
 
+/** The columns the dedupe lookups select when matching an existing txn row. */
+type TxnMatch = { id: string; category_id: string };
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS fin_accounts (
   id TEXT PRIMARY KEY,
@@ -115,50 +118,80 @@ export class FinanceStore {
    * uncategorized (user/rule decisions are never clobbered by a re-sync).
    * Returns true when a new row was inserted.
    */
-  upsertTransaction(t: Transaction): boolean {
-    const existing = (
-      t.sourceTxnId
-        ? this.db
-            .prepare(`SELECT id, category_id FROM fin_transactions WHERE account_id = ? AND source_txn_id = ?`)
-            .get(t.accountId, t.sourceTxnId)
-        : undefined
-    ) ??
-      this.db
-        .prepare(`SELECT id, category_id FROM fin_transactions WHERE dedupe_hash = ?`)
-        .get(t.dedupeHash) ??
-      // Pending→posted fuzzy match (spec edge case 3): a pending txn whose
-      // hash included no posted date won't hash-match once it posts. Match a
-      // PENDING row on the same account with the same amount + normalized
-      // description within a small window, and update it in place instead of
-      // inserting a phantom duplicate.
-      (t.status === "posted"
-        ? this.db
-            .prepare(
-              `SELECT id, category_id FROM fin_transactions
-               WHERE account_id = ? AND status = 'pending' AND amount_minor = ?
-                 AND lower(trim(description)) = lower(trim(?))`,
-            )
-            .get(t.accountId, t.amountMinor, t.description)
-        : undefined);
-
+  upsertTransaction(txn: Transaction): boolean {
+    const existing = this.findExistingTransaction(txn);
     if (existing) {
-      const keepCategory = (existing as { category_id: string }).category_id !== "uncategorized";
-      this.db
-        .prepare(
-          `UPDATE fin_transactions SET
-             amount_minor = ?, description = ?, posted_at = ?, pending_at = ?,
-             status = ?, dedupe_hash = ?, source_txn_id = COALESCE(source_txn_id, ?)
-             ${keepCategory ? "" : ", category_id = ?, category_source = ?, category_confidence = ?"}
-           WHERE id = ?`,
-        )
-        .run(
-          ...(keepCategory
-            ? [t.amountMinor, t.description, t.postedAt, t.pendingAt, t.status, t.dedupeHash, t.sourceTxnId, (existing as { id: string }).id]
-            : [t.amountMinor, t.description, t.postedAt, t.pendingAt, t.status, t.dedupeHash, t.sourceTxnId, t.categoryId, t.categorySource, t.categoryConfidence ?? null, (existing as { id: string }).id]),
-        );
+      this.updateTransaction(existing, txn);
       return false;
     }
+    this.insertTransaction(txn);
+    return true;
+  }
 
+  /**
+   * Locate the stored row a freshly-synced txn should update, if any, in
+   * descending order of confidence:
+   *   1. same account + source txn id (the source's own stable identity),
+   *   2. identical dedupe hash (our deterministic fallback identity),
+   *   3. pending→posted fuzzy match (spec edge case 3): a pending txn whose
+   *      hash omitted the posted date won't hash-match once it posts, so a
+   *      newly-posted txn reclaims the matching pending row (same account,
+   *      amount, and normalized description) instead of inserting a phantom.
+   */
+  private findExistingTransaction(txn: Transaction): TxnMatch | undefined {
+    if (txn.sourceTxnId) {
+      const bySource = this.db
+        .prepare(`SELECT id, category_id FROM fin_transactions WHERE account_id = ? AND source_txn_id = ?`)
+        .get(txn.accountId, txn.sourceTxnId) as TxnMatch | undefined;
+      if (bySource) return bySource;
+    }
+
+    const byHash = this.db
+      .prepare(`SELECT id, category_id FROM fin_transactions WHERE dedupe_hash = ?`)
+      .get(txn.dedupeHash) as TxnMatch | undefined;
+    if (byHash) return byHash;
+
+    if (txn.status === "posted") {
+      return this.db
+        .prepare(
+          `SELECT id, category_id FROM fin_transactions
+           WHERE account_id = ? AND status = 'pending' AND amount_minor = ?
+             AND lower(trim(description)) = lower(trim(?))`,
+        )
+        .get(txn.accountId, txn.amountMinor, txn.description) as TxnMatch | undefined;
+    }
+
+    return undefined;
+  }
+
+  private updateTransaction(existing: TxnMatch, txn: Transaction): void {
+    // Preserve a category the user/rules already assigned; only (re)write
+    // category fields when the stored row is still uncategorized.
+    const keepCategory = existing.category_id !== "uncategorized";
+    const categoryAssignment = keepCategory
+      ? ""
+      : ", category_id = ?, category_source = ?, category_confidence = ?";
+    const categoryParams = keepCategory
+      ? []
+      : [txn.categoryId, txn.categorySource, txn.categoryConfidence ?? null];
+
+    this.db
+      .prepare(
+        `UPDATE fin_transactions SET
+           amount_minor = ?, description = ?, posted_at = ?, pending_at = ?,
+           status = ?, dedupe_hash = ?, source_txn_id = COALESCE(source_txn_id, ?)
+           ${categoryAssignment}
+         WHERE id = ?`,
+      )
+      .run(
+        txn.amountMinor, txn.description, txn.postedAt, txn.pendingAt,
+        txn.status, txn.dedupeHash, txn.sourceTxnId,
+        ...categoryParams,
+        existing.id,
+      );
+  }
+
+  private insertTransaction(txn: Transaction): void {
     this.db
       .prepare(
         `INSERT INTO fin_transactions
@@ -167,11 +200,10 @@ export class FinanceStore {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        t.id, t.sourceTxnId, t.accountId, t.amountMinor, t.currency, t.description,
-        t.postedAt, t.pendingAt, t.status, t.categoryId, t.categorySource,
-        t.categoryConfidence ?? null, t.dedupeHash,
+        txn.id, txn.sourceTxnId, txn.accountId, txn.amountMinor, txn.currency, txn.description,
+        txn.postedAt, txn.pendingAt, txn.status, txn.categoryId, txn.categorySource,
+        txn.categoryConfidence ?? null, txn.dedupeHash,
       );
-    return true;
   }
 
   listAccounts(): Account[] {

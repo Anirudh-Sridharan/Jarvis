@@ -33,6 +33,13 @@ export interface FinanceSyncResult {
   netWorth: Array<{ currency: string; amountMinor: number }>;
 }
 
+/**
+ * Run one finance sync: fetch from SimpleFIN, normalize + categorize, upsert
+ * accounts/balances/transactions, and emit a per-currency net-worth metric
+ * point for the day. Idempotent — `startDate` defaults to a 90-day backfill
+ * (plus a 7-day overlap on incremental runs) and the store's dedupe absorbs
+ * the re-fetched overlap, so repeated runs don't double-count.
+ */
 export async function runFinanceSync(
   opts: { accessUrl: string; startDate?: string },
   deps: FinanceSyncDeps,
@@ -45,14 +52,15 @@ export async function runFinanceSync(
   const client = new SimpleFinClient(opts.accessUrl, deps.http);
   const { accounts, balances, txns } = await syncSimpleFin(client, startDate);
 
-  for (const a of accounts) deps.store.upsertAccount(a);
-  for (const b of balances) deps.store.upsertBalance(b);
+  for (const account of accounts) deps.store.upsertAccount(account);
+  for (const balance of balances) deps.store.upsertBalance(balance);
 
+  // User rules sort ahead of built-ins so a personal override wins (see categorize).
   const rules = [...(deps.userRules ?? []), ...BUILT_IN_RULES];
   let inserted = 0;
   let updated = 0;
-  for (const t of txns) {
-    const categorized = await categorize(t, rules);
+  for (const txn of txns) {
+    const categorized = await categorize(txn, rules);
     if (deps.store.upsertTransaction(categorized)) inserted++;
     else updated++;
   }
@@ -62,19 +70,19 @@ export async function runFinanceSync(
   const netWorth = deps.store.netWorth();
   const day = now.toISOString().slice(0, 10);
   const ts = `${day}T00:00:00Z`;
-  const points: MetricPoint[] = netWorth.map((nw) => ({
+  const points: MetricPoint[] = netWorth.map((entry) => ({
     id: makeMetricId({
       source: "simplefin",
       metric: "finance.net_worth",
       ts,
-      dims: { currency: nw.currency },
+      dims: { currency: entry.currency },
     }),
     source: "simplefin",
     metric: "finance.net_worth",
-    value: nw.amountMinor,
+    value: entry.amountMinor,
     unit: "minor",
     ts,
-    dims: { currency: nw.currency },
+    dims: { currency: entry.currency },
     ingestedAt: now.toISOString(),
     adapterVersion: "1",
   }));

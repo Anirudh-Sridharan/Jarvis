@@ -171,16 +171,18 @@ export class TodoStore {
 
 // ── Recurrence ────────────────────────────────────────────────────────────────
 
+/**
+ * Compute the due date (UTC midnight, ISO) of the next occurrence after
+ * completing a recurring todo. Advances from `currentDue` (or now, if the
+ * todo had no due date) by the cadence, then clamps the result to be strictly
+ * after today — so completing a long-overdue daily todo schedules tomorrow,
+ * not yesterday, and the next instance can never be born already overdue.
+ */
 export function computeNextDue(
   currentDue: string | undefined,
   recurrence: "daily" | "weekly" | "weekdays"
 ): string | null {
-  const base = currentDue ? new Date(currentDue) : new Date();
-  // Ensure next due is strictly after today
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-
-  let next = new Date(base);
+  const next = currentDue ? new Date(currentDue) : new Date();
 
   switch (recurrence) {
     case "daily":
@@ -193,17 +195,19 @@ export function computeNextDue(
 
     case "weekdays": {
       next.setUTCDate(next.getUTCDate() + 1);
-      // Skip weekend
-      const dow = next.getUTCDay();
-      if (dow === 0) next.setUTCDate(next.getUTCDate() + 1); // Sunday → Monday
-      if (dow === 6) next.setUTCDate(next.getUTCDate() + 2); // Saturday → Monday
+      const dayOfWeek = next.getUTCDay();
+      if (dayOfWeek === 0) next.setUTCDate(next.getUTCDate() + 1); // Sunday → Monday
+      if (dayOfWeek === 6) next.setUTCDate(next.getUTCDate() + 2); // Saturday → Monday
       break;
     }
   }
 
-  // Guard: next due must be strictly after today (infinite-loop guard)
-  if (next <= today) {
-    next = new Date(today);
+  // Infinite-loop guard: never schedule on/before today. If the advanced date
+  // still isn't in the future (e.g. the todo was long overdue), use tomorrow.
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+  if (next <= todayStart) {
+    next.setTime(todayStart.getTime());
     next.setUTCDate(next.getUTCDate() + 1);
   }
 

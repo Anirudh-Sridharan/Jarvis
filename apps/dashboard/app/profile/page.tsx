@@ -15,21 +15,10 @@
 
 import type { WidgetEnvelope, ProfileContract } from "@/app/lib/contracts";
 import ProfileView from "@/app/components/ProfileView";
+import { fetchEnvelope } from "@/app/lib/fetchEnvelope";
 
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
-
-async function fetchProfile(): Promise<WidgetEnvelope<ProfileContract>> {
-  try {
-    const res = await fetch(`${BASE}/api/profile`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<ProfileContract>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Profile service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
+function fetchProfile(): Promise<WidgetEnvelope<ProfileContract>> {
+  return fetchEnvelope<ProfileContract>("/api/profile", "Profile service unreachable");
 }
 
 export default async function ProfilePage() {

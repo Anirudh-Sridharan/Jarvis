@@ -177,8 +177,9 @@ export class ConsolidationService {
     try {
       for (const fact of newFacts) {
         const importance = await this.scoreImportance(fact);
-        const db = (this.store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
-        db.prepare(`UPDATE facts SET importance = ? WHERE id = ?`).run(importance, fact.id);
+        this.store.rawDb
+          .prepare(`UPDATE facts SET importance = ? WHERE id = ?`)
+          .run(importance, fact.id);
       }
     } catch (err) {
       run.errors.push({ stage: 6, message: String(err) });
@@ -335,8 +336,9 @@ ${bodySample || "(none)"}
       provenance: { source: "consolidation", sourceId: `insight:${ins.id}`, confidence: 0.7 },
     });
     // Carry the insight's salience onto the episode for retrieval weighting.
-    const db = (this.store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
-    db.prepare(`UPDATE episodes SET importance = ? WHERE id = ?`).run(ins.importance, ep.id);
+    this.store.rawDb
+      .prepare(`UPDATE episodes SET importance = ? WHERE id = ?`)
+      .run(ins.importance, ep.id);
   }
 
   private async scoreImportance(fact: Fact): Promise<number> {

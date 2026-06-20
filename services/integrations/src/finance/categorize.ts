@@ -31,8 +31,8 @@ export const BUILT_IN_RULES: CategoryRule[] = [
 ];
 
 function ruleMatches(rule: CategoryRule, txn: Transaction): boolean {
-  const d = txn.description.toLowerCase();
-  return rule.keywords.some((k) => d.includes(k));
+  const description = txn.description.toLowerCase();
+  return rule.keywords.some((keyword) => description.includes(keyword));
 }
 
 export interface AiFallback {
@@ -45,6 +45,12 @@ export interface AiFallback {
   }): Promise<{ categoryId: string; confidence: number }>;
 }
 
+/**
+ * Assign a category to a transaction. Deterministic rules run first (user
+ * rules before built-ins, first keyword match wins); only if none match and
+ * an enabled AI fallback clears its confidence threshold is an AI category
+ * used. Anything else stays `uncategorized` — we never guess.
+ */
 export async function categorize(
   txn: Transaction,
   rules: CategoryRule[],
@@ -52,31 +58,33 @@ export async function categorize(
   categories?: Category[],
 ): Promise<Transaction> {
   // 1. Deterministic rules — user rules first, first match wins.
-  const ordered = [...rules].sort((a, b) => Number(b.isUser) - Number(a.isUser));
-  for (const r of ordered) {
-    if (ruleMatches(r, txn)) {
-      return { ...txn, categoryId: r.categoryId, categorySource: r.isUser ? "user" : "rule" };
+  const userRulesFirst = [...rules].sort((a, b) => Number(b.isUser) - Number(a.isUser));
+  for (const rule of userRulesFirst) {
+    if (ruleMatches(rule, txn)) {
+      return { ...txn, categoryId: rule.categoryId, categorySource: rule.isUser ? "user" : "rule" };
     }
   }
+
   // 2. Optional AI fallback — only metadata exposed, never on rule matches.
   if (ai?.enabled && categories) {
     try {
-      const res = await ai.classify({
+      const guess = await ai.classify({
         description: txn.description,
         amountMinor: txn.amountMinor,
-        categories: categories.map((c) => c.name),
+        categories: categories.map((category) => category.name),
       });
-      if (res.confidence >= ai.threshold) {
+      if (guess.confidence >= ai.threshold) {
         return {
           ...txn,
-          categoryId: res.categoryId,
+          categoryId: guess.categoryId,
           categorySource: "ai",
-          categoryConfidence: res.confidence,
+          categoryConfidence: guess.confidence,
         };
       }
     } catch {
       // AI failure → safe default below
     }
   }
+
   return { ...txn, categoryId: UNCATEGORIZED, categorySource: "none" };
 }

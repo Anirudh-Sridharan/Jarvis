@@ -6,7 +6,6 @@
  */
 
 import type {
-  WidgetEnvelope,
   FinanceOverviewContract,
   TransactionContract,
   MetricSeriesContract,
@@ -16,22 +15,7 @@ import { formatMinor } from "@/app/lib/money";
 import MetricChart from "@/app/components/MetricChart";
 import CashflowChart from "@/app/components/CashflowChart";
 import { EmptyState, ErrorState } from "@/app/components/WidgetStates";
-
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
-
-async function fetchJson<T>(path: string): Promise<WidgetEnvelope<T>> {
-  try {
-    const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<T>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
-}
+import { fetchEnvelope as fetchJson } from "@/app/lib/fetchEnvelope";
 
 const ACCOUNT_TYPE_LABEL: Record<string, string> = {
   checking: "Checking",

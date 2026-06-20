@@ -95,6 +95,11 @@ export type {
 
 export { makeMetricId } from "./framework/metricStore.js";
 export { MetricStore } from "./framework/metricStore.js";
+// Connector-authoring helpers (see services/integrations/CONNECTORS.md):
+export { metricPointFactory, ADAPTER_VERSION } from "./framework/normalize.js";
+export type { MetricPointInput } from "./framework/normalize.js";
+export { fetchAllPages } from "./framework/pagination.js";
+export type { Page } from "./framework/pagination.js";
 export { ConnectorRegistry } from "./framework/registry.js";
 export { Scheduler, isDue } from "./framework/scheduler.js";
 export type { EventSink, SchedulerConfig } from "./framework/scheduler.js";
@@ -154,6 +159,7 @@ export { httpError, httpErrorDetail } from "./framework/httpError.js";
 export {
   getOAuthProvider,
   getRefreshConfig,
+  getOAuthAccessToken,
   requireClientCredentials,
   isOAuthSource,
 } from "./framework/providers.js";
@@ -230,7 +236,9 @@ export function createIntegrations(config: IntegrationsConfig): IntegrationsSyst
   const briefing = new BriefingService(metrics, calendarMirror, todos, config.llm);
   const financeStore = new FinanceStore(db);
 
-  // Register default connectors
+  // Register default connectors. To add a new source, implement the Connector
+  // interface (see services/integrations/CONNECTORS.md for the step-by-step
+  // guide) and add one register() call here.
   const connectors = new ConnectorRegistry();
   connectors.register(whoopConnector);
   connectors.register(appleHealthConnector);

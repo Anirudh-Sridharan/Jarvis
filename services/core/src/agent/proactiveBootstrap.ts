@@ -26,6 +26,11 @@ import type { MemorySystem } from "@jarvis/memory";
 let bootstrapped = false;
 const registeredTriggerIds: { consolidation?: string; briefing?: string } = {};
 
+/** Normalize a thrown value to a string message for job-failure summaries. */
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export interface ProactiveBootstrapDeps {
   agentSystem: AgentSystem;
   integrations: Pick<IntegrationsSystem, "briefing" | "metrics">;
@@ -73,13 +78,11 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
           },
         };
       } catch (err) {
+        const message = errMsg(err);
         return {
           status: "failed",
-          summary: `Consolidation failed: ${err instanceof Error ? err.message : String(err)}`,
-          error: {
-            code: "consolidation-error",
-            message: err instanceof Error ? err.message : String(err),
-          },
+          summary: `Consolidation failed: ${message}`,
+          error: { code: "consolidation-error", message },
         };
       }
     },
@@ -112,13 +115,11 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
           },
         };
       } catch (err) {
+        const message = errMsg(err);
         return {
           status: "failed",
-          summary: `Briefing failed: ${err instanceof Error ? err.message : String(err)}`,
-          error: {
-            code: "briefing-error",
-            message: err instanceof Error ? err.message : String(err),
-          },
+          summary: `Briefing failed: ${message}`,
+          error: { code: "briefing-error", message },
         };
       }
     },

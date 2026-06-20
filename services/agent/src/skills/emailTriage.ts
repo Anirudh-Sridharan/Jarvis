@@ -215,23 +215,10 @@ async function categorizeAndDraft(
       ? (parsed.category as Category)
       : "fyi";
 
-    const draft: EmailDraft | undefined =
+    // Only needs_reply threads carry a draft; everything else is informational.
+    const draft =
       category === "needs_reply" && parsed.draft
-        ? {
-            to: Array.isArray(parsed.draft.to)
-              ? parsed.draft.to
-              : [String(parsed.draft.to)],
-            subject: String(parsed.draft.subject ?? ""),
-            body: String(parsed.draft.body ?? ""),
-            threadId,
-            risk: ctx.isKnownContact(
-              (Array.isArray(parsed.draft.to)
-                ? (parsed.draft.to[0] ?? "")
-                : String(parsed.draft.to)) ?? "",
-            )
-              ? "normal"
-              : "new_recipient",
-          }
+        ? buildDraft(parsed.draft, threadId, ctx)
         : undefined;
 
     results.push({
@@ -243,4 +230,25 @@ async function categorizeAndDraft(
   }
 
   return results;
+}
+
+/**
+ * Coerce the model's loosely-typed draft into an EmailDraft. The recipient
+ * list is normalized to an array (the model sometimes emits a bare string),
+ * and the draft is risk-tagged "new_recipient" unless the first recipient is
+ * a known contact — which downstream feeds the policy's new-recipient rule.
+ */
+function buildDraft(
+  rawDraft: { to: string[]; subject: string; body: string },
+  threadId: string,
+  ctx: SkillCtx,
+): EmailDraft {
+  const to = Array.isArray(rawDraft.to) ? rawDraft.to : [String(rawDraft.to)];
+  return {
+    to,
+    subject: String(rawDraft.subject ?? ""),
+    body: String(rawDraft.body ?? ""),
+    threadId,
+    risk: ctx.isKnownContact(to[0] ?? "") ? "normal" : "new_recipient",
+  };
 }

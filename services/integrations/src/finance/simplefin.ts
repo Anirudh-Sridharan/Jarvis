@@ -120,16 +120,16 @@ export async function syncSimpleFin(
   const balances: AccountBalance[] = [];
   const txns: Transaction[] = [];
 
-  for (const a of raw.accounts) {
-    const type = inferAccountType(a.name, a.org);
-    const accountId = stableAccountId(a.id);
-    const currency = a.currency ?? "USD";
+  for (const rawAccount of raw.accounts) {
+    const type = inferAccountType(rawAccount.name, rawAccount.org);
+    const accountId = stableAccountId(rawAccount.id);
+    const currency = rawAccount.currency ?? "USD";
     accounts.push({
       id: accountId,
-      sourceId: a.id,
+      sourceId: rawAccount.id,
       connectorId: client.connectorId,
-      name: a.name,
-      institution: maskInstitution(a.org?.name ?? "Unknown"),
+      name: rawAccount.name,
+      institution: maskInstitution(rawAccount.org?.name ?? "Unknown"),
       type,
       currency,
       isAsset: type !== "credit" && type !== "loan",
@@ -138,26 +138,26 @@ export async function syncSimpleFin(
     });
     balances.push({
       accountId,
-      amountMinor: toMinor(a.balance),
+      amountMinor: toMinor(rawAccount.balance),
       currency,
-      asOf: isoFromEpoch(a["balance-date"]),
+      asOf: isoFromEpoch(rawAccount["balance-date"]),
       capturedAt: now,
     });
-    for (const t of a.transactions ?? []) {
-      const posted = t.posted ? isoFromEpoch(t.posted) : null;
+    for (const rawTxn of rawAccount.transactions ?? []) {
+      const postedAt = rawTxn.posted ? isoFromEpoch(rawTxn.posted) : null;
       txns.push({
-        id: internalTxnId(a.id, t.id),
-        sourceTxnId: t.id ?? null,
+        id: internalTxnId(rawAccount.id, rawTxn.id),
+        sourceTxnId: rawTxn.id ?? null,
         accountId,
-        amountMinor: toMinor(t.amount),
+        amountMinor: toMinor(rawTxn.amount),
         currency,
-        description: (t.description ?? t.payee ?? "").trim(),
-        postedAt: posted,
-        pendingAt: t.pending ? now : null,
-        status: t.pending ? "pending" : "posted",
+        description: (rawTxn.description ?? rawTxn.payee ?? "").trim(),
+        postedAt,
+        pendingAt: rawTxn.pending ? now : null,
+        status: rawTxn.pending ? "pending" : "posted",
         categoryId: "uncategorized",
         categorySource: "none",
-        dedupeHash: hashTxn(a.id, posted, t.amount, t.description),
+        dedupeHash: hashTxn(rawAccount.id, postedAt, rawTxn.amount, rawTxn.description),
       });
     }
   }

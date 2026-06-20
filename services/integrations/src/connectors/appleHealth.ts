@@ -19,9 +19,7 @@ import type {
   MetricPoint,
   TokenStore,
 } from "../types.js";
-import { makeMetricId } from "../framework/metricStore.js";
-
-const ADAPTER_VERSION = "1";
+import { metricPointFactory } from "../framework/normalize.js";
 
 // Connector stub (push-only: sync is a no-op)
 export const appleHealthConnector: Connector = {
@@ -117,7 +115,7 @@ function convertUnit(value: number, fromUnit: string | undefined, toUnit: string
  * Idempotent: same data produces same MetricPoint ids → safe to re-POST.
  */
 export function ingestAppleHealth(body: HAEBody): MetricPoint[] {
-  const now = new Date().toISOString();
+  const point = metricPointFactory("apple_health");
   const points: MetricPoint[] = [];
 
   for (const metric of body.data?.metrics ?? []) {
@@ -137,19 +135,8 @@ export function ingestAppleHealth(body: HAEBody): MetricPoint[] {
       if (new Date(ts).getTime() > Date.now() + 5 * 60_000) continue;
 
       const value = convertUnit(rawValue, sample.units ?? metric.units, mapping.unit);
-      const dims: Record<string, string> = {};
 
-      points.push({
-        id: makeMetricId({ source: "apple_health", metric: mapping.metric, ts, dims }),
-        source: "apple_health",
-        metric: mapping.metric,
-        value,
-        unit: mapping.unit,
-        ts,
-        dims,
-        ingestedAt: now,
-        adapterVersion: ADAPTER_VERSION,
-      });
+      points.push(point({ metric: mapping.metric, value, unit: mapping.unit, ts }));
     }
   }
 

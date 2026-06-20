@@ -29,10 +29,18 @@ import type { CalendarMirror } from "../connectors/googleCalendar.js";
 import type { TodoStore } from "../work/todos.js";
 
 export interface BriefingConfig {
+  /** Word cap applied to LLM-generated prose (default 200). */
   maxWords?: number;
+  /** IANA timezone used to render event times (default "UTC"). */
   timezone?: string;
 }
 
+/**
+ * Assembles the daily morning briefing by gathering deterministic facts
+ * (sleep, agenda, todos) and then paraphrasing them via the LLM — falling
+ * back to a fixed template when the LLM is unavailable. See the file header
+ * for the determinism guarantee.
+ */
 export class BriefingService {
   constructor(
     private metricStore: MetricStore,
@@ -42,6 +50,11 @@ export class BriefingService {
     private config: BriefingConfig = {}
   ) {}
 
+  /**
+   * Build the briefing for `date` (defaults to today, UTC). Never throws on
+   * LLM failure: it degrades to the deterministic template and records that
+   * via `generatedBy: "template"`.
+   */
   async assembleBriefing(date?: string): Promise<BriefingDoc> {
     const briefingDate = date ?? todayDate();
     const id = randomUUID();
@@ -76,18 +89,11 @@ export class BriefingService {
   }
 
   private async gatherContext(date: string): Promise<BriefingContext> {
-    const now = new Date().toISOString();
-    const dayStart = `${date}T00:00:00Z`;
-    const dayEnd = `${date}T23:59:59Z`;
+    const gatheredAt = new Date().toISOString();
 
-    // Sleep + HRV from MetricStore
-    const sleep = await this.gatherSleep(date, now);
-
-    // Calendar agenda for today
-    const agenda = await this.gatherAgenda(date, dayStart, dayEnd, now);
-
-    // Todos due today + overdue
-    const todos = this.gatherTodos(date, now);
+    const sleep = await this.gatherSleep(date, gatheredAt);
+    const agenda = await this.gatherAgenda(date, gatheredAt);
+    const todos = this.gatherTodos(date, gatheredAt);
 
     return {
       date,
@@ -98,89 +104,85 @@ export class BriefingService {
     };
   }
 
-  private async gatherSleep(date: string, now: string): Promise<SleepInput | null> {
+  private async gatherSleep(date: string, gatheredAt: string): Promise<SleepInput | null> {
     // Look back one day for sleep data (T+1 pattern: sleep data arrives morning after)
-    const prevDay = prevDate(date);
-    const from = `${prevDay}T00:00:00Z`;
+    const previousDay = prevDate(date);
+    const from = `${previousDay}T00:00:00Z`;
     const to = `${date}T12:00:00Z`;
 
-    const durationSeries = this.metricStore.querySeries("sleep.duration_min", { from, to });
-    const recoverySeries = this.metricStore.querySeries("recovery", { from, to });
-    const hrvSeries = this.metricStore.querySeries("hrv", { from, to });
+    // Use the most recent point in the window for each series.
+    const lastDurationPoint = lastPoint(this.metricStore.querySeries("sleep.duration_min", { from, to }));
+    const lastRecoveryPoint = lastPoint(this.metricStore.querySeries("recovery", { from, to }));
 
-    const sleepPt = durationSeries.points[durationSeries.points.length - 1];
-    const recovPt = recoverySeries.points[recoverySeries.points.length - 1];
-    const hrvPt = hrvSeries.points[hrvSeries.points.length - 1];
-
-    if (!sleepPt && !recovPt) return null;
+    if (!lastDurationPoint && !lastRecoveryPoint) return null;
 
     // Missing duration point ≠ "slept 0h" — keep it null so renderers can
     // mark the duration as unknown instead of stating 0h as fact.
-    const hoursSlept = sleepPt ? sleepPt.value / 60 : null;
-    const recoveryPct = recovPt?.value ?? 0;
+    const hoursSlept = lastDurationPoint ? lastDurationPoint.value / 60 : null;
+    const recoveryPct = lastRecoveryPoint?.value ?? 0;
 
     const recovery: SleepInput["recovery"] =
       recoveryPct >= 67 ? "high" : recoveryPct >= 34 ? "ok" : "low";
 
     return {
-      score: recovPt?.value ?? 0,
+      score: lastRecoveryPoint?.value ?? 0,
       hoursSlept: hoursSlept == null ? null : Math.round(hoursSlept * 10) / 10,
       recovery,
       source: {
         feature: "10",
-        gatheredAt: now,
-        stale: hoursSlept == null && recovPt == null,
+        gatheredAt,
+        stale: hoursSlept == null && lastRecoveryPoint == null,
       },
     };
   }
 
-  private async gatherAgenda(
-    date: string,
-    dayStart: string,
-    dayEnd: string,
-    now: string
-  ): Promise<AgendaInput | null> {
+  private async gatherAgenda(date: string, gatheredAt: string): Promise<AgendaInput | null> {
+    const dayStart = `${date}T00:00:00Z`;
+    const dayEnd = `${date}T23:59:59Z`;
     try {
       const events = this.calendarMirror.getEvents("primary", dayStart, dayEnd);
       return {
-        events: events.map((e) => ({
-          time: e.start.dateTime
-            ? new Date(e.start.dateTime).toLocaleTimeString("en-US", {
+        events: events.map((event) => ({
+          time: event.start.dateTime
+            ? new Date(event.start.dateTime).toLocaleTimeString("en-US", {
                 hour12: false,
                 hour: "2-digit",
                 minute: "2-digit",
                 timeZone: this.config.timezone ?? "UTC",
               })
             : "all-day",
-          title: e.summary,
-          key: e.attendees.length > 2, // multi-person meetings are "key"
+          title: event.summary,
+          key: event.attendees.length > 2, // multi-person meetings are "key"
         })),
-        source: { feature: "12", gatheredAt: now, stale: false },
+        source: { feature: "12", gatheredAt, stale: false },
       };
     } catch {
       return null;
     }
   }
 
-  private gatherTodos(date: string, now: string): TodoInput | null {
+  private gatherTodos(date: string, gatheredAt: string): TodoInput | null {
     try {
       const overdue = this.todoStore.overdue(new Date());
-      const allOpen = this.todoStore.listTodos({ status: "open" });
-      const dueToday = allOpen.filter(
-        (t) => t.due && t.due.slice(0, 10) === date
-      );
+      const overdueIds = new Set(overdue.map((todo) => todo.id));
 
-      const combined = [
-        ...overdue.map((t) => ({ title: t.text, priority: "high" as const })),
-        ...dueToday.filter((t) => !overdue.find((o) => o.id === t.id))
-          .map((t) => ({ title: t.text, priority: "med" as const })),
+      // Open todos whose due-date falls on `date` but that aren't already
+      // overdue — those are surfaced separately at high priority below.
+      const dueTodayNotOverdue = this.todoStore
+        .listTodos({ status: "open" })
+        .filter((todo) => todo.due?.slice(0, 10) === date && !overdueIds.has(todo.id));
+
+      // Overdue first (high), then the remaining due-today items (med).
+      const items = [
+        ...overdue.map((todo) => ({ title: todo.text, priority: "high" as const })),
+        ...dueTodayNotOverdue.map((todo) => ({ title: todo.text, priority: "med" as const })),
       ];
 
-      if (combined.length === 0) return null;
+      if (items.length === 0) return null;
 
       return {
-        dueToday: combined,
-        source: { feature: "13", gatheredAt: now, stale: false },
+        dueToday: items,
+        source: { feature: "13", gatheredAt, stale: false },
       };
     } catch {
       return null;
@@ -205,6 +207,11 @@ export class BriefingService {
 
 // ── Deterministic template fallback ───────────────────────────────────────────
 
+/**
+ * Render the briefing from fixed sentence templates — the LLM-free fallback.
+ * Output is factually identical to the LLM path (same numbers/titles), just
+ * with deterministic phrasing. Exported because tests pin this exact format.
+ */
 export function renderTemplateBrief(context: BriefingContext): string {
   const lines: string[] = [];
   const dateStr = formatDate(context.date);
@@ -215,16 +222,16 @@ export function renderTemplateBrief(context: BriefingContext): string {
   // Sleep / Recovery
   if (context.sleep) {
     const { hoursSlept, recovery } = context.sleep;
-    const recMsg = {
+    const recoveryMessage = {
       low: "Recovery is **low** — go easy today.",
       ok: "Recovery is **ok**.",
       high: "Recovery is **high** — great day for demanding work.",
     }[recovery];
     if (hoursSlept == null) {
       // Recovery exists but no duration point — don't state "0h" as fact.
-      lines.push(`🌙 No sleep duration recorded for last night. ${recMsg}`);
+      lines.push(`🌙 No sleep duration recorded for last night. ${recoveryMessage}`);
     } else {
-      lines.push(`🌙 You slept **${hoursSlept}h** last night. ${recMsg}`);
+      lines.push(`🌙 You slept **${hoursSlept}h** last night. ${recoveryMessage}`);
     }
     lines.push("");
   } else {
@@ -236,9 +243,9 @@ export function renderTemplateBrief(context: BriefingContext): string {
   if (context.agenda && context.agenda.events.length > 0) {
     const { events } = context.agenda;
     lines.push(`📅 ${events.length} event${events.length !== 1 ? "s" : ""} today:`);
-    for (const e of events) {
-      const keyMark = e.key ? " *(key)*" : "";
-      lines.push(`- ${e.time} — ${e.title}${keyMark}`);
+    for (const event of events) {
+      const keyMark = event.key ? " *(key)*" : "";
+      lines.push(`- ${event.time} — ${event.title}${keyMark}`);
     }
     lines.push("");
   } else {
@@ -249,17 +256,17 @@ export function renderTemplateBrief(context: BriefingContext): string {
   // Todos
   if (context.todos && context.todos.dueToday.length > 0) {
     const { dueToday } = context.todos;
-    const highPri = dueToday.filter((t) => t.priority === "high");
-    const others = dueToday.filter((t) => t.priority !== "high");
+    const overdue = dueToday.filter((todo) => todo.priority === "high");
+    const remaining = dueToday.filter((todo) => todo.priority !== "high");
 
     lines.push(
       `✅ ${dueToday.length} todo${dueToday.length !== 1 ? "s" : ""} due today:`
     );
-    for (const t of highPri) {
-      lines.push(`- **${t.title}** (overdue)`);
+    for (const todo of overdue) {
+      lines.push(`- **${todo.title}** (overdue)`);
     }
-    for (const t of others) {
-      lines.push(`- ${t.title}`);
+    for (const todo of remaining) {
+      lines.push(`- ${todo.title}`);
     }
     lines.push("");
   }
@@ -294,8 +301,8 @@ function buildLlmPrompt(context: BriefingContext): string {
 
   if (context.agenda) {
     parts.push("Calendar events today:");
-    for (const e of context.agenda.events) {
-      parts.push(`  ${e.time} ${e.title}${e.key ? " [KEY]" : ""}`);
+    for (const event of context.agenda.events) {
+      parts.push(`  ${event.time} ${event.title}${event.key ? " [KEY]" : ""}`);
     }
   } else {
     parts.push("Calendar: no events");
@@ -303,19 +310,24 @@ function buildLlmPrompt(context: BriefingContext): string {
 
   if (context.todos) {
     parts.push("Todos due:");
-    for (const t of context.todos.dueToday) {
-      parts.push(`  [${t.priority}] ${t.title}`);
+    for (const todo of context.todos.dueToday) {
+      parts.push(`  [${todo.priority}] ${todo.title}`);
     }
   }
 
   if (context.insights) {
     parts.push("Insights:");
-    for (const i of context.insights.digest) {
-      parts.push(`  - ${i}`);
+    for (const insight of context.insights.digest) {
+      parts.push(`  - ${insight}`);
     }
   }
 
   return parts.join("\n");
+}
+
+/** Most recent point in a metric series (series are returned oldest-first). */
+function lastPoint<P>(series: { points: P[] }): P | undefined {
+  return series.points[series.points.length - 1];
 }
 
 function formatDate(date: string): string {

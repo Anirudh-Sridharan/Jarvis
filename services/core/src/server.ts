@@ -23,6 +23,7 @@ import "./loadEnv.js"; // MUST be first: populates process.env from .env before 
 import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { cors } from "hono/cors";
 import { stream } from "hono/streaming";
 import { z } from "zod";
@@ -97,6 +98,33 @@ app.use(
   }),
 );
 
+// ── Shared request helpers ────────────────────────────────────────────────────
+
+/** Normalize a thrown value to a string message for error responses. */
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Set the three Server-Sent-Events response headers on a Hono context. */
+function setSseHeaders(c: Context): void {
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+}
+
+/**
+ * Parse a JSON request body, returning the parsed value or a sentinel so the
+ * caller can answer 400 without nesting a try/catch on every route.
+ */
+const INVALID_JSON = Symbol("invalid-json");
+async function readJsonBody(c: Context): Promise<unknown | typeof INVALID_JSON> {
+  try {
+    return await c.req.json();
+  } catch {
+    return INVALID_JSON;
+  }
+}
+
 app.get("/healthz", (c) => c.json({ ok: true }));
 
 app.get("/telemetry", (c) => {
@@ -144,7 +172,7 @@ app.post("/warmup", async (c) => {
       ok: false,
       state,
       modelId: entry.id,
-      error: err instanceof Error ? err.message : String(err),
+      error: errMsg(err),
     }, 503);
   }
   const state = gateway.modelManager.getState();
@@ -178,10 +206,8 @@ const chatBodySchema = z.object({
 });
 
 app.post("/chat", async (c) => {
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
+  const body = await readJsonBody(c);
+  if (body === INVALID_JSON) {
     return c.json({ ok: false, error: "Invalid JSON body" }, 400);
   }
   const parsed = chatBodySchema.safeParse(body);
@@ -193,9 +219,7 @@ app.post("/chat", async (c) => {
   // Bridge client disconnects to the upstream generation via AbortController.
   const ac = new AbortController();
 
-  c.header("Content-Type", "text/event-stream");
-  c.header("Cache-Control", "no-cache");
-  c.header("Connection", "keep-alive");
+  setSseHeaders(c);
 
   return stream(c, async (s) => {
     s.onAbort(() => ac.abort());
@@ -219,10 +243,7 @@ app.post("/chat", async (c) => {
         }
       }
     } catch (err) {
-      await send({
-        type: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      await send({ type: "error", message: errMsg(err) });
     }
   });
 });
@@ -238,101 +259,94 @@ app.post("/chat", async (c) => {
 bootstrapLiveAgent(gateway);
 const currentAgentBag = () => getAgentSystem(gateway, null) ?? bootstrapLiveAgent(gateway);
 
+/**
+ * Resolve the agent bag and run `handler` with it, or answer 503 if the agent
+ * system is unavailable. Centralizes the guard every /agent, /approvals/*, and
+ * /audit route would otherwise repeat.
+ */
+function withAgentBag(
+  c: Context,
+  handler: (bag: NonNullable<ReturnType<typeof currentAgentBag>>) => Response | Promise<Response>,
+): Response | Promise<Response> {
+  const agentBag = currentAgentBag();
+  if (!agentBag) {
+    return c.json({ ok: false, error: "Agent system not available" }, 503);
+  }
+  return handler(agentBag);
+}
+
 const agentBodySchema = z.object({
   goal: z.string().min(1),
 });
 
-app.post("/agent", async (c) => {
-  const agentBag = currentAgentBag();
-  if (!agentBag) {
-    return c.json({ ok: false, error: "Agent system not available" }, 503);
-  }
-
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ ok: false, error: "Invalid JSON body" }, 400);
-  }
-  const parsed = agentBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ ok: false, error: parsed.error.message }, 400);
-  }
-  const { goal } = parsed.data;
-
-  c.header("Content-Type", "text/event-stream");
-  c.header("Cache-Control", "no-cache");
-  c.header("Connection", "keep-alive");
-
-  return stream(c, async (s) => {
-    const send = async (obj: unknown) => {
-      await s.write(`data: ${JSON.stringify(obj)}\n\n`);
-    };
-    try {
-      await send({ type: "status", state: "planning" });
-      const result = await agentBag.agentSystem.agent.run(goal, { source: "chat" });
-      await send({ type: "done", runId: result.run.id, status: result.run.status, result: result.run.result });
-    } catch (err) {
-      await send({
-        type: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+app.post("/agent", (c) =>
+  withAgentBag(c, async (agentBag) => {
+    const body = await readJsonBody(c);
+    if (body === INVALID_JSON) {
+      return c.json({ ok: false, error: "Invalid JSON body" }, 400);
     }
-  });
-});
+    const parsed = agentBodySchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ ok: false, error: parsed.error.message }, 400);
+    }
+    const { goal } = parsed.data;
 
-app.get("/approvals", (c) => {
-  const agentBag = currentAgentBag();
-  if (!agentBag) {
-    return c.json({ ok: false, error: "Agent system not available" }, 503);
-  }
-  return c.json({ ok: true, pending: agentBag.approvalQueue.list() });
-});
+    setSseHeaders(c);
 
-app.post("/approvals/:id/approve", async (c) => {
-  const agentBag = currentAgentBag();
-  if (!agentBag) {
-    return c.json({ ok: false, error: "Agent system not available" }, 503);
-  }
-  const requestId = c.req.param("id");
-  const ok = agentBag.approvalQueue.approve(requestId, "user");
-  if (!ok) {
-    return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
-  }
-  return c.json({ ok: true, requestId, status: "approved" });
-});
+    return stream(c, async (s) => {
+      const send = async (obj: unknown) => {
+        await s.write(`data: ${JSON.stringify(obj)}\n\n`);
+      };
+      try {
+        await send({ type: "status", state: "planning" });
+        const result = await agentBag.agentSystem.agent.run(goal, { source: "chat" });
+        await send({ type: "done", runId: result.run.id, status: result.run.status, result: result.run.result });
+      } catch (err) {
+        await send({ type: "error", message: errMsg(err) });
+      }
+    });
+  }),
+);
 
-app.post("/approvals/:id/reject", async (c) => {
-  const agentBag = currentAgentBag();
-  if (!agentBag) {
-    return c.json({ ok: false, error: "Agent system not available" }, 503);
-  }
-  const requestId = c.req.param("id");
-  const ok = agentBag.approvalQueue.reject(requestId, "user");
-  if (!ok) {
-    return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
-  }
-  return c.json({ ok: true, requestId, status: "rejected" });
-});
+app.get("/approvals", (c) =>
+  withAgentBag(c, (agentBag) =>
+    c.json({ ok: true, pending: agentBag.approvalQueue.list() }),
+  ),
+);
 
-const AUDIT_DEFAULT_LIMIT = 100;
+app.post("/approvals/:id/approve", (c) =>
+  withAgentBag(c, (agentBag) => {
+    const requestId = c.req.param("id");
+    const ok = agentBag.approvalQueue.approve(requestId, "user");
+    if (!ok) {
+      return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
+    }
+    return c.json({ ok: true, requestId, status: "approved" });
+  }),
+);
 
-app.get("/audit", (c) => {
-  const agentBag = currentAgentBag();
-  if (!agentBag) {
-    return c.json({ ok: false, error: "Agent system not available" }, 503);
-  }
-  try {
-    const verify = agentBag.agentSystem.audit.verifyChain();
-    const count = agentBag.agentSystem.audit.count;
-    return c.json({ ok: true, count, chainValid: verify.ok, brokenAt: verify.brokenAt ?? null });
-  } catch (err) {
-    return c.json({
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    }, 500);
-  }
-});
+app.post("/approvals/:id/reject", (c) =>
+  withAgentBag(c, (agentBag) => {
+    const requestId = c.req.param("id");
+    const ok = agentBag.approvalQueue.reject(requestId, "user");
+    if (!ok) {
+      return c.json({ ok: false, error: `Approval request not found: ${requestId}` }, 404);
+    }
+    return c.json({ ok: true, requestId, status: "rejected" });
+  }),
+);
+
+app.get("/audit", (c) =>
+  withAgentBag(c, (agentBag) => {
+    try {
+      const verify = agentBag.agentSystem.audit.verifyChain();
+      const count = agentBag.agentSystem.audit.count;
+      return c.json({ ok: true, count, chainValid: verify.ok, brokenAt: verify.brokenAt ?? null });
+    } catch (err) {
+      return c.json({ ok: false, error: errMsg(err) }, 500);
+    }
+  }),
+);
 
 // ── Voice session (dashboard HUD: features 7+8 hands-free mode) ──────────────
 
@@ -368,10 +382,8 @@ const wakePayloadSchema = z.object({
 });
 
 app.post("/voice/wake", async (c) => {
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
+  const body = await readJsonBody(c);
+  if (body === INVALID_JSON) {
     return c.json({ ok: false, error: "Invalid JSON body" }, 400);
   }
   const parsed = wakePayloadSchema.safeParse(body);
@@ -394,9 +406,7 @@ app.post("/voice/wake", async (c) => {
 
 app.get("/voice/events", (c) => {
   const session = currentVoiceSession();
-  c.header("Content-Type", "text/event-stream");
-  c.header("Cache-Control", "no-cache");
-  c.header("Connection", "keep-alive");
+  setSseHeaders(c);
 
   return stream(c, async (s) => {
     const send = async (obj: unknown) => {

@@ -1,12 +1,19 @@
 /**
- * VoiceOrchestrator — wires the full pipeline with injected dependencies.
+ * VoiceOrchestrator — wires the full push-to-talk pipeline with injected deps.
  *
  * Flow:
  *   WakeWordSource.onWake() → CoreClient.warmup() + SttEngine.startStream()
  *   → TurnDetector decides end-of-turn
  *   → CoreClient.chatStream() → sentenceChunker → TtsEngine.speak()
- *   → bargeIn (speech_start during speaking) → cancel TTS + LLM + →listening
+ *   → barge-in cancels TTS + LLM and returns to listening
  *   → TurnLatencyTracker records per-stage timestamps
+ *
+ * Barge-in defaults to CONFIRMED mode (see OrchestratorConfig.bargeInMode and
+ * isEchoTranscript): because the live mic has no acoustic echo cancellation,
+ * raw VAD speech during playback is Jarvis's own speaker audio as often as the
+ * user, so a reply is only interrupted by a *final transcript* that is NOT an
+ * echo of what Jarvis recently said. "immediate" mode (legacy) cancels on the
+ * first speech_start and is only safe with echo-cancelled capture.
  *
  * All dependencies are injected so the orchestrator is fully testable with fakes.
  */
@@ -77,6 +84,13 @@ export type OrchestratorEvent =
 
 type EventListener = (event: OrchestratorEvent) => void;
 
+/**
+ * Drives one wake-to-reply voice session: listens via the STT engine, decides
+ * end-of-turn, streams the LLM reply through the sentence chunker into TTS, and
+ * applies the barge-in policy. State lives in an injected {@link SessionMachine};
+ * all I/O (wake/STT/TTS/core) is injected so the whole loop is testable with
+ * fakes. Subscribe to lifecycle/data updates via {@link on}.
+ */
 export class VoiceOrchestrator {
   private readonly machine: SessionMachine;
   private readonly bargeIn: BargeInPolicy;
@@ -137,6 +151,7 @@ export class VoiceOrchestrator {
     });
   }
 
+  /** Current session state (idle → waking → listening → thinking → speaking). */
   get state() {
     return this.machine.state;
   }
@@ -370,12 +385,12 @@ export class VoiceOrchestrator {
           // fires for Jarvis's own speaker audio. Cancellation waits for a
           // non-echo final (below).
           if (this.config.bargeInMode === "immediate") {
-            const handled = this.bargeIn.evaluate(
+            const bargeIn = this.bargeIn.evaluate(
               this.machine.state,
               this.bargeInHooks(),
               Date.now(),
             );
-            if (handled.acted) {
+            if (bargeIn.acted) {
               // Reset for new turn
               resetTurnTracking();
             }
@@ -407,12 +422,12 @@ export class VoiceOrchestrator {
             continue;
           }
           if (this.config.bargeInMode === "confirmed") {
-            const handled = this.bargeIn.evaluate(
+            const bargeIn = this.bargeIn.evaluate(
               this.machine.state,
               this.bargeInHooks(),
               Date.now(),
             );
-            if (handled.acted) {
+            if (bargeIn.acted) {
               // Fresh turn from this utterance: drop anything captured before
               // the interruption. Do NOT reset the turn detector — it has
               // already seen this utterance's speech_end, which is what lets
@@ -472,54 +487,21 @@ export class VoiceOrchestrator {
       speakingStartedAt: null,
     };
 
-    let firstTokenSeen = false;
-    const orchestrator = this;
-
     try {
-      // Build token stream from core SSE
+      // Build the pipeline lazily: core SSE tokens → first-token instrumentation
+      // → sentence chunker → first-chunk instrumentation → TTS. Nothing runs
+      // until tts.speak() pulls on it.
       const tokenStream = this.deps.core.chatStream(
         userText,
         sessionId,
         llmAbort.signal,
       );
-
-      // Wrap to intercept first token
-      async function* instrumentedTokens(): AsyncGenerator<string> {
-        for await (const token of tokenStream) {
-          if (!firstTokenSeen) {
-            firstTokenSeen = true;
-            latency.markLlmFirstToken();
-            // Transition to speaking on first token
-            if (orchestrator.machine.state === "thinking") {
-              orchestrator.machine.send("FIRST_TOKEN");
-            }
-          }
-          orchestrator.emit({ type: "token", text: token });
-          if (orchestrator.currentTurn) orchestrator.currentTurn.assistantText += token;
-          yield token;
-        }
-      }
-
-      // Pipe tokens through sentence chunker → TTS
-      const sentences = chunkSentences(instrumentedTokens(), {
-        minChars: orchestrator.config.minCharsPerChunk,
-        maxChars: orchestrator.config.maxCharsPerChunk,
+      const instrumentedTokens = this.instrumentTokens(tokenStream, latency);
+      const sentences = chunkSentences(instrumentedTokens, {
+        minChars: this.config.minCharsPerChunk,
+        maxChars: this.config.maxCharsPerChunk,
       });
-
-      let firstSentence = true;
-
-      async function* sentencesWithTracking(): AsyncGenerator<string> {
-        for await (const sentence of sentences) {
-          if (firstSentence) {
-            firstSentence = false;
-            latency.markFirstChunk();
-          }
-          orchestrator.emit({ type: "sentence", text: sentence });
-          yield sentence;
-        }
-      }
-
-      const sentenceIterable = sentencesWithTracking();
+      const sentenceIterable = this.instrumentSentences(sentences, latency);
 
       // Track when TTS starts/stops for barge-in debounce
       if (this.currentTurn) {
@@ -569,6 +551,49 @@ export class VoiceOrchestrator {
         };
       }
       this.currentTurn = null;
+    }
+  }
+
+  /**
+   * Wrap the raw LLM token stream to fire the first-token side effects exactly
+   * once: record TTFT latency, transition thinking → speaking, emit each token,
+   * and accumulate the reply text on the current turn (used by the echo guard).
+   */
+  private async *instrumentTokens(
+    tokens: AsyncIterable<string>,
+    latency: TurnLatencyTracker,
+  ): AsyncGenerator<string> {
+    let firstTokenSeen = false;
+    for await (const token of tokens) {
+      if (!firstTokenSeen) {
+        firstTokenSeen = true;
+        latency.markLlmFirstToken();
+        if (this.machine.state === "thinking") {
+          this.machine.send("FIRST_TOKEN");
+        }
+      }
+      this.emit({ type: "token", text: token });
+      if (this.currentTurn) this.currentTurn.assistantText += token;
+      yield token;
+    }
+  }
+
+  /**
+   * Wrap the chunked sentence stream to record first-chunk latency once and
+   * emit a `sentence` event for each sentence handed to TTS.
+   */
+  private async *instrumentSentences(
+    sentences: AsyncIterable<string>,
+    latency: TurnLatencyTracker,
+  ): AsyncGenerator<string> {
+    let firstSentence = true;
+    for await (const sentence of sentences) {
+      if (firstSentence) {
+        firstSentence = false;
+        latency.markFirstChunk();
+      }
+      this.emit({ type: "sentence", text: sentence });
+      yield sentence;
     }
   }
 

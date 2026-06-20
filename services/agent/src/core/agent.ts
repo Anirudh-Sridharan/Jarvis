@@ -66,6 +66,16 @@ export interface AgentRunResult {
   state: AgentState;
 }
 
+/**
+ * The run's result is the payload of the last successful observation. A failed
+ * or absent final observation leaves `run.result` undefined (callers treat that
+ * as "no result"). Centralized so the resume and finalize paths agree.
+ */
+function lastSuccessfulResult(state: AgentState): unknown {
+  const lastObs = state.observations[state.observations.length - 1];
+  return lastObs?.ok ? lastObs.result : undefined;
+}
+
 export class AgentRunner {
   constructor(private opts: AgentRunnerOptions) {}
 
@@ -103,10 +113,7 @@ export class AgentRunner {
       // Terminal checkpoint: never re-execute a finished run — resuming a
       // "done" run would replay side-effecting steps.
       if (state.status === "done" || state.status === "error") {
-        const lastObs = state.observations[state.observations.length - 1];
-        if (lastObs?.ok && lastObs.result !== undefined) {
-          run.result = lastObs.result;
-        }
+        run.result = lastSuccessfulResult(state);
         return { run, state };
       }
     } else {
@@ -195,11 +202,8 @@ export class AgentRunner {
       state.status = "done";
     }
 
-    // Extract the final result from the last observation
-    const lastObs = state.observations[state.observations.length - 1];
-    if (lastObs?.ok && lastObs.result !== undefined) {
-      run.result = lastObs.result;
-    }
+    // Extract the final result from the last observation.
+    run.result = lastSuccessfulResult(state);
 
     run.status = state.status;
     run.updatedAt = clock.isoNow();

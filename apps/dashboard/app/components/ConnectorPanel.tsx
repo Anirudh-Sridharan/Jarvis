@@ -1,5 +1,17 @@
 "use client";
 
+/**
+ * ConnectorPanel — the /settings/integrations connector list (feature 9 surface).
+ *
+ * Two delegated actions per source, both routed through the BFF so credentials
+ * stay off the dashboard's path:
+ *  - Connect: POST /api/connectors/connect spawns the consent flow, then this
+ *    component polls GET /api/connectors every 3s (up to ~5 min) until the
+ *    source's token flips to "connected".
+ *  - Sync now: POST /api/connectors/sync runs one CLI sync and shows its tail.
+ * It never reads or writes tokens itself — it only reflects derived state.
+ */
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ConnectorStatusContract,
@@ -55,6 +67,11 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
     };
   }, []);
 
+  /** Set the inline status line for one source (ok = green, else red). */
+  const setMsg = useCallback((source: string, ok: boolean, text: string) => {
+    setSyncMsg((m) => ({ ...m, [source]: { ok, text } }));
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const res = await fetch("/api/connectors", { cache: "no-store" });
@@ -70,7 +87,7 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
       if (connecting) return;
       setConnecting(source);
       setConsentUrl(null);
-      setSyncMsg((m) => ({ ...m, [source]: { ok: true, text: "starting consent flow…" } }));
+      setMsg(source, true, "starting consent flow…");
       try {
         const res = await fetch("/api/connectors/connect", {
           method: "POST",
@@ -79,10 +96,7 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
         });
         const env = (await res.json()) as WidgetEnvelope<ConnectStartResult>;
         if (!env.data) {
-          setSyncMsg((m) => ({
-            ...m,
-            [source]: { ok: false, text: env.error?.message ?? "could not start consent flow" },
-          }));
+          setMsg(source, false, env.error?.message ?? "could not start consent flow");
           setConnecting(null);
           return;
         }
@@ -92,10 +106,7 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
         // the fallback link below stays visible either way).
         setConsentUrl(env.data.authorizeUrl);
         window.open(env.data.authorizeUrl, "_blank", "noopener");
-        setSyncMsg((m) => ({
-          ...m,
-          [source]: { ok: true, text: "waiting for consent in the browser…" },
-        }));
+        setMsg(source, true, "waiting for consent in the browser…");
 
         // Poll token state until the consent lands (CLI times out at 5 min).
         for (let i = 0; i < 100 && !cancelledRef.current; i++) {
@@ -106,37 +117,31 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
           setConnectors(statusEnv.data);
           const me = statusEnv.data.find((c) => c.id === source);
           if (me?.token === "connected") {
-            setSyncMsg((m) => ({ ...m, [source]: { ok: true, text: "connected ✓" } }));
+            setMsg(source, true, "connected ✓");
             setConsentUrl(null);
             setConnecting(null);
             return;
           }
         }
         if (!cancelledRef.current) {
-          setSyncMsg((m) => ({
-            ...m,
-            [source]: { ok: false, text: "consent not completed — try again" },
-          }));
+          setMsg(source, false, "consent not completed — try again");
           setConsentUrl(null);
           setConnecting(null);
         }
       } catch (e) {
-        setSyncMsg((m) => ({
-          ...m,
-          [source]: { ok: false, text: e instanceof Error ? e.message : "network error" },
-        }));
+        setMsg(source, false, e instanceof Error ? e.message : "network error");
         setConsentUrl(null);
         setConnecting(null);
       }
     },
-    [connecting]
+    [connecting, setMsg]
   );
 
   const syncNow = useCallback(
     async (source: string) => {
       if (syncing) return;
       setSyncing(source);
-      setSyncMsg((m) => ({ ...m, [source]: { ok: true, text: "syncing…" } }));
+      setMsg(source, true, "syncing…");
       try {
         const res = await fetch("/api/connectors/sync", {
           method: "POST",
@@ -152,21 +157,15 @@ export default function ConnectorPanel({ initialEnvelope }: ConnectorPanelProps)
           .filter((l) => l && !/^(npm (error|warn)|>|\(node:|\(Use `)/.test(l))
           .slice(-2)
           .join(" · ");
-        setSyncMsg((m) => ({
-          ...m,
-          [source]: { ok, text: meaningful || env.error?.message || "no output" },
-        }));
+        setMsg(source, ok, meaningful || env.error?.message || "no output");
         await refresh();
       } catch (e) {
-        setSyncMsg((m) => ({
-          ...m,
-          [source]: { ok: false, text: e instanceof Error ? e.message : "network error" },
-        }));
+        setMsg(source, false, e instanceof Error ? e.message : "network error");
       } finally {
         setSyncing(null);
       }
     },
-    [syncing, refresh]
+    [syncing, refresh, setMsg]
   );
 
   if (initialEnvelope.state === "error" && connectors.length === 0) {

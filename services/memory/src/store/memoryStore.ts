@@ -25,6 +25,7 @@ import type {
   ISO,
   EntityType,
   SourceKind,
+  Provenance,
 } from "../types.js";
 import { fromJson, toJson, newId } from "../db/database.js";
 import { VecIndex } from "../db/vecIndex.js";
@@ -108,6 +109,14 @@ export interface SearchResult {
 
 // ── MemoryStore ───────────────────────────────────────────────────────────────
 
+/**
+ * Cosine threshold for entity-resolution step 4 (vector match). Two same-type
+ * entities whose embeddings exceed this are treated as the same canonical
+ * entity. Deliberately high — a near-miss merge is harder to undo than a
+ * duplicate, so we only auto-merge on strong similarity.
+ */
+const ENTITY_MERGE_COSINE_THRESHOLD = 0.92;
+
 export class MemoryStore {
   /** BM25 index over live nodes (default search path). */
   private bm25Index: BM25Index | null = null;
@@ -186,8 +195,8 @@ export class MemoryStore {
       }
     }
 
-    // Step 4: high-similarity vector match (cosine ≥ 0.92, same entityType)
-    // Only attempted if we have an embedding.
+    // Step 4: high-similarity vector match (same entityType). Only attempted
+    // when an embedding was supplied — text-only inputs fall through to step 5.
     if (input.embedding) {
       const candidates = allEntities
         .filter((e) => e.embedding != null)
@@ -195,14 +204,12 @@ export class MemoryStore {
           id: e.id,
           embedding: fromJson<number[]>(e.embedding as string, []),
         }));
-      if (candidates.length > 0) {
-        const top = topKCosine(input.embedding, candidates, 1);
-        if (top.length > 0 && (top[0]?.score ?? 0) >= 0.92) {
-          const matched = allEntities.find((e) => e.id === top[0]?.id);
-          if (matched) {
-            this.mergeEntityAliases(matched.id, input.name);
-            return this.rowToEntity(matched);
-          }
+      const [bestMatch] = topKCosine(input.embedding, candidates, 1);
+      if (bestMatch && bestMatch.score >= ENTITY_MERGE_COSINE_THRESHOLD) {
+        const matched = allEntities.find((e) => e.id === bestMatch.id);
+        if (matched) {
+          this.mergeEntityAliases(matched.id, input.name);
+          return this.rowToEntity(matched);
         }
       }
     }
@@ -539,6 +546,46 @@ export class MemoryStore {
   // ── Search ────────────────────────────────────────────────────────────────
 
   /**
+   * Resolve a `"<kind>:<id>"` tagged id (the form used by the vector mirror and
+   * the BM25 index) back to its live node. Only `ep` (episode) and `fact` kinds
+   * are stored in those indexes; anything else returns null. Centralizes the
+   * tag-parse + lookup that vector/keyword search would otherwise each repeat.
+   */
+  private resolveTaggedId(taggedId: string): MemoryNode | null {
+    const sep = taggedId.indexOf(":");
+    if (sep === -1) return null;
+    const kind = taggedId.slice(0, sep);
+    const id = taggedId.slice(sep + 1);
+    if (kind === "ep") return this.getEpisodeById(id);
+    if (kind === "fact") return this.getFactById(id);
+    return null;
+  }
+
+  /**
+   * Whether a fact is currently valid for retrieval, given the validity filter
+   * options. `includeInvalidated` short-circuits to true (history searches).
+   * Otherwise a fact is excluded if it has been invalidated, has not yet become
+   * true at `asOf`, or its validity window has already closed (relative to `asOf`
+   * when given, else `now`). Shared by both vector-search backends so they
+   * filter identically — sqlite-vec stays a transparent speedup, not a behavior
+   * change.
+   */
+  private factPassesValidity(
+    fact: { validFrom: ISO; validTo: ISO | null; invalidatedAt: ISO | null },
+    opts: { includeInvalidated: boolean; asOf?: ISO; now: ISO },
+  ): boolean {
+    if (opts.includeInvalidated) return true;
+    if (fact.invalidatedAt !== null) return false;
+    if (opts.asOf) {
+      if (fact.validFrom > opts.asOf) return false; // not yet true at asOf
+      if (fact.validTo !== null && fact.validTo <= opts.asOf) return false;
+    } else if (fact.validTo !== null && fact.validTo <= opts.now) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Vector search over episodes + live facts. Uses sqlite-vec (exact cosine KNN
    * in C) when available, else brute-force JS cosine. Both apply identical
    * validity filtering, so results match — sqlite-vec is a transparent speedup.
@@ -559,29 +606,17 @@ export class MemoryStore {
     // out here, so ask for more than k to ensure enough live nodes survive.
     const hits = this.vec.search(query, Math.max(k * 5, 100));
     const out: SearchResult[] = [];
-    for (const h of hits) {
-      const sep = h.id.indexOf(":");
-      const kind = h.id.slice(0, sep);
-      const id = h.id.slice(sep + 1);
-      let node: MemoryNode | null = null;
-      if (kind === "ep") {
-        node = this.getEpisodeById(id);
-      } else if (kind === "fact") {
-        const f = this.getFactById(id);
-        if (f) {
-          if (!includeInvalidated) {
-            if (f.invalidatedAt !== null) continue;
-            if (asOf && f.validFrom > asOf) continue;
-            if (asOf && f.validTo !== null && f.validTo <= asOf) continue;
-            if (!asOf && f.validTo !== null && f.validTo <= now) continue;
-          }
-          node = f;
-        }
+    for (const hit of hits) {
+      const node = this.resolveTaggedId(hit.id);
+      if (!node) continue;
+      if (
+        node.kind === "fact" &&
+        !this.factPassesValidity(node as Fact, { includeInvalidated, asOf, now })
+      ) {
+        continue;
       }
-      if (node) {
-        out.push({ node, score: h.score });
-        if (out.length >= k) break;
-      }
+      out.push({ node, score: hit.score });
+      if (out.length >= k) break;
     }
     return out;
   }
@@ -601,7 +636,8 @@ export class MemoryStore {
       entries.push({ id: `ep:${e.id}`, embedding: fromJson<number[]>(e.embedding, []) });
     }
 
-    // Facts
+    // Facts — pre-filter on validity here (cheaper than embedding every stale
+    // fact, then discarding it); uses the same predicate as the sqlite-vec path.
     const factQuery = `SELECT id, embedding, valid_from, valid_to, invalidated_at FROM facts WHERE embedding IS NOT NULL`;
     const factRows = this.db.prepare(factQuery).all() as unknown as {
       id: string;
@@ -611,12 +647,11 @@ export class MemoryStore {
       invalidated_at: string | null;
     }[];
     for (const f of factRows) {
-      if (!includeInvalidated) {
-        if (f.invalidated_at !== null) continue;
-        if (asOf && f.valid_from > asOf) continue; // not yet true at asOf
-        if (asOf && f.valid_to !== null && f.valid_to <= asOf) continue;
-        if (!asOf && f.valid_to !== null && f.valid_to <= now) continue;
-      }
+      const passes = this.factPassesValidity(
+        { validFrom: f.valid_from, validTo: f.valid_to, invalidatedAt: f.invalidated_at },
+        { includeInvalidated, asOf, now },
+      );
+      if (!passes) continue;
       entries.push({ id: `fact:${f.id}`, embedding: fromJson<number[]>(f.embedding, []) });
     }
 
@@ -624,35 +659,20 @@ export class MemoryStore {
 
     const topK = topKCosine(query, entries, k);
     const results: SearchResult[] = [];
-
     for (const scored of topK) {
-      const [kind, id] = scored.id.split(":");
-      let node: MemoryNode | null = null;
-      if (kind === "ep") {
-        node = this.getEpisodeById(id ?? "");
-      } else if (kind === "fact") {
-        node = this.getFactById(id ?? "");
-      }
+      const node = this.resolveTaggedId(scored.id);
       if (node) results.push({ node, score: scored.score });
     }
-
     return results;
   }
 
   /** BM25 keyword search over all memory text (live facts only by default). */
   keywordSearch(args: KeywordSearchArgs): SearchResult[] {
     const index = this.getBm25Index(args.includeInvalidated ?? false);
-    const results = index.search(args.query, args.k);
     const out: SearchResult[] = [];
-    for (const r of results) {
-      const [kind, id] = r.id.split(":");
-      let node: MemoryNode | null = null;
-      if (kind === "ep") {
-        node = this.getEpisodeById(id ?? "");
-      } else if (kind === "fact") {
-        node = this.getFactById(id ?? "");
-      }
-      if (node) out.push({ node, score: r.score });
+    for (const result of index.search(args.query, args.k)) {
+      const node = this.resolveTaggedId(result.id);
+      if (node) out.push({ node, score: result.score });
     }
     return out;
   }
@@ -661,31 +681,32 @@ export class MemoryStore {
   entitySearch(args: EntitySearchArgs): SearchResult[] {
     const results: SearchResult[] = [];
     if (args.entityIds.length === 0) return results;
+    const now = new Date().toISOString();
+
+    // Episodes store entity ids as a JSON array, so we pre-filter with a coarse
+    // substring LIKE (no FTS5 here — TODO(scale)) and confirm exact membership
+    // in JS: `LIKE %id%` would also match an id that merely contains the target
+    // as a substring, which the array check below rejects.
     const likeClauses = args.entityIds.map(() => "entity_ids LIKE ?").join(" OR ");
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM episodes WHERE ${likeClauses} LIMIT ?`,
-      )
-      .all(
-        ...args.entityIds.map((id) => `%${id}%`),
-        args.k,
-      ) as unknown as RawEpisode[];
-    for (const r of rows) {
-      const ep = this.rowToEpisode(r);
-      const entityIds = ep.entityIds;
-      if (args.entityIds.some((id) => entityIds.includes(id))) {
-        results.push({ node: ep, score: 1.0 });
+    const episodeRows = this.db
+      .prepare(`SELECT * FROM episodes WHERE ${likeClauses} LIMIT ?`)
+      .all(...args.entityIds.map((id) => `%${id}%`), args.k) as unknown as RawEpisode[];
+    for (const row of episodeRows) {
+      const episode = this.rowToEpisode(row);
+      if (args.entityIds.some((id) => episode.entityIds.includes(id))) {
+        results.push({ node: episode, score: 1.0 });
       }
     }
-    // Also search facts
+
+    // Facts link to an entity directly via subject_id — only live facts count.
     for (const entityId of args.entityIds) {
       const factRows = this.db
         .prepare(
           `SELECT * FROM facts WHERE subject_id = ? AND invalidated_at IS NULL AND (valid_to IS NULL OR valid_to > ?) LIMIT ?`,
         )
-        .all(entityId, new Date().toISOString(), args.k) as unknown as RawFact[];
-      for (const r of factRows) {
-        results.push({ node: this.rowToFact(r), score: 1.0 });
+        .all(entityId, now, args.k) as unknown as RawFact[];
+      for (const row of factRows) {
+        results.push({ node: this.rowToFact(row), score: 1.0 });
       }
     }
     return results.slice(0, args.k);
@@ -937,12 +958,7 @@ export class MemoryStore {
       importance: row.importance,
       lastAccessedAt: row.last_accessed_at,
       accessCount: row.access_count,
-      provenance: fromJson(row.provenance, {
-        source: "system" as SourceKind,
-        sourceId: "",
-        capturedBy: "feature-3" as const,
-        confidence: 1,
-      }),
+      provenance: parseProvenance(row.provenance),
     };
   }
 
@@ -961,12 +977,7 @@ export class MemoryStore {
       importance: row.importance,
       lastAccessedAt: row.last_accessed_at,
       accessCount: row.access_count,
-      provenance: fromJson(row.provenance, {
-        source: "system" as SourceKind,
-        sourceId: "",
-        capturedBy: "feature-3" as const,
-        confidence: 1,
-      }),
+      provenance: parseProvenance(row.provenance),
     };
   }
 
@@ -992,12 +1003,7 @@ export class MemoryStore {
       importance: row.importance,
       lastAccessedAt: row.last_accessed_at,
       accessCount: row.access_count,
-      provenance: fromJson(row.provenance, {
-        source: "system" as SourceKind,
-        sourceId: "",
-        capturedBy: "feature-3" as const,
-        confidence: 1,
-      }),
+      provenance: parseProvenance(row.provenance),
     };
   }
 
@@ -1045,6 +1051,20 @@ export class MemoryStore {
 
 function normalizeName(name: string): string {
   return name.trim().toLowerCase().normalize("NFC");
+}
+
+/**
+ * Parse a row's provenance JSON, falling back to a neutral system provenance for
+ * rows written before provenance was tracked (or with corrupt JSON). Shared by
+ * every row mapper so the fallback shape stays identical across node kinds.
+ */
+function parseProvenance(json: string): Provenance {
+  return fromJson<Provenance>(json, {
+    source: "system",
+    sourceId: "",
+    capturedBy: "feature-3",
+    confidence: 1,
+  });
 }
 
 interface RawEntity {

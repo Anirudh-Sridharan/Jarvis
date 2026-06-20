@@ -9,37 +9,16 @@ import KpiCard from "@/app/components/KpiCard";
 import TodoList from "@/app/components/TodoList";
 import { EmptyState, ErrorState } from "@/app/components/WidgetStates";
 
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
+import { fetchEnvelope } from "@/app/lib/fetchEnvelope";
 
-async function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
-  try {
-    const res = await fetch(
-      `${BASE}/api/metrics?metric=${encodeURIComponent(metric)}&range=${range}&domain=work`,
-      { cache: "no-store" }
-    );
-    return (await res.json()) as WidgetEnvelope<MetricSeriesContract>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
+function fetchSeries(metric: string, range = "30d"): Promise<WidgetEnvelope<MetricSeriesContract>> {
+  return fetchEnvelope<MetricSeriesContract>(
+    `/api/metrics?metric=${encodeURIComponent(metric)}&range=${range}&domain=work`,
+  );
 }
 
-async function fetchTodos(): Promise<WidgetEnvelope<TodoContract[]>> {
-  try {
-    const res = await fetch(`${BASE}/api/todos?status=open`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<TodoContract[]>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
+function fetchTodos(): Promise<WidgetEnvelope<TodoContract[]>> {
+  return fetchEnvelope<TodoContract[]>("/api/todos?status=open");
 }
 
 function ChartSection({

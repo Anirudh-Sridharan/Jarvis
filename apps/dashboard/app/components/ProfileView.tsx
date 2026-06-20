@@ -186,76 +186,47 @@ export default function ProfileView({ envelope }: ProfileViewProps) {
 
   // ── Action handlers ─────────────────────────────────────────────────────────
 
-  async function handleCorrect(factId: string, correction: string) {
+  /**
+   * Every profile mutation hits the same /api/profile endpoint and replaces the
+   * local profile with the re-derived one in the response envelope. Only the
+   * HTTP method, JSON body, and failure label differ — so they share this core.
+   */
+  function mutateProfile(
+    method: "PATCH" | "DELETE",
+    body: Record<string, unknown>,
+    failureLabel: string,
+  ) {
     setError(null);
     startTransition(async () => {
       try {
         const res = await fetch("/api/profile", {
-          method: "PATCH",
+          method,
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ factId, correction }),
+          body: JSON.stringify(body),
         });
         const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
         if (env.data) setProfile(env.data);
         else if (env.error) setError(env.error.message);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Correction failed");
+        setError(e instanceof Error ? e.message : failureLabel);
       }
     });
   }
 
-  async function handlePin(factId: string, pinned: boolean) {
-    setError(null);
-    startTransition(async () => {
-      try {
-        const res = await fetch("/api/profile", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ factId, pinned }),
-        });
-        const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
-        if (env.data) setProfile(env.data);
-        else if (env.error) setError(env.error.message);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Pin update failed");
-      }
-    });
+  function handleCorrect(factId: string, correction: string) {
+    mutateProfile("PATCH", { factId, correction }, "Correction failed");
   }
 
-  async function handleForget(entityName: string) {
-    setError(null);
-    startTransition(async () => {
-      try {
-        const res = await fetch("/api/profile", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ entityName }),
-        });
-        const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
-        if (env.data) setProfile(env.data);
-        else if (env.error) setError(env.error.message);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Forget failed");
-      }
-    });
+  function handlePin(factId: string, pinned: boolean) {
+    mutateProfile("PATCH", { factId, pinned }, "Pin update failed");
   }
 
-  async function handleForgetFact(factId: string) {
-    setError(null);
-    startTransition(async () => {
-      try {
-        const res = await fetch("/api/profile", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ factId }),
-        });
-        const env = (await res.json()) as WidgetEnvelope<ProfileContract>;
-        if (env.data) setProfile(env.data);
-        else if (env.error) setError(env.error.message);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Forget failed");
-      }
-    });
+  function handleForget(entityName: string) {
+    mutateProfile("DELETE", { entityName }, "Forget failed");
+  }
+
+  function handleForgetFact(factId: string) {
+    mutateProfile("DELETE", { factId }, "Forget failed");
   }
 
   // ── Empty / error states ────────────────────────────────────────────────────

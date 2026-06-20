@@ -14,8 +14,7 @@
  */
 
 import type { HttpClient, HttpResponse, TokenStore } from "../types.js";
-import { getAccessToken } from "../framework/oauth.js";
-import { getRefreshConfig } from "../framework/providers.js";
+import { getOAuthAccessToken } from "../framework/providers.js";
 import { mapGoogleApiError } from "../framework/googleApi.js";
 import { httpError } from "../framework/httpError.js";
 
@@ -79,7 +78,7 @@ export async function searchEmail(
   maxResults: number,
   deps: GmailDeps,
 ): Promise<EmailSearchHit[]> {
-  const token = await getAccessToken("gmail", deps.tokenStore, deps.http, getRefreshConfig("gmail"));
+  const token = await getOAuthAccessToken("gmail", deps.tokenStore, deps.http);
 
   const params = new URLSearchParams({ q: query, maxResults: String(maxResults) });
   const listRes = await deps.http.request({
@@ -137,7 +136,7 @@ export async function getEmailThread(
   threadId: string,
   deps: GmailDeps,
 ): Promise<EmailThread> {
-  const token = await getAccessToken("gmail", deps.tokenStore, deps.http, getRefreshConfig("gmail"));
+  const token = await getOAuthAccessToken("gmail", deps.tokenStore, deps.http);
 
   const res = await deps.http.request({
     method: "GET",
@@ -227,7 +226,7 @@ async function executeMessageWrite(
 
   let token: string;
   try {
-    token = await getAccessToken("gmail", deps.tokenStore, deps.http, getRefreshConfig("gmail"));
+    token = await getOAuthAccessToken("gmail", deps.tokenStore, deps.http);
   } catch (err) {
     return {
       ok: false,

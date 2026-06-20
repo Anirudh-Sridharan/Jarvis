@@ -68,17 +68,52 @@ export interface SyncRun {
 
 // ── Connector interface ───────────────────────────────────────────────────────
 
+/**
+ * The result of one connector sync pass.
+ *
+ * @property points      Normalized metric points to upsert (idempotent by `id`).
+ * @property events      Optional calendar events to mirror (Google Calendar only).
+ * @property nextCursor  High-water mark to persist so the next run resumes where
+ *   this one stopped, or `null` to leave the cursor unchanged (nothing new). The
+ *   Scheduler advances the cursor ONLY after points/events are persisted, so a
+ *   connector that throws leaves the cursor untouched and the window is retried.
+ */
 export interface ConnectorSyncResult {
   points: MetricPoint[];
   events?: CalendarEvent[];
   nextCursor: string | null;
 }
 
+/**
+ * A data source connector.
+ *
+ * Implementing one is intentionally small: the repetitive work (auth, pagination,
+ * point construction) lives in shared framework helpers, so a connector mostly
+ * describes WHAT to fetch and how to normalize it. See the step-by-step guide in
+ * `services/integrations/CONNECTORS.md`.
+ *
+ * Inside `sync()`, reach for:
+ *   - `getOAuthAccessToken(source, tokenStore, http)` — auth for OAuth catalog sources
+ *   - `fetchAllPages(fetchPage, maxPages)`            — token-based pagination
+ *   - `metricPointFactory(source)`                    — build MetricPoints
+ */
 export interface Connector {
+  /** Stable source identifier; also the TokenStore and cursor key. */
   id: SourceId;
+  /** How this source authenticates: OAuth2, personal access token, or push. */
   auth: AuthKind;
-  schedule: string;       // cron expression, default '0 5 * * *'
-  concurrency: number;    // 1 for whoop (serialized rotating refresh)
+  /** Cron expression for scheduled polling (e.g. '0 5 * * *'). */
+  schedule: string;
+  /**
+   * Max concurrent sync runs. MUST be 1 for sources with rotating refresh tokens
+   * (Whoop) so concurrent refreshes cannot invalidate each other.
+   */
+  concurrency: number;
+  /**
+   * Fetch new data since `cursor`, normalize it, and return the points to store
+   * plus the next cursor. Throw to fail the run WITHOUT advancing the cursor —
+   * the Scheduler records an error run and retries the same window next time.
+   */
   sync(
     cursor: Cursor | null,
     http: HttpClient,

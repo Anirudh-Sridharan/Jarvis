@@ -19,12 +19,10 @@ import type {
   TokenStore,
   WorkEvent,
 } from "../types.js";
-import { makeMetricId } from "../framework/metricStore.js";
-import { getAccessToken } from "../framework/oauth.js";
-import { getRefreshConfig } from "../framework/providers.js";
+import { getOAuthAccessToken } from "../framework/providers.js";
 import { httpError } from "../framework/httpError.js";
+import { metricPointFactory } from "../framework/normalize.js";
 
-const ADAPTER_VERSION = "1";
 const MAX_PAGES = 10;
 
 export const gmailConnector: Connector = {
@@ -38,7 +36,7 @@ export const gmailConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const token = await getAccessToken("gmail", tokenStore, http, getRefreshConfig("gmail"));
+    const token = await getOAuthAccessToken("gmail", tokenStore, http);
 
     const since = cursor?.highWater ?? sevenDaysAgo();
     const events: WorkEvent[] = [];
@@ -109,17 +107,10 @@ export const gmailConnector: Connector = {
         const hourStart = new Date(now);
         hourStart.setUTCMinutes(0, 0, 0);
         const ts = hourStart.toISOString();
-        points.push({
-          id: makeMetricId({ source: "gmail", metric: "gmail.unread_count", ts, dims: {} }),
-          source: "gmail",
-          metric: "gmail.unread_count",
-          value: label.messagesUnread,
-          unit: "count",
-          ts,
-          dims: {},
-          ingestedAt: now.toISOString(),
-          adapterVersion: ADAPTER_VERSION,
-        });
+        const point = metricPointFactory("gmail", now.toISOString());
+        points.push(
+          point({ metric: "gmail.unread_count", value: label.messagesUnread, unit: "count", ts })
+        );
       }
     }
 
@@ -187,7 +178,7 @@ export function normalizeGmailMessage(
 }
 
 export function gmailEventsToMetricPoints(events: WorkEvent[]): MetricPoint[] {
-  const now = new Date().toISOString();
+  const point = metricPointFactory("gmail");
   const points: MetricPoint[] = [];
 
   // Daily email volume
@@ -204,33 +195,11 @@ export function gmailEventsToMetricPoints(events: WorkEvent[]): MetricPoint[] {
   }
 
   for (const [day, count] of receivedByDay.entries()) {
-    const ts = `${day}T00:00:00Z`;
-    points.push({
-      id: makeMetricId({ source: "gmail", metric: "gmail.received", ts, dims: {} }),
-      source: "gmail",
-      metric: "gmail.received",
-      value: count,
-      unit: "count",
-      ts,
-      dims: {},
-      ingestedAt: now,
-      adapterVersion: ADAPTER_VERSION,
-    });
+    points.push(point({ metric: "gmail.received", value: count, unit: "count", ts: `${day}T00:00:00Z` }));
   }
 
   for (const [day, count] of sentByDay.entries()) {
-    const ts = `${day}T00:00:00Z`;
-    points.push({
-      id: makeMetricId({ source: "gmail", metric: "gmail.sent", ts, dims: {} }),
-      source: "gmail",
-      metric: "gmail.sent",
-      value: count,
-      unit: "count",
-      ts,
-      dims: {},
-      ingestedAt: now,
-      adapterVersion: ADAPTER_VERSION,
-    });
+    points.push(point({ metric: "gmail.sent", value: count, unit: "count", ts: `${day}T00:00:00Z` }));
   }
 
   return points;

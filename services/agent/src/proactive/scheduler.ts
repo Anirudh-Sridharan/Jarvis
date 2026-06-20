@@ -75,6 +75,19 @@ function releaseLock(triggerId: string): void {
   locks.delete(triggerId);
 }
 
+/**
+ * Comparison operators a condition predicate may use, e.g. "< 33" or ">= 0".
+ * "=" and "==" are aliases for strict equality.
+ */
+const PREDICATE_COMPARATORS: Record<string, (a: number, b: number) => boolean> = {
+  "<": (a, b) => a < b,
+  "<=": (a, b) => a <= b,
+  ">": (a, b) => a > b,
+  ">=": (a, b) => a >= b,
+  "=": (a, b) => a === b,
+  "==": (a, b) => a === b,
+};
+
 export interface SchedulerOptions {
   dataDir: string;
   clock: Clock;
@@ -312,52 +325,53 @@ export class Scheduler {
 
   private armCondition(t: Trigger): void {
     if (!t.condition) return;
-    const pollMs = Math.max(t.condition.pollEverySec, MIN_INTERVAL_SEC) * 1000;
-    let debounceSince: number | null = null;
+    const condition = t.condition;
+    const pollMs = Math.max(condition.pollEverySec, MIN_INTERVAL_SEC) * 1000;
+
+    // Timestamp at which the predicate first started holding continuously, or
+    // null when it isn't currently held. The trigger fires only once the
+    // predicate has held for at least debounceSec — this suppresses flapping.
+    let heldSince: number | null = null;
 
     const interval = setInterval(async () => {
       const current = this.triggerStore.get(t.id);
       if (!current?.enabled) return;
 
-      // Check cooldown
-      const episodic = this.episodicStore.read(t.id);
-      if (episodic.conditionState?.cooldownUntil) {
-        const cooldownEnd = new Date(episodic.conditionState.cooldownUntil).getTime();
-        if (this.opts.clock.now() < cooldownEnd) return;
+      if (this.inCooldown(t.id)) return;
+
+      const value = await this.evaluateCondition(condition.metric, condition.predicate);
+      if (!value.satisfied) {
+        heldSince = null; // predicate dropped — restart the debounce window
+        return;
       }
 
-      // Evaluate condition
-      const value = await this.evaluateCondition(
-        t.condition!.metric,
-        t.condition!.predicate,
-      );
+      const now = this.opts.clock.now();
+      if (heldSince === null) heldSince = now;
+      if (now - heldSince < condition.debounceSec * 1000) return; // still debouncing
 
-      if (value.satisfied) {
-        if (debounceSince === null) {
-          debounceSince = this.opts.clock.now();
-        }
-        const heldMs = this.opts.clock.now() - debounceSince;
-        if (heldMs >= t.condition!.debounceSec * 1000) {
-          // Fire
-          debounceSince = null;
-          // Cooldown only starts when the fire actually happened (lock free).
-          if (await this.fireLocked(t, "condition")) {
-            const cooldownUntil = new Date(
-              this.opts.clock.now() + t.condition!.cooldownSec * 1000,
-            ).toISOString();
-            this.episodicStore.updateConditionState(t.id, {
-              lastValue: value.currentValue,
-              crossedAt: this.opts.clock.isoNow(),
-              cooldownUntil,
-            });
-          }
-        }
-      } else {
-        debounceSince = null; // reset debounce if condition no longer holds
-      }
+      // Debounce satisfied — attempt to fire. fireLocked returns null if a
+      // previous fire is still in flight; cooldown starts only on a real fire.
+      heldSince = null;
+      const fired = await this.fireLocked(t, "condition");
+      if (!fired) return;
+
+      this.episodicStore.updateConditionState(t.id, {
+        lastValue: value.currentValue,
+        crossedAt: this.opts.clock.isoNow(),
+        cooldownUntil: new Date(
+          this.opts.clock.now() + condition.cooldownSec * 1000,
+        ).toISOString(),
+      });
     }, pollMs);
 
     this.intervals.set(t.id, interval);
+  }
+
+  /** True if this condition trigger is still within its post-fire cooldown. */
+  private inCooldown(triggerId: string): boolean {
+    const cooldownUntil = this.episodicStore.read(triggerId).conditionState?.cooldownUntil;
+    if (!cooldownUntil) return false;
+    return this.opts.clock.now() < new Date(cooldownUntil).getTime();
   }
 
   /**
@@ -372,7 +386,8 @@ export class Scheduler {
     const match = predicate.match(/^([<>]=?|==?)\s*(\d+(?:\.\d+)?)$/);
     if (!match) return { satisfied: false };
 
-    const op = match[1]!;
+    const compare = PREDICATE_COMPARATORS[match[1]!];
+    if (!compare) return { satisfied: false };
     const threshold = parseFloat(match[2]!);
 
     // In production: look up the metric value from injected metric source
@@ -380,16 +395,7 @@ export class Scheduler {
     const metricValue = await this.getMetricValue(metric);
     if (metricValue === null) return { satisfied: false };
 
-    let satisfied = false;
-    switch (op) {
-      case "<": satisfied = metricValue < threshold; break;
-      case "<=": satisfied = metricValue <= threshold; break;
-      case ">": satisfied = metricValue > threshold; break;
-      case ">=": satisfied = metricValue >= threshold; break;
-      case "=": case "==": satisfied = metricValue === threshold; break;
-    }
-
-    return { satisfied, currentValue: metricValue };
+    return { satisfied: compare(metricValue, threshold), currentValue: metricValue };
   }
 
   /** Injectable metric provider (override in tests). */
@@ -467,15 +473,11 @@ export class Scheduler {
         const job = this.jobs.get(trigger.action.job);
         if (!job) throw new Error(`Job not found: ${trigger.action.job}`);
 
-        const jobResult: JobResult = await Promise.race([
+        const jobResult = await withTimeout(
           job.handler(ctx),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("Job timeout")),
-              job.maxDurationSec * 1000,
-            ),
-          ),
-        ]);
+          job.maxDurationSec * 1000,
+          "Job timeout",
+        );
 
         result = jobResult;
         if (jobResult.episodicUpdate) {
@@ -614,4 +616,22 @@ function matchesFilter(
   if (typeof payload !== "object" || payload === null) return false;
   const p = payload as Record<string, unknown>;
   return Object.entries(filter).every(([k, v]) => p[k] === v);
+}
+
+/**
+ * Race a promise against a wall-clock timeout. Uses the real timer (not the
+ * injected Clock) so a hung job handler cannot stall the scheduler even when
+ * tests drive a frozen clock. Rejects with `timeoutMessage` if it wins.
+ */
+function withTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs),
+    ),
+  ]);
 }

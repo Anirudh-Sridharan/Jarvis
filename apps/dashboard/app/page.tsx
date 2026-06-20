@@ -5,7 +5,7 @@
  * with a slim chat-console strip below.
  */
 
-import type { WidgetEnvelope, KpiValue, BriefingContract, AgendaEvent, TodoContract } from "@/app/lib/contracts";
+import type { KpiValue, BriefingContract, AgendaEvent, TodoContract } from "@/app/lib/contracts";
 import { isOverdue, localDateStr } from "@/app/lib/dates";
 import BriefingCard from "./components/BriefingCard";
 import AgendaList from "./components/AgendaList";
@@ -13,21 +13,7 @@ import KpiCard from "./components/KpiCard";
 import TodoList from "./components/TodoList";
 import VoiceHud from "./components/VoiceHud";
 
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
-
-async function fetchJson<T>(path: string): Promise<WidgetEnvelope<T>> {
-  try {
-    const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<T>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
-}
+import { fetchEnvelope as fetchJson } from "@/app/lib/fetchEnvelope";
 
 function buildKpi(
   label: string,

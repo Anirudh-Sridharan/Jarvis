@@ -69,6 +69,21 @@ function pinnedThenConfidence(f: Fact, best: Fact): boolean {
   return f.provenance.confidence >= best.provenance.confidence;
 }
 
+/**
+ * Pick the representative fact for a multi-fact facet (person/project): the
+ * pinned-then-highest-confidence fact carries the facet's id and metadata.
+ * Caller guarantees a non-empty group.
+ */
+function selectAnchor(facts: Fact[]): Fact {
+  return facts.reduce((best, f) => (pinnedThenConfidence(f, best) ? f : best), facts[0]!);
+}
+
+/** Provenance line for an aggregated facet, e.g. "3 facts, ingested 2026-05-01". */
+function factCountProvenance(facts: Fact[], anchor: Fact): string {
+  const plural = facts.length !== 1 ? "s" : "";
+  return `${facts.length} fact${plural}, ingested ${anchor.ingestedAt.slice(0, 10)}`;
+}
+
 // ── Conflict detection ────────────────────────────────────────────────────────
 
 /**
@@ -128,6 +143,31 @@ function factToProfileFact(
     source: isUserSourced(fact) ? "user" : "derived",
     provenance: `ingested ${fact.ingestedAt.slice(0, 10)}`,
     updatedAt: fact.ingestedAt,
+    ...(conflictsWith && conflictsWith.length > 0 ? { conflictsWith } : {}),
+  };
+}
+
+/**
+ * Build the shared ProfileFact envelope (id/confidence/pinned/source/provenance/
+ * updatedAt + optional conflict cross-flag) around a typed value, anchored on a
+ * representative fact. Used for the facet kinds whose value is a structured
+ * object (Person/Project/Routine) rather than a literal string. `conflictsWith`
+ * is only emitted when non-empty so the field stays absent for clean facets.
+ */
+function buildFacet<T>(
+  anchor: Fact,
+  value: T,
+  provenance: string,
+  conflictsWith: string[] | undefined,
+): ProfileFact<T> {
+  return {
+    id: anchor.id,
+    value,
+    confidence: anchor.provenance.confidence,
+    pinned: anchor.pinned,
+    source: isUserSourced(anchor) ? "user" : "derived",
+    provenance,
+    updatedAt: anchor.ingestedAt,
     ...(conflictsWith && conflictsWith.length > 0 ? { conflictsWith } : {}),
   };
 }
@@ -201,19 +241,16 @@ export class ProfileService {
           description: fact.objectLiteral ?? fact.objectId ?? fact.text,
           cadence: undefined,
         };
-        const routineConflicts = conflictsById.get(fact.id);
-        routines.push({
-          id: fact.id,
-          value: routine,
-          confidence: fact.provenance.confidence,
-          pinned: fact.pinned,
-          source: isUserSourced(fact) ? "user" : "derived",
-          provenance: `ingested ${fact.ingestedAt.slice(0, 10)}`,
-          updatedAt: fact.ingestedAt,
-          ...(routineConflicts && routineConflicts.length > 0
-            ? { conflictsWith: routineConflicts }
-            : {}),
-        });
+        // A routine is a single fact, so it anchors on itself and uses the
+        // plain "ingested <date>" provenance (not the multi-fact count form).
+        routines.push(
+          buildFacet(
+            fact,
+            routine,
+            `ingested ${fact.ingestedAt.slice(0, 10)}`,
+            conflictsById.get(fact.id),
+          ),
+        );
         continue;
       }
 
@@ -242,12 +279,7 @@ export class ProfileService {
         description = buildFallbackDescription(facts);
       }
 
-      // Anchor: pinned facts first, then highest confidence
-      const anchor = facts.reduce(
-        (best, f) => (pinnedThenConfidence(f, best) ? f : best),
-        facts[0]!,
-      );
-
+      const anchor = selectAnchor(facts);
       const relationship = facts.find((f) => f.predicate === "relationship_is")?.objectLiteral;
       const person: Person = {
         name: entity.name,
@@ -255,19 +287,14 @@ export class ProfileService {
         notes: description,
       };
 
-      const personConflicts = conflictsById.get(anchor.id);
-      people.push({
-        id: anchor.id,
-        value: person,
-        confidence: anchor.provenance.confidence,
-        pinned: anchor.pinned,
-        source: isUserSourced(anchor) ? "user" : "derived",
-        provenance: `${facts.length} fact${facts.length !== 1 ? "s" : ""}, ingested ${anchor.ingestedAt.slice(0, 10)}`,
-        updatedAt: anchor.ingestedAt,
-        ...(personConflicts && personConflicts.length > 0
-          ? { conflictsWith: personConflicts }
-          : {}),
-      });
+      people.push(
+        buildFacet(
+          anchor,
+          person,
+          factCountProvenance(facts, anchor),
+          conflictsById.get(anchor.id),
+        ),
+      );
     }
 
     // Build project facets
@@ -280,12 +307,7 @@ export class ProfileService {
 
       const status = (statusFact?.objectLiteral as Project["status"]) ?? "active";
       const description = descFact?.objectLiteral;
-
-      // Anchor: pinned facts first, then highest confidence
-      const anchor = facts.reduce(
-        (best, f) => (pinnedThenConfidence(f, best) ? f : best),
-        facts[0]!,
-      );
+      const anchor = selectAnchor(facts);
 
       const project: Project = {
         name: entity.name,
@@ -293,19 +315,14 @@ export class ProfileService {
         description,
       };
 
-      const projectConflicts = conflictsById.get(anchor.id);
-      projects.push({
-        id: anchor.id,
-        value: project,
-        confidence: anchor.provenance.confidence,
-        pinned: anchor.pinned,
-        source: isUserSourced(anchor) ? "user" : "derived",
-        provenance: `${facts.length} fact${facts.length !== 1 ? "s" : ""}, ingested ${anchor.ingestedAt.slice(0, 10)}`,
-        updatedAt: anchor.ingestedAt,
-        ...(projectConflicts && projectConflicts.length > 0
-          ? { conflictsWith: projectConflicts }
-          : {}),
-      });
+      projects.push(
+        buildFacet(
+          anchor,
+          project,
+          factCountProvenance(facts, anchor),
+          conflictsById.get(anchor.id),
+        ),
+      );
     }
 
     // Get procedural block

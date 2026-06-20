@@ -33,15 +33,13 @@ import type {
   EventWriteRequest,
   WriteResult,
 } from "../types.js";
-import { makeMetricId } from "../framework/metricStore.js";
-import { getAccessToken } from "../framework/oauth.js";
-import { getRefreshConfig } from "../framework/providers.js";
+import { getOAuthAccessToken } from "../framework/providers.js";
 import { mapGoogleApiError } from "../framework/googleApi.js";
 import { httpError } from "../framework/httpError.js";
+import { metricPointFactory } from "../framework/normalize.js";
 import type { DatabaseSync } from "node:sqlite";
 import { toJson, fromJson } from "../db/database.js";
 
-const ADAPTER_VERSION = "1";
 const RESYNC_WINDOW_DAYS = 30;
 
 export const googleCalendarConnector: Connector = {
@@ -55,7 +53,7 @@ export const googleCalendarConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const token = await getAccessToken("gcal", tokenStore, http, getRefreshConfig("gcal"));
+    const token = await getOAuthAccessToken("gcal", tokenStore, http);
     const calendarId = "primary";
 
     // The cursor stores the syncToken in highWater
@@ -239,19 +237,9 @@ export function eventToMetricPoint(event: CalendarEvent): MetricPoint {
   // NOT collide into one point (concurrent meetings would undercount).
   const ts =
     event.start.dateTime ?? `${event.start.date ?? ""}T00:00:00Z`;
-  const now = new Date().toISOString();
   const dims = { calendarId: event.calendarId, eventId: event.id };
-  return {
-    id: makeMetricId({ source: "gcal", metric: "calendar.event_count", ts, dims }),
-    source: "gcal",
-    metric: "calendar.event_count",
-    value: 1,
-    unit: "count",
-    ts,
-    dims,
-    ingestedAt: now,
-    adapterVersion: ADAPTER_VERSION,
-  };
+  const point = metricPointFactory("gcal");
+  return point({ metric: "calendar.event_count", value: 1, unit: "count", ts, dims });
 }
 
 // ── Calendar mirror (SQLite) ───────────────────────────────────────────────────
@@ -572,7 +560,7 @@ export async function executeEventWrite(
   // ── Auth (same path the read sync uses; handles refresh) ──
   let token: string;
   try {
-    token = await getAccessToken("gcal", deps.tokenStore, deps.http, getRefreshConfig("gcal"));
+    token = await getOAuthAccessToken("gcal", deps.tokenStore, deps.http);
   } catch (err) {
     return fail(401, err instanceof Error ? err.message : String(err));
   }

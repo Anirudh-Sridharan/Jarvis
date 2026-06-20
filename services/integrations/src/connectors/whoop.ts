@@ -22,12 +22,11 @@ import type {
   MetricPoint,
   TokenStore,
 } from "../types.js";
-import { makeMetricId } from "../framework/metricStore.js";
-import { getAccessToken } from "../framework/oauth.js";
-import { getRefreshConfig } from "../framework/providers.js";
+import { getOAuthAccessToken } from "../framework/providers.js";
 import { httpError } from "../framework/httpError.js";
+import { metricPointFactory } from "../framework/normalize.js";
+import { fetchAllPages } from "../framework/pagination.js";
 
-const ADAPTER_VERSION = "1";
 const WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v2";
 const MAX_PAGES_PER_COLLECTION = 10;
 
@@ -42,13 +41,9 @@ export const whoopConnector: Connector = {
     http: HttpClient,
     tokenStore: TokenStore
   ): Promise<ConnectorSyncResult> {
-    const token = await getAccessToken(
-      "whoop",
-      tokenStore,
-      http,
-      getRefreshConfig("whoop"),
-      true // isRotating = true → serialized refresh critical section
-    );
+    // Rotating-refresh handling (isRotating + serialized refresh critical
+    // section) is derived from the provider catalog by getOAuthAccessToken.
+    const token = await getOAuthAccessToken("whoop", tokenStore, http);
 
     const since = cursor?.highWater ?? thirtyDaysAgo();
     const points: MetricPoint[] = [];
@@ -64,18 +59,9 @@ export const whoopConnector: Connector = {
       }
     };
 
-    collect(
-      await fetchAllPages<WhoopRecovery>(http, token, "recovery", since),
-      normalizeWhoopRecovery
-    );
-    collect(
-      await fetchAllPages<WhoopSleep>(http, token, "activity/sleep", since),
-      normalizeWhoopSleep
-    );
-    collect(
-      await fetchAllPages<WhoopCycle>(http, token, "cycle", since),
-      normalizeWhoopCycle
-    );
+    collect(await fetchCollection<WhoopRecovery>(http, token, "recovery", since), normalizeWhoopRecovery);
+    collect(await fetchCollection<WhoopSleep>(http, token, "activity/sleep", since), normalizeWhoopSleep);
+    collect(await fetchCollection<WhoopCycle>(http, token, "cycle", since), normalizeWhoopCycle);
 
     return {
       points,
@@ -84,19 +70,20 @@ export const whoopConnector: Connector = {
   },
 };
 
-/** Page through a v2 collection endpoint via next_token until exhausted. */
-async function fetchAllPages<T>(
+/**
+ * Page through a v2 collection endpoint via `next_token` until exhausted, using
+ * the shared {@link fetchAllPages} paginator. Whoop returns `{ records, next_token }`
+ * per page; this maps that shape onto the generic items/nextPageToken contract.
+ */
+function fetchCollection<T>(
   http: HttpClient,
   token: string,
   collection: string,
   since: string
 ): Promise<T[]> {
-  const records: T[] = [];
-  let nextToken: string | undefined;
-
-  for (let page = 0; page < MAX_PAGES_PER_COLLECTION; page++) {
+  return fetchAllPages<T>(async (pageToken) => {
     const params = new URLSearchParams({ start: since, limit: "25" });
-    if (nextToken) params.set("nextToken", nextToken);
+    if (pageToken) params.set("nextToken", pageToken);
 
     const res = await http.request({
       method: "GET",
@@ -113,13 +100,8 @@ async function fetchAllPages<T>(
     }
 
     const data = res.body as { records?: T[]; next_token?: string | null };
-    records.push(...(data.records ?? []));
-
-    if (!data.next_token) break;
-    nextToken = data.next_token;
-  }
-
-  return records;
+    return { items: data.records ?? [], nextPageToken: data.next_token };
+  }, MAX_PAGES_PER_COLLECTION);
 }
 
 // ── Normalizers ────────────────────────────────────────────────────────────────
@@ -173,22 +155,13 @@ export function normalizeWhoopRecovery(r: WhoopRecovery): MetricPoint[] {
   if (r.score_state !== "SCORED" || !r.score) return [];
 
   const ts = r.created_at ?? new Date().toISOString();
-  const ingestedAt = new Date().toISOString();
+  const point = metricPointFactory("whoop");
   const points: MetricPoint[] = [];
 
+  // Skip unscored metrics (== null catches null/undefined; a legitimate 0 stays).
   const add = (metric: string, value: number | undefined, unit: string) => {
     if (value == null) return;
-    points.push({
-      id: makeMetricId({ source: "whoop", metric, ts, dims: {} }),
-      source: "whoop",
-      metric,
-      value,
-      unit,
-      ts,
-      dims: {},
-      ingestedAt,
-      adapterVersion: ADAPTER_VERSION,
-    });
+    points.push(point({ metric, value, unit, ts }));
   };
 
   add("recovery", r.score.recovery_score, "%");
@@ -203,7 +176,7 @@ export function normalizeWhoopSleep(s: WhoopSleep): MetricPoint[] {
   if (!s.score?.stage_summary) return [];
 
   const ts = s.end ?? s.start ?? new Date().toISOString();
-  const ingestedAt = new Date().toISOString();
+  const point = metricPointFactory("whoop");
   const points: MetricPoint[] = [];
   const st = s.score.stage_summary;
 
@@ -215,20 +188,9 @@ export function normalizeWhoopSleep(s: WhoopSleep): MetricPoint[] {
   const asleepMin = inBedMin - awakeMin;
 
   if (inBedMin > 0) {
+    // Naps are excluded from the night sleep summary entirely.
     const add = (metric: string, value: number, unit: string, dims?: Record<string, string>) => {
-      if (!s.nap) { // exclude naps from night summary
-        points.push({
-          id: makeMetricId({ source: "whoop", metric, ts, dims: dims ?? {} }),
-          source: "whoop",
-          metric,
-          value,
-          unit,
-          ts,
-          dims: dims ?? {},
-          ingestedAt,
-          adapterVersion: ADAPTER_VERSION,
-        });
-      }
+      if (!s.nap) points.push(point({ metric, value, unit, ts, dims }));
     };
 
     add("sleep.duration_min", asleepMin, "min");
@@ -252,21 +214,9 @@ export function normalizeWhoopCycle(c: WhoopCycle): MetricPoint[] {
   if (c.score_state !== "SCORED" || strain == null) return [];
 
   const ts = c.start ?? new Date().toISOString();
-  const ingestedAt = new Date().toISOString();
+  const point = metricPointFactory("whoop");
 
-  return [
-    {
-      id: makeMetricId({ source: "whoop", metric: "strain", ts, dims: {} }),
-      source: "whoop",
-      metric: "strain",
-      value: strain,
-      unit: "score",
-      ts,
-      dims: {},
-      ingestedAt,
-      adapterVersion: ADAPTER_VERSION,
-    },
-  ];
+  return [point({ metric: "strain", value: strain, unit: "score", ts })];
 }
 
 function thirtyDaysAgo(): string {

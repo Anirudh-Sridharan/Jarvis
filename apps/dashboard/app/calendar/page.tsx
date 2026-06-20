@@ -6,22 +6,7 @@
 import type { WidgetEnvelope, AgendaEvent, FreeSlotContract } from "@/app/lib/contracts";
 import { localDateStr } from "@/app/lib/dates";
 import AgendaList from "@/app/components/AgendaList";
-
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
-
-async function fetchJson<T>(path: string): Promise<WidgetEnvelope<T>> {
-  try {
-    const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<T>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
-}
+import { fetchEnvelope as fetchJson } from "@/app/lib/fetchEnvelope";
 
 const fetchAgenda = (date: string) => fetchJson<AgendaEvent[]>(`/api/agenda?date=${date}`);
 

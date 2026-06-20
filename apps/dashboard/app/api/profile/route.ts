@@ -9,75 +9,57 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import type { WidgetEnvelope, ProfileContract } from "@/app/lib/contracts";
+import type { WidgetEnvelope, ProfileContract, ProfileFactContract } from "@/app/lib/contracts";
 import { getMemory } from "@/app/lib/services";
-import type { PersonalProfile } from "@jarvis/memory";
+import type { PersonalProfile, ProfileFact } from "@jarvis/memory";
 
 // ── Shape mapper ──────────────────────────────────────────────────────────────
 
+/**
+ * Common ProfileFact → ProfileFactContract envelope. Every facet shares this
+ * metadata (id/confidence/pinned/source/provenance/updatedAt/conflictsWith);
+ * only the `value` payload differs, so callers pass a mapped value through.
+ */
+function toFactContract<TOut>(
+  fact: ProfileFact<unknown>,
+  value: TOut,
+): ProfileFactContract<TOut> {
+  return {
+    id: fact.id,
+    value,
+    confidence: fact.confidence,
+    pinned: fact.pinned,
+    source: fact.source,
+    provenance: fact.provenance,
+    updatedAt: fact.updatedAt,
+    conflictsWith: fact.conflictsWith,
+  };
+}
+
 function toContract(profile: PersonalProfile): ProfileContract {
   return {
-    preferences: profile.preferences.map((f) => ({
-      id: f.id,
-      value: f.value,
-      confidence: f.confidence,
-      pinned: f.pinned,
-      source: f.source,
-      provenance: f.provenance,
-      updatedAt: f.updatedAt,
-      conflictsWith: f.conflictsWith,
-    })),
-    people: profile.people.map((f) => ({
-      id: f.id,
-      value: {
+    preferences: profile.preferences.map((f) => toFactContract(f, f.value)),
+    people: profile.people.map((f) =>
+      toFactContract(f, {
         name: f.value.name,
         relationship: f.value.relationship,
         notes: f.value.notes,
-      },
-      confidence: f.confidence,
-      pinned: f.pinned,
-      source: f.source,
-      provenance: f.provenance,
-      updatedAt: f.updatedAt,
-      conflictsWith: f.conflictsWith,
-    })),
-    projects: profile.projects.map((f) => ({
-      id: f.id,
-      value: {
+      }),
+    ),
+    projects: profile.projects.map((f) =>
+      toFactContract(f, {
         name: f.value.name,
         status: f.value.status,
         description: f.value.description,
-      },
-      confidence: f.confidence,
-      pinned: f.pinned,
-      source: f.source,
-      provenance: f.provenance,
-      updatedAt: f.updatedAt,
-      conflictsWith: f.conflictsWith,
-    })),
-    routines: profile.routines.map((f) => ({
-      id: f.id,
-      value: {
+      }),
+    ),
+    routines: profile.routines.map((f) =>
+      toFactContract(f, {
         description: f.value.description,
         cadence: f.value.cadence,
-      },
-      confidence: f.confidence,
-      pinned: f.pinned,
-      source: f.source,
-      provenance: f.provenance,
-      updatedAt: f.updatedAt,
-      conflictsWith: f.conflictsWith,
-    })),
-    communicationStyle: profile.communicationStyle.map((f) => ({
-      id: f.id,
-      value: f.value,
-      confidence: f.confidence,
-      pinned: f.pinned,
-      source: f.source,
-      provenance: f.provenance,
-      updatedAt: f.updatedAt,
-      conflictsWith: f.conflictsWith,
-    })),
+      }),
+    ),
+    communicationStyle: profile.communicationStyle.map((f) => toFactContract(f, f.value)),
     proceduralBlock: profile.proceduralBlock,
     version: profile.version,
     updatedAt: profile.updatedAt,

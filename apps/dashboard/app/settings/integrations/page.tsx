@@ -7,21 +7,10 @@
 
 import type { WidgetEnvelope, ConnectorStatusContract } from "@/app/lib/contracts";
 import ConnectorPanel from "@/app/components/ConnectorPanel";
+import { fetchEnvelope } from "@/app/lib/fetchEnvelope";
 
-import { APP_BASE_URL as BASE } from "@/app/lib/clientEnv";
-
-async function fetchConnectors(): Promise<WidgetEnvelope<ConnectorStatusContract[]>> {
-  try {
-    const res = await fetch(`${BASE}/api/connectors`, { cache: "no-store" });
-    return (await res.json()) as WidgetEnvelope<ConnectorStatusContract[]>;
-  } catch {
-    return {
-      data: null,
-      state: "error",
-      error: { code: "FETCH_ERROR", message: "Service unreachable" },
-      meta: { source: "none", fetchedAt: new Date().toISOString(), latencyMs: 0 },
-    };
-  }
+function fetchConnectors(): Promise<WidgetEnvelope<ConnectorStatusContract[]>> {
+  return fetchEnvelope<ConnectorStatusContract[]>("/api/connectors");
 }
 
 export default async function IntegrationsPage() {

@@ -65,6 +65,42 @@ export interface ResolveResult {
 }
 
 /**
+ * Incoming fact wins: insert it as the live fact (supersedes the prior) and
+ * close the prior's validity at the incoming's validFrom. Returns the new fact
+ * id and the invalidated prior id so the caller can record it.
+ */
+async function supersedePrior(
+  incoming: ExtractedFact,
+  prior: { id: string },
+  entityId: string,
+  store: MemoryStore,
+): Promise<{ factId: string; invalidatedId: string }> {
+  const fact = await store.upsertFact({
+    ...buildFactInput(incoming, entityId),
+    supersedes: prior.id,
+  });
+  store.invalidateFact({ factId: prior.id, validTo: incoming.validFrom, invalidatedBy: fact.id });
+  return { factId: fact.id, invalidatedId: prior.id };
+}
+
+/**
+ * Prior fact wins: still record the incoming fact for history, but insert it
+ * already closed at its own validFrom (a zero-length interval — never negative).
+ * The prior stays live untouched.
+ */
+async function insertAsHistorical(
+  incoming: ExtractedFact,
+  entityId: string,
+  store: MemoryStore,
+): Promise<string> {
+  const closedFact = await store.upsertFact({
+    ...buildFactInput(incoming, entityId),
+    validTo: incoming.validFrom,
+  });
+  return closedFact.id;
+}
+
+/**
  * Resolve a single incoming ExtractedFact against existing live facts in the store.
  * Returns the new fact's id and a list of invalidated prior fact ids.
  */
@@ -129,47 +165,28 @@ export async function resolveFact(
 
     const winner = pickWinner(priorAsExtracted, incoming);
 
+    // Same-day equal-trust conflict → ask the AI to break the tie; an ambiguous
+    // verdict keeps both facts live and raises the conflict flag.
     if (winner === "tie" && sameDay(priorAsExtracted.validFrom, incoming.validFrom)) {
       const decision = await aiTieBreak(priorAsExtracted, incoming, llm);
       if (decision === "ambiguous") {
-        // Keep both — insert incoming without invalidating prior
         const fact = await store.upsertFact(buildFactInput(incoming, entityId));
         factId = fact.id;
         conflictFlagged = true;
       } else if (decision === "incoming") {
-        // Incoming wins — invalidate prior
-        const fact = await store.upsertFact({
-          ...buildFactInput(incoming, entityId),
-          supersedes: prior.id,
-        });
-        factId = fact.id;
-        store.invalidateFact({ factId: prior.id, validTo: incoming.validFrom, invalidatedBy: fact.id });
-        invalidatedIds.push(prior.id);
+        const superseded = await supersedePrior(incoming, prior, entityId, store);
+        factId = superseded.factId;
+        invalidatedIds.push(superseded.invalidatedId);
       } else {
-        // Prior wins — insert incoming as historical (closed at its own
-        // validFrom: a zero-length interval, never a negative one)
-        const closedFact = await store.upsertFact({
-          ...buildFactInput(incoming, entityId),
-          validTo: incoming.validFrom,
-        });
-        factId = closedFact.id;
+        factId = await insertAsHistorical(incoming, entityId, store);
       }
     } else if (winner === "incoming") {
-      const fact = await store.upsertFact({
-        ...buildFactInput(incoming, entityId),
-        supersedes: prior.id,
-      });
-      factId = fact.id;
-      store.invalidateFact({ factId: prior.id, validTo: incoming.validFrom, invalidatedBy: fact.id });
-      invalidatedIds.push(prior.id);
+      const superseded = await supersedePrior(incoming, prior, entityId, store);
+      factId = superseded.factId;
+      invalidatedIds.push(superseded.invalidatedId);
     } else {
-      // Prior wins — insert incoming as historical, closed at its own
-      // validFrom (zero-length interval, never a negative one)
-      const closedFact = await store.upsertFact({
-        ...buildFactInput(incoming, entityId),
-        validTo: incoming.validFrom,
-      });
-      factId = closedFact.id;
+      // Prior wins (higher trust, or newer/equal validFrom outside the tie path).
+      factId = await insertAsHistorical(incoming, entityId, store);
     }
   }
 
