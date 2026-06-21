@@ -7,8 +7,10 @@
  * the nightly consolidation pass.
  */
 
+import { createHash } from "node:crypto";
 import type { ExperienceRecord, Embedder } from "../types.js";
 import { buildExternalRecord } from "./experience.js";
+import type { ChunkOptions } from "./chunk.js";
 import type { MemoryStore } from "../store/memoryStore.js";
 
 /** Token-length threshold: texts above this are flagged as deferred. */
@@ -99,5 +101,36 @@ export class CaptureService {
   }): Promise<CaptureResult> {
     const { buildMarkdownRecord } = await import("./adapters/markdown.js");
     return this.capture(buildMarkdownRecord(opts));
+  }
+
+  /**
+   * Capture a document (PDF / text / doc) as chunked memory records.
+   *
+   * Two-tier dedup: a fast doc-level skip on `doc_id` (sha256 of the extracted
+   * text) avoids re-chunking an unchanged file; per-chunk dedup_key uniqueness
+   * is the correctness backstop. Returns the per-document tally; `inserted` is
+   * the count of newly-journaled chunks (unchanged chunks drop as duplicates).
+   */
+  async captureDocument(opts: {
+    path: string;
+    text: string;
+    title?: string;
+    mtime?: string;
+    ext?: string;
+    chunkOpts?: ChunkOptions;
+  }): Promise<{ docId: string; skipped: boolean; inserted: number; total: number }> {
+    const docId = createHash("sha256").update(opts.text).digest("hex");
+    if (this.store.documentExists(docId)) {
+      return { docId, skipped: true, inserted: 0, total: 0 };
+    }
+
+    const { buildDocumentChunkRecords } = await import("./adapters/document.js");
+    const records = buildDocumentChunkRecords({ ...opts, docId });
+    let inserted = 0;
+    for (const record of records) {
+      const res = await this.capture(record);
+      if (res.inserted) inserted++;
+    }
+    return { docId, skipped: false, inserted, total: records.length };
   }
 }

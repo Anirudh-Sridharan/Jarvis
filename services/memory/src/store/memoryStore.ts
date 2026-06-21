@@ -786,6 +786,21 @@ export class MemoryStore {
       .run(state, id);
   }
 
+  /**
+   * True if any document chunk for `docId` has been captured — the fast
+   * doc-level skip for the documents connector (avoids re-parsing/chunking an
+   * unchanged file). Correctness still rests on per-chunk dedup_key uniqueness.
+   */
+  documentExists(docId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM experience_records
+         WHERE source = 'files' AND json_extract(payload, '$.doc_id') = ? LIMIT 1`,
+      )
+      .get(docId);
+    return row !== undefined;
+  }
+
   // ── Embeddings table (deferred embed queue) ───────────────────────────────
 
   /** Persist a node's embedding vector into the embeddings table. */

@@ -40,6 +40,7 @@ function usage(): never {
       "  status                   show token + last-sync state for all sources",
       "  sync <source>            run one manual sync (whoop|gcal|gmail|github|simplefin)",
       "  sync obsidian <path>     ingest a markdown/Obsidian vault into memory",
+      "  sync files <path>        ingest local documents (PDF/text/markdown) into memory",
       "  disconnect <source>      remove a source's tokens from the Keychain",
       "",
       `OAuth redirect: http://127.0.0.1:${oauthPort()}/callback (set JARVIS_OAUTH_PORT to change)`,
@@ -116,6 +117,7 @@ function printRun(run: SyncRun): void {
 async function sync(arg: string | undefined): Promise<void> {
   if (arg === "simplefin") return syncFinance();
   if (arg === "obsidian") return syncObsidian(process.argv.slice(2)[2]);
+  if (arg === "files") return syncFiles(process.argv.slice(2)[2]);
 
   if (!arg || !SYNCABLE_SOURCES.includes(arg as SourceId)) {
     console.error(
@@ -181,6 +183,40 @@ async function syncObsidian(vaultArg: string | undefined): Promise<void> {
   console.log(`  scanned:  ${r.scanned}`);
   console.log(
     `  captured: +${r.captured} new, ${r.duplicates} unchanged` +
+      (r.errors ? `, ${r.errors} errors` : ""),
+  );
+  console.log(`  next: run consolidation to make them recallable (POST /consolidate)`);
+  process.exit(0);
+}
+
+async function syncFiles(dirArg: string | undefined): Promise<void> {
+  const dir = dirArg ?? process.env["JARVIS_FILES_DIR"];
+  if (!dir) {
+    console.error(
+      "Provide a documents path: npm run connect -- sync files <path>\n" +
+        "  (or set JARVIS_FILES_DIR in .env)",
+    );
+    process.exit(1);
+  }
+
+  const { loadConfig } = await import("../config.js");
+  const { InferenceGateway } = await import("../inference/gateway.js");
+  const { getMemorySystem } = await import("../memory/memorySystem.js");
+  const { runFilesIngest } = await import("../memory/filesIngest.js");
+
+  const memory = getMemorySystem(new InferenceGateway(loadConfig()));
+  if (!memory) {
+    console.error("Memory system unavailable — check config/models.yaml (embedding entry).");
+    process.exit(1);
+  }
+
+  console.log(`Ingesting documents: ${dir}…`);
+  const r = await runFilesIngest({ memory, dir });
+  console.log(`\nSync files: ok`);
+  console.log(`  scanned:  ${r.scanned}`);
+  console.log(
+    `  captured: ${r.documents} docs → +${r.chunks} chunks, ${r.duplicates} unchanged` +
+      (r.skipped ? `, ${r.skipped} skipped` : "") +
       (r.errors ? `, ${r.errors} errors` : ""),
   );
   console.log(`  next: run consolidation to make them recallable (POST /consolidate)`);

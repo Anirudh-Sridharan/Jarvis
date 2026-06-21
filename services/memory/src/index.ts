@@ -68,6 +68,9 @@ export { isLiveFact, wasTrueAt, wasBelivedAt, factsBelivedAt, factsTrueAt, liveF
 export { computeDedupKey, buildConversationRecord, buildNoteRecord, buildExternalRecord } from "./capture/experience.js";
 export { parseMarkdownNote, buildMarkdownRecord } from "./capture/adapters/markdown.js";
 export type { ParsedMarkdown } from "./capture/adapters/markdown.js";
+export { chunkText } from "./capture/chunk.js";
+export type { ChunkOptions, TextChunk } from "./capture/chunk.js";
+export { buildDocumentChunkRecords } from "./capture/adapters/document.js";
 
 // ── Memory system factory ──────────────────────────────────────────────────────
 
@@ -106,6 +109,14 @@ export interface MemorySystem {
       mtime?: string;
       title?: string;
     }): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
+
+    captureDocument(opts: {
+      path: string;
+      text: string;
+      title?: string;
+      mtime?: string;
+      ext?: string;
+    }): Promise<{ docId: string; skipped: boolean; inserted: number; total: number }>;
   };
 
   store: MemoryStore;
@@ -143,6 +154,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
       captureNote: (opts) => captureService.captureNote(opts),
       captureExternal: (opts) => captureService.captureExternal(opts),
       captureMarkdown: (opts) => captureService.captureMarkdown(opts),
+      captureDocument: (opts) => captureService.captureDocument(opts),
     },
     store,
     retrieval: {

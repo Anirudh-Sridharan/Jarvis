@@ -110,6 +110,7 @@ export type SourceId =
   | "conversation"
   | "note"
   | "obsidian"
+  | "files"
   | "gmail"
   | "gcal"
   | "github"
@@ -119,6 +120,7 @@ export type SourceId =
 export type ExperienceType =
   | "message"
   | "note"
+  | "document"
   | "email"
   | "calendar_event"
   | "code_activity"
