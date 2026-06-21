@@ -1,7 +1,7 @@
 # Local Documents & PDF Ingest (with first-class chunking)
 
 - **Date:** 2026-06-20
-- **Status:** v1 (Phases 1–2) + Phase 3 (long-note chunking) implemented & tested — `@jarvis/memory` 214 green, `@jarvis/core` 197 green. Phases 4–5 remain optional follow-ons.
+- **Status:** Phases 1–4 implemented & tested — `@jarvis/memory` 214 green, `@jarvis/core` 197 green, dashboard `tsc` + `next build` clean. Phase 5 (`.docx`/`.html`) remains an optional follow-on.
 - **Feature:** Capture-breadth connector #2 — local documents (`source: "files"`)
 - **Builds on:** Obsidian/markdown vault ingest (`20c709d`), sqlite-vec index, grounded REFLECT
 - **Theme:** second-brain repositioning → capture breadth is the recorded next lever
@@ -269,9 +269,13 @@ Return widened to `{ inserted, total, insertedCount }` (back-compatible —
 to the adapter + public exports. Long *external* records (calendar/digests) remain
 single-record — a small optional follow-on.
 
-**Phase 4 (optional) — Dashboard surfacing.**
-Allowlist `"files"` in `/api/connectors/sync` (env-default path) + `ConnectorPanel`
-control. Surface a path input or rely on `JARVIS_FILES_DIR`.
+**Phase 4 (optional) — Dashboard surfacing. ✅ DONE.**
+A "Documents" entry in `CONNECTOR_CATALOG` (`auth: "local"`, syncable) renders a card
+with a **Sync now** button on `/settings/integrations`; its token state reflects
+whether `JARVIS_FILES_DIR` is configured (else a "set JARVIS_FILES_DIR" hint). `files`
+allowlisted in `/api/connectors/sync` (path via `JARVIS_FILES_DIR`; the spawned connect
+CLI loads `.env`). The `ConnectorStatusContract.auth` union gained `"local"`. Verified
+by dashboard `tsc` + `next build`.
 
 **Phase 5 (optional follow-on) — More formats.** `.docx` (`mammoth`), `.html`
 (readability), `.rtf`. Same extractor seam; no new architecture.

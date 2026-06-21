@@ -89,6 +89,15 @@ export const CONNECTOR_CATALOG: CatalogEntry[] = [
     syncable: true,
     connectCmd: "set SIMPLEFIN_ACCESS_URL in .env, then sync",
   },
+  {
+    id: "files",
+    label: "Documents",
+    desc: "Local PDFs, text & markdown — extracted, chunked, and captured into memory.",
+    auth: "local",
+    scheduleLabel: "manual",
+    syncable: true,
+    connectCmd: "set JARVIS_FILES_DIR in .env (or: npm run connect -- sync files <path>)",
+  },
 ];
 
 function runSecurity(args: string[]): Promise<{ exitCode: number; stdout: string }> {
@@ -187,6 +196,9 @@ export async function getConnectorStatuses(): Promise<ConnectorStatusContract[]>
         const lastSynced = accounts.map((a) => a.lastSyncedAt).sort().at(-1);
         lastDataAt = lastSynced;
         token = accounts.length > 0 ? "connected" : "not_connected";
+      } else if (entry.id === "files") {
+        // Filesystem source — "connected" once a default scan path is configured.
+        token = process.env["JARVIS_FILES_DIR"] ? "connected" : "not_connected";
       }
 
       return {

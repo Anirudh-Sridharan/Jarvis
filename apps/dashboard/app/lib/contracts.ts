@@ -154,7 +154,7 @@ export interface ConnectorStatusContract {
   id: string;
   label: string;
   desc: string;
-  auth: "oauth" | "pat" | "push" | "token";
+  auth: "oauth" | "pat" | "push" | "token" | "local";
   scheduleLabel: string;
   token: ConnectorTokenState;
   tokenExpiresInMin?: number;

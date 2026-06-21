@@ -12,7 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { findRepoRoot } from "@/app/lib/repoRoot";
 import type { WidgetEnvelope, SyncNowResult } from "@/app/lib/contracts";
 
-const SYNCABLE = new Set(["whoop", "gcal", "gmail", "github", "simplefin"]);
+const SYNCABLE = new Set(["whoop", "gcal", "gmail", "github", "simplefin", "files"]);
 const SYNC_TIMEOUT_MS = 180_000;
 
 function runConnectSync(source: string): Promise<{ ok: boolean; output: string }> {
