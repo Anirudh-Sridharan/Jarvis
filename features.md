@@ -42,7 +42,7 @@ Cross-cutting concerns (model serving, auth/secrets, privacy, deployment) live i
 ## Phase 2 — Memory (the "second brain")
 
 ### 3. Memory Capture & Ingestion  · _Deep_
-- **Capture-everything by default** (single-user, privacy not a constraint): conversations, notes/quick-capture, and ingested data (email, calendar, docs, work activity). Per-source toggles exist but default ON; a global pause remains for convenience. Implemented capture-breadth sources now include the **Obsidian/markdown vault** and **local documents** (PDF/text/markdown), chunked into retrievable passages — see `docs/superpowers/specs/2026-06-20-local-documents-pdf-ingest-design.md`.
+- **Capture-everything by default** (single-user, privacy not a constraint): conversations, notes/quick-capture, and ingested data (email, calendar, docs, work activity). Per-source toggles exist but default ON; a global pause remains for convenience. Implemented capture-breadth sources now include the **Obsidian/markdown vault**, **local documents** (PDF/text/markdown), and **Gmail message bodies** (Inbox + Sent, excl. promotions/social/spam/trash by default) — all chunked into retrievable passages. See `docs/superpowers/specs/2026-06-20-local-documents-pdf-ingest-design.md` and `docs/superpowers/specs/2026-06-21-gmail-email-body-capture-design.md`.
 - Normalizes every source into a common "experience" record for the memory store.
 - Higher capture volume → consolidation (feature 6) does more aggressive extraction/dedup/forgetting to keep the store useful rather than bloated.
 

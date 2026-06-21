@@ -41,6 +41,7 @@ function usage(): never {
       "  sync <source>            run one manual sync (whoop|gcal|gmail|github|simplefin)",
       "  sync obsidian <path>     ingest a markdown/Obsidian vault into memory",
       "  sync files <path>        ingest local documents (PDF/text/markdown) into memory",
+      "  sync email               ingest recent Gmail message bodies into memory",
       "  disconnect <source>      remove a source's tokens from the Keychain",
       "",
       `OAuth redirect: http://127.0.0.1:${oauthPort()}/callback (set JARVIS_OAUTH_PORT to change)`,
@@ -118,6 +119,7 @@ async function sync(arg: string | undefined): Promise<void> {
   if (arg === "simplefin") return syncFinance();
   if (arg === "obsidian") return syncObsidian(process.argv.slice(2)[2]);
   if (arg === "files") return syncFiles(process.argv.slice(2)[2]);
+  if (arg === "email") return syncEmail();
 
   if (!arg || !SYNCABLE_SOURCES.includes(arg as SourceId)) {
     console.error(
@@ -221,6 +223,45 @@ async function syncFiles(dirArg: string | undefined): Promise<void> {
   );
   console.log(`  next: run consolidation to make them recallable (POST /consolidate)`);
   process.exit(0);
+}
+
+async function syncEmail(): Promise<void> {
+  const { system } = createLiveIntegrations();
+
+  const { loadConfig } = await import("../config.js");
+  const { InferenceGateway } = await import("../inference/gateway.js");
+  const { getMemorySystem } = await import("../memory/memorySystem.js");
+  const { runEmailIngest } = await import("../memory/emailIngest.js");
+
+  const memory = getMemorySystem(new InferenceGateway(loadConfig()));
+  if (!memory) {
+    console.error("Memory system unavailable — check config/models.yaml (embedding entry).");
+    process.exit(1);
+  }
+
+  // Default: Inbox + Sent, excl. promotions/social/spam/trash, last 30d.
+  // JARVIS_EMAIL_QUERY overrides with any Gmail query string.
+  const query = process.env["JARVIS_EMAIL_QUERY"];
+  console.log("Ingesting Gmail message bodies into memory…");
+  try {
+    const r = await runEmailIngest({ memory, email: system.email, query });
+    console.log(`\nSync email: ok`);
+    console.log(`  scanned:  ${r.scanned} messages matched`);
+    console.log(
+      `  captured: ${r.messages} emails → +${r.chunks} chunks, ${r.duplicates} unchanged` +
+        (r.skipped ? `, ${r.skipped} skipped (no text body)` : "") +
+        (r.errors ? `, ${r.errors} thread errors` : ""),
+    );
+    console.log(`  next: run consolidation to make them recallable (POST /consolidate)`);
+    process.exit(0);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`\nSync email: error\n  ${message}`);
+    if (/No OAuth tokens|Re-consent|401|invalid_grant|403/i.test(message)) {
+      console.error(`  → run: npm run connect -- gmail  (Gmail consent / API enablement)`);
+    }
+    process.exit(1);
+  }
 }
 
 async function disconnect(source: OAuthSourceId): Promise<void> {

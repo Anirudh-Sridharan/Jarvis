@@ -145,4 +145,32 @@ export class CaptureService {
     }
     return { docId, skipped: false, inserted, total: records.length };
   }
+
+  /**
+   * Capture a Gmail message body as chunked memory records (capture breadth #3).
+   *
+   * Emails are immutable, so unlike captureDocument there is no doc-level
+   * fast-skip: the per-chunk dedup_key UNIQUE backstop is sufficient idempotency,
+   * so a re-scan of an already-captured message inserts nothing. Returns the
+   * per-message tally; an empty body yields `{ inserted: 0, total: 0 }`.
+   */
+  async captureEmail(opts: {
+    messageId: string;
+    threadId: string;
+    from: string;
+    to: string;
+    subject: string;
+    date: string;
+    body: string;
+    chunkOpts?: ChunkOptions;
+  }): Promise<{ inserted: number; total: number }> {
+    const { buildEmailRecords } = await import("./adapters/email.js");
+    const records = buildEmailRecords(opts);
+    let inserted = 0;
+    for (const record of records) {
+      const res = await this.capture(record);
+      if (res.inserted) inserted++;
+    }
+    return { inserted, total: records.length };
+  }
 }

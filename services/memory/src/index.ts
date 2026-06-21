@@ -71,6 +71,8 @@ export type { ParsedMarkdown } from "./capture/adapters/markdown.js";
 export { chunkText } from "./capture/chunk.js";
 export type { ChunkOptions, TextChunk } from "./capture/chunk.js";
 export { buildDocumentChunkRecords } from "./capture/adapters/document.js";
+export { buildEmailRecords, parseAddresses } from "./capture/adapters/email.js";
+export type { EmailRecordInput } from "./capture/adapters/email.js";
 
 // ── Memory system factory ──────────────────────────────────────────────────────
 
@@ -117,6 +119,16 @@ export interface MemorySystem {
       mtime?: string;
       ext?: string;
     }): Promise<{ docId: string; skipped: boolean; inserted: number; total: number }>;
+
+    captureEmail(opts: {
+      messageId: string;
+      threadId: string;
+      from: string;
+      to: string;
+      subject: string;
+      date: string;
+      body: string;
+    }): Promise<{ inserted: number; total: number }>;
   };
 
   store: MemoryStore;
@@ -155,6 +167,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
       captureExternal: (opts) => captureService.captureExternal(opts),
       captureMarkdown: (opts) => captureService.captureMarkdown(opts),
       captureDocument: (opts) => captureService.captureDocument(opts),
+      captureEmail: (opts) => captureService.captureEmail(opts),
     },
     store,
     retrieval: {
