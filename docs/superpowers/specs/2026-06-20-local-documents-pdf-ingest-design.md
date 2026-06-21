@@ -1,7 +1,7 @@
 # Local Documents & PDF Ingest (with first-class chunking)
 
 - **Date:** 2026-06-20
-- **Status:** v1 (Phases 1–2) implemented & tested — `@jarvis/memory` 210 green, `@jarvis/core` 197 green. Phases 3–5 remain optional follow-ons.
+- **Status:** v1 (Phases 1–2) + Phase 3 (long-note chunking) implemented & tested — `@jarvis/memory` 214 green, `@jarvis/core` 197 green. Phases 4–5 remain optional follow-ons.
 - **Feature:** Capture-breadth connector #2 — local documents (`source: "files"`)
 - **Builds on:** Obsidian/markdown vault ingest (`20c709d`), sqlite-vec index, grounded REFLECT
 - **Theme:** second-brain repositioning → capture breadth is the recorded next lever
@@ -260,11 +260,14 @@ Files: `services/core/src/memory/extractText.ts` (unpdf + passthrough),
 Manual: `npm run connect -- sync files <dir>` → `POST /consolidate` → query
 `/api/memory?q=...` shows chunk recall.
 
-**Phase 3 — Retrofit chunking to long captures (the cross-cutting win).**
-Apply the leaf chunker to long markdown notes (and optionally long external records):
-when body exceeds the chunk budget, emit chunk records instead of one deferred blob;
-short notes stay single records (no behavior change). Independently tested; sequenced
-after v1 lands so the just-shipped vault ingest isn't destabilized.
+**Phase 3 — Retrofit chunking to long captures (the cross-cutting win). ✅ DONE.**
+`captureMarkdown` now chunks notes whose body exceeds the ~2048-char defer threshold
+into multiple title-prefixed `obsidian`/`note` records (per-chunk dedup, shared
+`doc_id`); shorter notes stay single records (byte-identical — no re-capture churn).
+Return widened to `{ inserted, total, insertedCount }` (back-compatible —
+`runVaultIngest` still keys off the `inserted` boolean); `buildMarkdownRecords` added
+to the adapter + public exports. Long *external* records (calendar/digests) remain
+single-record — a small optional follow-on.
 
 **Phase 4 (optional) — Dashboard surfacing.**
 Allowlist `"files"` in `/api/connectors/sync` (env-default path) + `ConnectorPanel`

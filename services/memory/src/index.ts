@@ -66,7 +66,7 @@ export {
 } from "./retrieval/scoring.js";
 export { isLiveFact, wasTrueAt, wasBelivedAt, factsBelivedAt, factsTrueAt, liveFacts } from "./store/bitemporal.js";
 export { computeDedupKey, buildConversationRecord, buildNoteRecord, buildExternalRecord } from "./capture/experience.js";
-export { parseMarkdownNote, buildMarkdownRecord } from "./capture/adapters/markdown.js";
+export { parseMarkdownNote, buildMarkdownRecord, buildMarkdownRecords } from "./capture/adapters/markdown.js";
 export type { ParsedMarkdown } from "./capture/adapters/markdown.js";
 export { chunkText } from "./capture/chunk.js";
 export type { ChunkOptions, TextChunk } from "./capture/chunk.js";
@@ -108,7 +108,7 @@ export interface MemorySystem {
       raw: string;
       mtime?: string;
       title?: string;
-    }): Promise<{ inserted: boolean; record: import("./types.js").ExperienceRecord }>;
+    }): Promise<{ inserted: boolean; total: number; insertedCount: number }>;
 
     captureDocument(opts: {
       path: string;

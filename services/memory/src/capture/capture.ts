@@ -92,15 +92,27 @@ export class CaptureService {
     return this.capture(buildExternalRecord(opts));
   }
 
-  /** Capture a markdown / Obsidian note (second-brain vault ingest). */
+  /**
+   * Capture a markdown / Obsidian note (second-brain vault ingest). Long notes
+   * are chunked into multiple records; short notes stay a single record. The
+   * returned `inserted` is true when ≥1 new record was journaled (so the vault
+   * ingester's per-note counting is unchanged); `total`/`insertedCount` report
+   * the chunk breakdown.
+   */
   async captureMarkdown(opts: {
     path: string;
     raw: string;
     mtime?: string;
     title?: string;
-  }): Promise<CaptureResult> {
-    const { buildMarkdownRecord } = await import("./adapters/markdown.js");
-    return this.capture(buildMarkdownRecord(opts));
+  }): Promise<{ inserted: boolean; total: number; insertedCount: number }> {
+    const { buildMarkdownRecords } = await import("./adapters/markdown.js");
+    const records = buildMarkdownRecords(opts);
+    let insertedCount = 0;
+    for (const record of records) {
+      const res = await this.capture(record);
+      if (res.inserted) insertedCount++;
+    }
+    return { inserted: insertedCount > 0, total: records.length, insertedCount };
   }
 
   /**

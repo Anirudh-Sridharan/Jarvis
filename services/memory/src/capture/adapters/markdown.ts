@@ -11,8 +11,18 @@
  * keeps the prior version; consolidation reconciles).
  */
 
+import { createHash } from "node:crypto";
 import type { ExperienceRecord, CaptureEntity } from "../../types.js";
 import { buildExternalRecord } from "../experience.js";
+import { chunkText, type ChunkOptions } from "../chunk.js";
+
+/**
+ * Long notes are chunked at the capture defer threshold (≈2048 chars), so only
+ * notes that would otherwise become a single deferred-embedding blob are split;
+ * shorter notes stay single records (byte-identical to before — no re-capture
+ * churn on the next vault scan).
+ */
+const MARKDOWN_CHUNK_OPTS: ChunkOptions = { targetChars: 2048, overlapChars: 200, minChars: 400 };
 
 export interface ParsedMarkdown {
   frontmatter: Record<string, unknown>;
@@ -83,16 +93,6 @@ export function buildMarkdownRecord(opts: {
   const bodyTrimmed = parsed.body.trim();
   const text = title ? `${title}\n\n${bodyTrimmed}`.trim() : bodyTrimmed;
 
-  // Wikilinks and tags both become "tag" entities (the generic bucket — the
-  // consolidation EXTRACT stage derives typed entities from the text later).
-  const seen = new Set<string>();
-  const entities: CaptureEntity[] = [];
-  for (const v of [...parsed.links, ...parsed.tags]) {
-    if (seen.has(v)) continue;
-    seen.add(v);
-    entities.push({ kind: "tag", value: v });
-  }
-
   return buildExternalRecord({
     source: "obsidian",
     type: "note",
@@ -107,13 +107,78 @@ export function buildMarkdownRecord(opts: {
       links: parsed.links,
       frontmatter: parsed.frontmatter,
     },
-    entities,
+    entities: markdownEntities(parsed),
     // Hash the raw note so edits re-capture and unchanged notes drop as dups.
     content: opts.raw,
   });
 }
 
+/**
+ * Build chunked records for a markdown note. A note whose body fits the defer
+ * threshold yields exactly one record (identical to buildMarkdownRecord — no
+ * churn); a longer note is split into multiple title-prefixed chunk records
+ * (source "obsidian", per-chunk content-hash dedup, shared doc_id) so it becomes
+ * retrievable passages instead of one deferred blob.
+ */
+export function buildMarkdownRecords(opts: {
+  path: string;
+  raw: string;
+  mtime?: string;
+  title?: string;
+  chunkOpts?: ChunkOptions;
+}): ExperienceRecord[] {
+  const parsed = parseMarkdownNote(opts.raw);
+  const chunks = chunkText(parsed.body, opts.chunkOpts ?? MARKDOWN_CHUNK_OPTS);
+  if (chunks.length <= 1) return [buildMarkdownRecord(opts)];
+
+  const title = parsed.title ?? opts.title ?? fileStem(opts.path);
+  const entities = markdownEntities(parsed);
+  const timestamp = opts.mtime ?? new Date().toISOString();
+  const docId = createHash("sha256").update(opts.raw).digest("hex");
+
+  return chunks.map((chunk) =>
+    buildExternalRecord({
+      source: "obsidian",
+      type: "note",
+      nativeId: `${opts.path}#${chunk.index}`,
+      text: title ? `${title}\n\n${chunk.text}` : chunk.text,
+      timestamp,
+      actor: "user",
+      payload: {
+        path: opts.path,
+        title,
+        tags: parsed.tags,
+        links: parsed.links,
+        frontmatter: parsed.frontmatter,
+        doc_id: docId,
+        chunk_index: chunk.index,
+        chunk_count: chunks.length,
+        char_start: chunk.charStart,
+        char_end: chunk.charEnd,
+      },
+      entities,
+      // Hash the chunk body so edits re-capture only changed chunks.
+      content: chunk.text,
+    }),
+  );
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Wikilinks and tags both become "tag" entities (the generic bucket — the
+ * consolidation EXTRACT stage derives typed entities from the text later).
+ */
+function markdownEntities(parsed: ParsedMarkdown): CaptureEntity[] {
+  const seen = new Set<string>();
+  const entities: CaptureEntity[] = [];
+  for (const v of [...parsed.links, ...parsed.tags]) {
+    if (seen.has(v)) continue;
+    seen.add(v);
+    entities.push({ kind: "tag", value: v });
+  }
+  return entities;
+}
 
 /** Minimal YAML frontmatter parser: scalars, inline `[a, b]`, and block lists. */
 function parseFrontmatter(block: string): Record<string, unknown> {
