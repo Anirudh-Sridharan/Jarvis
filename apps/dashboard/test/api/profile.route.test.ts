@@ -31,6 +31,25 @@ async function freshHandlers() {
   return { dir, services, route };
 }
 
+/** Seed a "self" entity + a `prefers` fact so it lands in the preferences facet. */
+async function seedPreferenceFact(store: import("@jarvis/memory").MemoryStore, value: string) {
+  const entity = await store.upsertEntity({
+    name: "self",
+    entityType: "other",
+    text: "the user",
+    provenance: { source: "system", sourceId: "test-seed", confidence: 1.0 },
+  });
+  const fact = await store.upsertFact({
+    subjectId: entity.id,
+    predicate: "prefers",
+    objectLiteral: value,
+    text: `prefers: ${value}`,
+    validFrom: new Date().toISOString(),
+    provenance: { source: "system", sourceId: "test-seed", confidence: 1.0 },
+  });
+  return { entityId: entity.id, entityName: entity.name, factId: fact.id };
+}
+
 beforeEach(() => {
   delete process.env.JARVIS_DATA_DIR;
 });
@@ -60,5 +79,146 @@ describe("profile route — spike", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error.code).toBe("BAD_REQUEST");
+  });
+});
+
+// ── Full behavioral coverage ─────────────────────────────────────────────
+
+describe("profile route — PATCH correctFact", () => {
+  it("invalidates the old fact and the corrected value is live afterward", async () => {
+    const { services, route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const mem = services.getMemory();
+    const { factId } = await seedPreferenceFact(mem.store, "tea");
+
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ factId, correction: "coffee" }),
+    });
+    const res = await route.PATCH(req);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.state).toBe("ok");
+
+    const profile = await mem.profile.deriveProfile();
+    const values = profile.preferences.map((f) => f.value);
+    expect(values).toContain("coffee");
+    expect(values).not.toContain("tea");
+  });
+});
+
+describe("profile route — PATCH setPinned", () => {
+  it("pins and unpins a fact, round-tripping the pinned flag", async () => {
+    const { services, route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const mem = services.getMemory();
+    const { factId } = await seedPreferenceFact(mem.store, "tea");
+
+    const pinReq = new NextRequest("http://localhost/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ factId, pinned: true }),
+    });
+    const pinRes = await route.PATCH(pinReq);
+    expect(pinRes.status).toBe(200);
+    const pinBody = await pinRes.json();
+    const pinnedFact = pinBody.data.preferences.find((f: { id: string }) => f.id === factId);
+    expect(pinnedFact?.pinned).toBe(true);
+
+    const unpinReq = new NextRequest("http://localhost/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ factId, pinned: false }),
+    });
+    const unpinRes = await route.PATCH(unpinReq);
+    expect(unpinRes.status).toBe(200);
+    const unpinBody = await unpinRes.json();
+    const unpinnedFact = unpinBody.data.preferences.find((f: { id: string }) => f.id === factId);
+    expect(unpinnedFact?.pinned).toBe(false);
+  });
+});
+
+describe("profile route — PATCH both-fields guard", () => {
+  it("rejects correction and pinned together with 400", async () => {
+    const { services, route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const mem = services.getMemory();
+    const { factId } = await seedPreferenceFact(mem.store, "tea");
+
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ factId, correction: "x", pinned: true }),
+    });
+    const res = await route.PATCH(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe("BAD_REQUEST");
+    expect(body.error.message).toContain("send either correction or pinned, not both");
+  });
+});
+
+describe("profile route — DELETE forgetFact", () => {
+  it("invalidates the fact; it is no longer live in a fresh deriveProfile()", async () => {
+    const { services, route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const mem = services.getMemory();
+    const { factId } = await seedPreferenceFact(mem.store, "tea");
+
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "DELETE",
+      body: JSON.stringify({ factId }),
+    });
+    const res = await route.DELETE(req);
+    expect(res.status).toBe(200);
+
+    const profile = await mem.profile.deriveProfile();
+    const values = profile.preferences.map((f) => f.value);
+    expect(values).not.toContain("tea");
+  });
+});
+
+describe("profile route — DELETE forgetEntity", () => {
+  it("invalidates all of the entity's facts", async () => {
+    const { services, route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const mem = services.getMemory();
+    const { entityName } = await seedPreferenceFact(mem.store, "tea");
+
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "DELETE",
+      body: JSON.stringify({ entityName }),
+    });
+    const res = await route.DELETE(req);
+    expect(res.status).toBe(200);
+
+    const profile = await mem.profile.deriveProfile();
+    const values = profile.preferences.map((f) => f.value);
+    expect(values).not.toContain("tea");
+  });
+});
+
+describe("profile route — DELETE XOR guard", () => {
+  it("rejects neither entityName nor factId with 400", async () => {
+    const { route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "DELETE",
+      body: JSON.stringify({}),
+    });
+    const res = await route.DELETE(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("send exactly one of entityName or factId");
+  });
+
+  it("rejects both entityName and factId with 400", async () => {
+    const { route } = await freshHandlers();
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest("http://localhost/api/profile", {
+      method: "DELETE",
+      body: JSON.stringify({ entityName: "self", factId: "some-id" }),
+    });
+    const res = await route.DELETE(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("send exactly one of entityName or factId");
   });
 });
