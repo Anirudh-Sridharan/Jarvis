@@ -32,6 +32,7 @@ import {
   FakeSendEmailTool,
   FakeCalendarFreeBusyTool,
   FakeCalendarCreateTool,
+  FakeCalendarDeleteTool,
   FakeWebSearchTool,
   FakeWebFetchTool,
   FakeTodoCreateTool,
@@ -336,6 +337,43 @@ describe("calendar skill", () => {
     // An approval request was created
     expect(requests.length).toBeGreaterThan(0);
     expect(createTool.createdEvents.length).toBe(1);
+  });
+
+  it("delete action returns a structured not-supported result and never calls the tool", async () => {
+    tmpDir = makeTempDir();
+
+    // Register a spy tool for calendar_delete_event: if the skill ever
+    // dispatched it, deletedIds would be non-empty. It is intentionally
+    // NOT registered with registerToolMeta and NOT in allowedTools, so any
+    // dispatch attempt would also throw (ToolNotAllowedError) rather than
+    // silently succeed — belt and suspenders for FIX-01.
+    const deleteTool = new FakeCalendarDeleteTool();
+    const tools = makeToolRegistry([deleteTool]);
+
+    const llm = new FakeLlm();
+    const { sink, requests } = makeAutoApproveSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir);
+    const approvalService = new ApprovalService(sink, clock);
+    const ctx = makeCtx(tools, llm, approvalService, auditLog, clock, calendarSkill);
+
+    const result = await calendarSkill.run(
+      { action: "delete", eventId: "evt-1" },
+      ctx,
+    );
+
+    expect(["error", "skipped"]).toContain(result.status);
+    expect(result.summary.toLowerCase()).toContain("not supported");
+    expect(result.summary).not.toContain("Tool not found");
+    // The delete tool was never invoked and no approval was requested for it.
+    expect(deleteTool.deletedIds.length).toBe(0);
+    expect(requests.length).toBe(0);
+  });
+
+  it("allowedTools excludes calendar_delete_event but retains create/move", () => {
+    expect(calendarSkill.allowedTools).not.toContain("calendar_delete_event");
+    expect(calendarSkill.allowedTools).toContain("calendar_create_event");
+    expect(calendarSkill.allowedTools).toContain("calendar_move_event");
   });
 });
 

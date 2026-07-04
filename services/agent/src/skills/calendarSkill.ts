@@ -3,7 +3,10 @@
  *
  * Operations:
  *   - find-time: read-only free/busy query → no approval
- *   - schedule/move/delete: calendar_write → approval required
+ *   - schedule/move: calendar_write → approval required
+ *   - delete: NOT supported in v1 (no live core tool wired) — the skill
+ *     guards this action and returns a structured "not supported yet"
+ *     result without ever dispatching a tool call. See FIX-01.
  *
  * Timezone-aware: all slots computed in user's primary TZ.
  */
@@ -22,12 +25,6 @@ registerToolMeta("calendar_create_event", {
 registerToolMeta("calendar_move_event", {
   sideEffects: "calendar_write",
   reversible: true,
-});
-// TODO(core): calendar_delete_event is declared here but not wired in core's
-// registry yet — the delete action errors with "Tool not found" until then.
-registerToolMeta("calendar_delete_event", {
-  sideEffects: "calendar_write",
-  reversible: false,
 });
 registerToolMeta("calendar_find_time", {
   sideEffects: "read_only",
@@ -74,7 +71,6 @@ export const calendarSkill: Skill = {
     "calendar_find_time",
     "calendar_create_event",
     "calendar_move_event",
-    "calendar_delete_event",
   ],
   outward: true,
   approvalPolicy: "conditional",
@@ -128,14 +124,26 @@ export const calendarSkill: Skill = {
       };
     }
 
+    // Delete is not wired to a live core tool (FIX-01): guard it BEFORE any
+    // toolName/ctx.tool resolution so it can never reach dispatch, even for
+    // a direct/LLM-supplied request.
+    if (args.action === "delete") {
+      return {
+        skillId: "calendar.manage",
+        status: "error",
+        summary: "Calendar deletion is not supported yet",
+        artifacts: [],
+        actions: [
+          { type: "calendar.delete", status: "skipped", reason: "unsupported" },
+        ],
+        citations: [],
+      };
+    }
+
     // Write operations → ctx.tool gates them structurally (calendar_write
-    // risk class → require_approval; delete → double-confirm metadata).
+    // risk class → require_approval).
     const toolName =
-      args.action === "schedule"
-        ? "calendar_create_event"
-        : args.action === "move"
-          ? "calendar_move_event"
-          : "calendar_delete_event";
+      args.action === "schedule" ? "calendar_create_event" : "calendar_move_event";
     // Map skill args onto the live tools' schemas.
     const toolArgs =
       args.action === "schedule"
@@ -147,9 +155,7 @@ export const calendarSkill: Skill = {
             description: args.description,
             location: args.location,
           }
-        : args.action === "move"
-          ? { event_id: args.eventId, new_start: args.new_start, new_end: args.new_end }
-          : { eventId: args.eventId, reason: args.reason };
+        : { event_id: args.eventId, new_start: args.new_start, new_end: args.new_end };
 
     let result: unknown;
     try {
