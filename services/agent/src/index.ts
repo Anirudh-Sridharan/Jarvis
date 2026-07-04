@@ -169,7 +169,13 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
 
   const auditLog = new AuditLog(dataDir, clock);
   const approvalService = new ApprovalService(approvalSink, clock);
-  const checkpointer = new Checkpointer(dataDir);
+  const checkpointer = new Checkpointer(dataDir, clock);
+
+  // Startup sweep: reclaim checkpoint rows for stale, non-resumable runs left
+  // behind by a crash or process kill (FIX-03). A freshly-started process has
+  // no in-flight runs, so no activeRunIds are passed; awaiting-approval and
+  // recent runs are still preserved by sweepOrphaned's own rules.
+  checkpointer.sweepOrphaned();
 
   const agent = new AgentRunner({
     llm,
