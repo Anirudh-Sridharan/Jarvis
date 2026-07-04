@@ -20,10 +20,10 @@ import type { PersonalProfile, ProfileFact } from "@jarvis/memory";
  * metadata (id/confidence/pinned/source/provenance/updatedAt/conflictsWith);
  * only the `value` payload differs, so callers pass a mapped value through.
  */
-function toFactContract<TOut>(
-  fact: ProfileFact<unknown>,
-  value: TOut,
-): ProfileFactContract<TOut> {
+function toFactContract<T>(
+  fact: ProfileFact<T>,
+  value: T,
+): ProfileFactContract<T> {
   return {
     id: fact.id,
     value,

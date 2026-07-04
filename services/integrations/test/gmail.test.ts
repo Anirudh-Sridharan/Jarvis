@@ -62,14 +62,19 @@ describe("gmailConnector.sync", () => {
   afterEach(() => clearOAuthState());
 
   it("follows nextPageToken across messages.list pages", async () => {
+    // Clock-relative fixtures: the connector's default `since` is sevenDaysAgo()
+    // (Date.now() - 7d), so both messages must fall inside that window and on two
+    // distinct UTC days for the cursor to advance and two daily points to emit.
+    const newestMs = Date.now() - 1 * 24 * 60 * 60 * 1000; // 1 day ago
+    const olderMs = Date.now() - 2 * 24 * 60 * 60 * 1000; // 2 days ago (distinct day)
     // page 1 → m1 with a nextPageToken, page 2 → m2 (no token)
     http.add("users/me/messages?", [
       listBody(["m1"], "page2tok"),
       listBody(["m2"]),
     ]);
     http.add("format=metadata", [
-      metaBody("m1", String(Date.parse("2026-06-09T10:00:00Z"))),
-      metaBody("m2", String(Date.parse("2026-06-08T09:00:00Z"))),
+      metaBody("m1", String(newestMs)),
+      metaBody("m2", String(olderMs)),
     ]);
     http.add("labels/UNREAD", unreadOk);
 
@@ -85,7 +90,7 @@ describe("gmailConnector.sync", () => {
     const received = result.points.filter((p) => p.metric === "gmail.received");
     expect(received).toHaveLength(2);
     // Cursor advances to the newest message ts
-    expect(result.nextCursor).toBe("2026-06-09T10:00:00.000Z");
+    expect(result.nextCursor).toBe(new Date(newestMs).toISOString());
   });
 
   it("throws when a page-level messages.list fetch fails", async () => {

@@ -46,18 +46,19 @@ export interface MetricPointInput {
  *   - `ingestedAt` — a single timestamp for the whole batch
  *   - `adapterVersion` — the shared {@link ADAPTER_VERSION}
  *
- * `ingestedAt` is captured once when the factory is created, so all points from
- * one normalization batch share one ingest timestamp — matching the previous
- * per-normalizer `const ingestedAt = new Date().toISOString()` idiom. Create the
- * factory at the point where you used to compute that timestamp (typically the
- * top of the normalizer).
+ * Pass an explicit `ingestedAt` to pin every point in a batch to one shared
+ * timestamp (matching the previous per-normalizer `const ingestedAt =
+ * new Date().toISOString()` idiom). When omitted, each point is stamped with
+ * `new Date().toISOString()` as it is built, so the default is never frozen at
+ * factory-creation time.
  *
  * @param source      The connector's SourceId.
- * @param ingestedAt  Override the batch ingest timestamp (defaults to now).
+ * @param ingestedAt  Override the per-point ingest timestamp (defaults to now,
+ *                    evaluated per point).
  */
 export function metricPointFactory(
   source: SourceId,
-  ingestedAt: string = new Date().toISOString(),
+  ingestedAt?: string,
 ): (input: MetricPointInput) => MetricPoint {
   return ({ metric, value, unit, ts, dims = {} }) => ({
     id: makeMetricId({ source, metric, ts, dims }),
@@ -67,7 +68,7 @@ export function metricPointFactory(
     unit,
     ts,
     dims,
-    ingestedAt,
+    ingestedAt: ingestedAt ?? new Date().toISOString(),
     adapterVersion: ADAPTER_VERSION,
   });
 }
