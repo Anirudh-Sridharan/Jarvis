@@ -1,5 +1,7 @@
 # Jarvis — Deployment & Runtime Architecture
 
+> **Status note (updated 2026-07-04):** §1 below has been corrected to the *current* implementation. §§2-9 describe an earlier/aspirational deployment design — launchd LaunchAgents, a FalkorDB/Neo4j graph DB, LanceDB/Chroma vectors, DuckDB analytics, a Swift/Tauri menu-bar voice daemon, and an app-bundle install wizard — that the system does **not** currently use. That content is retained below a divider marking it future/aspirational (see §§2-9 heading) and is **not current ground truth**. For what actually runs today see `CLAUDE.md` and `.planning/codebase/{ARCHITECTURE,STACK,INTEGRATIONS}.md`.
+
 How every piece of Jarvis runs on a single MacBook Air M3 (16 GB, macOS Tahoe 26.5),
 plus the one remote dependency: a Hugging Face Inference Endpoint. Jarvis is
 **local-first** — every component lives on the user's machine except the cloud
@@ -19,60 +21,63 @@ listens on a public interface; all sockets bind to `127.0.0.1`.
 
 | # | Component | Tech | Lifetime | Port / channel |
 |---|-----------|------|----------|----------------|
-| a | **Voice daemon** (menu-bar app) | Swift/Tauri + native audio; wake word, STT, TTS, voice loop | always-on (login) | talks to core over HTTP/WS `:8765` |
-| b | **Core service** | TypeScript / Node | always-on (login) | HTTP+SSE `127.0.0.1:8765` |
-| c | **MLX sidecar** | Python `mlx-lm` OpenAI-compatible server | **on-demand**, spawned by core | HTTP `127.0.0.1:8770` |
+| a | **Voice orchestrator** (`@jarvis/voice`, TS leaf package) + **voice sidecar** | Node orchestrator + Python FastAPI/WS (faster-whisper STT, Silero VAD, Kokoro TTS, openWakeWord) | voice sidecar on-demand (`npm run sidecar:voice`); orchestrator runs the PTT/hands-free loop | voice sidecar HTTP+WS `127.0.0.1:8089` |
+| b | **Core service** | TypeScript / Node (Hono) | on-demand (`npm run core`, or via `npm start`) | HTTP+SSE `127.0.0.1:8080` (`CORE_PORT`) |
+| c | **MLX sidecar** | Python `mlx-lm` OpenAI-compatible server | **on-demand**, spawned/idle-unloaded (~10 min) by core | HTTP `127.0.0.1:8088` |
 | d | **Web dashboard** | Next.js | on-demand (dev/local) | HTTP `127.0.0.1:3000` |
-| e1 | **Graph DB** | FalkorDB (Redis proto) or Neo4j | always-on (login) | `127.0.0.1:6379` / `:7687` |
-| e2 | **Vector DB** | LanceDB (embedded) or Chroma | embedded / `:8000` | in-process file or `127.0.0.1:8000` |
-| e3 | **Metrics + checkpoints** | SQLite (+ optional DuckDB for analytics) | embedded | file on disk |
-| f | **HF Inference Endpoint** | remote, OpenAI-compatible | always available (network) | HTTPS to `*.endpoints.huggingface.cloud` |
+| e | **Storage** | `node:sqlite` (in-process, built-in) under `$JARVIS_DATA_DIR` (real data home `services/core/data/`) — bi-temporal knowledge graph, facts/entities, vectors, metrics, agent checkpoints | embedded, no separate process | file(s) on disk; `sqlite-vec` optional loadable accelerator, JS cosine fallback; JS BM25 keyword search (no FTS5) |
+| f | **HF Inference Providers** | remote, serverless OpenAI-compatible router | always available (network) | HTTPS to `router.huggingface.co` (`HF_ENDPOINT_URL`) |
 
 ### Communication
 
-- **Voice daemon ↔ core**: HTTP for commands, a WebSocket for the streaming
-  voice loop (partial transcripts up, token/audio events down).
+- **Voice orchestrator ↔ voice sidecar**: HTTP for commands, a WebSocket for the streaming
+  voice loop (partial transcripts up, token/audio events down); the orchestrator also talks
+  to core over HTTP/SSE for chat + hands-free session state (`POST /voice/start|stop`,
+  `GET /voice/status|events`, `POST /voice/wake`).
 - **Core → MLX sidecar**: HTTP `POST /v1/chat/completions` with SSE streaming
-  (`stream: true`), identical wire format to the HF endpoint, so the inference
+  (`stream: true`), identical wire format to HF, so the inference
   gateway can swap local ⇄ remote behind one interface.
-- **Core → HF endpoint**: HTTPS, same OpenAI schema, bearer token from Keychain.
-- **Core ↔ DBs**: Redis protocol (FalkorDB) or Bolt (Neo4j) for the graph;
-  embedded file handle for LanceDB; SQLite file handle for metrics/checkpoints.
-- **Dashboard → core**: HTTP + SSE for live status; the dashboard never touches
-  DBs directly — it reads through core's API so there is one source of truth.
+- **Core → HF Inference Providers**: HTTPS, same OpenAI schema, bearer token (`HF_TOKEN`)
+  from `.env`.
+- **Core ↔ storage**: in-process `node:sqlite` file handles — no network hop, no separate
+  DB server or protocol; there is no graph-DB or vector-DB process to talk to.
+- **Dashboard ↔ storage**: the dashboard is a **second, independent reader** of the same
+  SQLite files via a server-only BFF (`apps/dashboard/app/lib/services.ts`) — it does
+  **not** proxy all reads through core's API. Its only writes are todo actions and profile
+  corrections/pins; OAuth consent and manual syncs are delegated by spawning the connect
+  CLI so credentials stay on core's path.
 
 ### Mermaid topology
 
 ```mermaid
 flowchart TB
   subgraph Mac["MacBook Air M3 — local (127.0.0.1)"]
-    VD["(a) Voice daemon<br/>menu-bar · wake word · STT/TTS"]
-    subgraph Core["(b) Core service — Node/TS"]
+    VO["(a) Voice orchestrator (@jarvis/voice, TS)<br/>+ voice sidecar :8089<br/>(faster-whisper · Silero VAD · Kokoro TTS · openWakeWord)"]
+    subgraph Core["(b) Core service — Node/TS :8080"]
       GW["Inference gateway"]
       MEM["Memory engine"]
       AG["Agent runtime"]
-      SCH["Scheduler"]
+      SCH["Scheduler / ConsolidationScheduler"]
     end
-    SC["(c) MLX sidecar<br/>mlx-lm OpenAI server :8770<br/>(spawned on demand)"]
-    DASH["(d) Dashboard<br/>Next.js :3000"]
-    GDB[("(e1) Graph DB<br/>FalkorDB :6379 / Neo4j :7687")]
-    VDB[("(e2) Vector DB<br/>LanceDB embedded / Chroma :8000")]
-    SDB[("(e3) Metrics + checkpoints<br/>SQLite / DuckDB")]
+    SC["(c) MLX sidecar<br/>mlx-lm OpenAI server :8088<br/>(spawned on demand, idle-unloads ~10 min)"]
+    DASH["(d) Dashboard<br/>Next.js :3000<br/>(second reader via BFF)"]
+    SDB[("(e) node:sqlite under $JARVIS_DATA_DIR<br/>graph + facts + vectors + metrics + checkpoints")]
   end
-  HF["(f) HF Inference Endpoint<br/>remote · OpenAI-compatible · HTTPS"]
+  HF["(f) HF Inference Providers<br/>remote · serverless OpenAI-compatible · HTTPS"]
 
-  VD -- "HTTP/WS :8765" --> Core
-  DASH -- "HTTP+SSE :8765" --> Core
-  GW -- "HTTP/SSE :8770 (local)" --> SC
-  GW -- "HTTPS (fallback/heavy)" --> HF
-  MEM --- GDB
-  MEM --- VDB
+  VO -- "HTTP+SSE :8080" --> Core
+  DASH -- "HTTP+SSE :8080 (chat/status)" --> Core
+  DASH -. "direct SQLite read (BFF)" .-> SDB
+  GW -- "HTTP/SSE :8088 (local)" --> SC
+  GW -- "HTTPS (reasoning/consolidation/agent)" --> HF
+  MEM --- SDB
   AG --- SDB
   SCH --- SDB
-  MEM --- SDB
 ```
 
 ---
+# Part II — Future / aspirational design (NOT the current implementation)
+> Everything below describes a planned/earlier deployment model the current system does not use (launchd agents, FalkorDB/Neo4j, LanceDB/Chroma, DuckDB, a native voice daemon, an app-bundle install wizard). Retained for future reference. See §1 and `CLAUDE.md` for what actually runs today.
 
 ## 2. Process management (launchd)
 
