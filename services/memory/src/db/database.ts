@@ -20,7 +20,7 @@ export function openDatabase(dataDir: string): DatabaseSync {
   // type the option; loading itself is attempted defensively in VecIndex.
   const db = new DatabaseSync(
     dbPath,
-    { allowExtension: true } as unknown as ConstructorParameters<typeof DatabaseSync>[1],
+    { allowExtension: true, timeout: 5000 } as unknown as ConstructorParameters<typeof DatabaseSync>[1],
   );
 
   // WAL mode for better concurrent read performance.

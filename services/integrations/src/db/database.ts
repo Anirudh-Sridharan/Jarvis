@@ -13,7 +13,10 @@ export type DB = DatabaseSync;
 export function openDatabase(dataDir: string): DatabaseSync {
   mkdirSync(dataDir, { recursive: true });
   const dbPath = join(dataDir, "integrations.db");
-  const db = new DatabaseSync(dbPath);
+  const db = new DatabaseSync(
+    dbPath,
+    { timeout: 5000 } as unknown as ConstructorParameters<typeof DatabaseSync>[1],
+  );
 
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
