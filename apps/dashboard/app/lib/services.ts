@@ -1,14 +1,26 @@
 /**
  * Server-only BFF service layer — feature 14.
  *
- * Lazily constructs READ instances of @jarvis/integrations and @jarvis/memory
- * pointed at JARVIS_DATA_DIR (default ~/.jarvis/data).
+ * Lazily constructs @jarvis/integrations and @jarvis/memory instances pointed
+ * at JARVIS_DATA_DIR (default ~/.jarvis/data). Most dashboard routes only read
+ * through these instances.
  *
  * No-op stubs are injected for http / tokenStore / llm so that these instances
- * only touch the local SQLite DBs (safe for read-only dashboard queries).
+ * never touch the network — only the local SQLite DBs.
  *
- * TODO(future): move BFF to the core daemon to avoid two processes writing the
- * same SQLite. For now, reads are safe (WAL mode, no writes from dashboard).
+ * NOT read-only, though: apps/dashboard/app/api/profile/route.ts's PATCH/DELETE
+ * handlers call mem.profile.correctFact/setPinned/forgetFact/forgetEntity
+ * (feature 20 corrections/pins/forgets), which perform bi-temporal writes
+ * (invalidate-old + insert-new) against these same SQLite files. That makes
+ * the dashboard BFF a SECOND writer, running in a different OS process than
+ * core's background ConsolidationScheduler (services/core/src/memory/
+ * consolidationScheduler.ts), which writes the same JARVIS_DATA_DIR files
+ * concurrently. node:sqlite's WAL mode tolerates concurrent readers plus a
+ * low-frequency, user-initiated writer, so this is tolerated today — but it
+ * is a real cross-process writer boundary, not a "no writes" one.
+ *
+ * TODO(future): move BFF to the core daemon to avoid two processes writing
+ * the same SQLite. This should land BEFORE adding any more BFF write routes.
  */
 
 // Server-only guard — Next.js will error if this is imported in a client component
