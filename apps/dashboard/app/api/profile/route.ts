@@ -146,6 +146,16 @@ export async function GET(_req: NextRequest) {
 }
 
 // ── PATCH — correctFact ────────────────────────────────────────────────────────
+//
+// Write-site note: PATCH/DELETE below are the dashboard BFF's write path into
+// the memory store — bi-temporal mutations (correctFact/setPinned/forgetFact/
+// forgetEntity: invalidate-old + insert-new, never a hard delete) that run in
+// a DIFFERENT OS process than core's background ConsolidationScheduler
+// (services/core/src/memory/consolidationScheduler.ts), while both point at
+// the same JARVIS_DATA_DIR SQLite files (see services.ts's header for the
+// full boundary description). Safe today under node:sqlite WAL mode because
+// these writes are low-frequency and user-initiated; weigh any NEW BFF write
+// route against the TODO(future) to move the BFF into core first.
 
 export async function PATCH(req: NextRequest) {
   const t0 = Date.now();
