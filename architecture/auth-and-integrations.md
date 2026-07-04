@@ -1,6 +1,6 @@
 # Jarvis — Auth & Integrations Reference
 
-> Status: living reference · Last updated: 2026-06-09
+> Status: living reference · Last updated: 2026-07-04
 > Scope: the **shared connector / auth layer** for Jarvis, the local-first personal AI
 > assistant (single user, MacBook Air M3, 16 GB). This document is the canonical auth +
 > integrations reference consumed by **Feature 3 (memory capture)** and
@@ -180,6 +180,8 @@ console, wait a few minutes to propagate (early calls may even return empty 200s
 
 ## 4. Webhooks / push endpoints
 
+> **Status: design-only — NOT implemented.** No `POST /webhooks/gmail`, `POST /webhooks/calendar`, or `POST /ingest/health` route exists in the current codebase (verified: no matching route files under `services/core/src`). Every data source is **poll-based** today — Gmail search (`email_search` / `gmail.ts`), Calendar `syncToken` (`googleCalendar.ts`), GitHub `ETag`+`since` (`github.ts`), Whoop date-range polling, and SimpleFIN `/accounts` polling. The webhook/tunnel design in this section (and the push/Pub/Sub/tunnel items in §7) is retained as a future push-delivery plan; it does not describe running code.
+
 Jarvis runs a small **local HTTP server** (bound to `127.0.0.1`) for push delivery. The
 honest problem: **a personal laptop has no stable public URL**, sleeps, and roams networks.
 So push is *best-effort* and every push source has a **polling fallback**.
@@ -294,7 +296,7 @@ flowchart TB
 
     subgraph Edge["Local ingress"]
         TUN["Tunnel / relay (optional)\ncloudflared · Tailscale Funnel"]
-        WHS["Local webhook server\n127.0.0.1\n/webhooks/gmail\n/webhooks/calendar\n/ingest/health"]
+        WHS["Local webhook server\n127.0.0.1\n/webhooks/gmail\n/webhooks/calendar\n/ingest/health\n(design-only — not implemented)"]
     end
 
     subgraph Core["Connector / Auth Layer (single, shared)"]
