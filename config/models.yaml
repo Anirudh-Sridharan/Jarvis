@@ -19,14 +19,13 @@ models:
     approxRamGB: 6
     default: true
 
-  - id: qwen-hf-reasoning
+  - id: openai-heavy
     kind: chat
-    provider: hf
-    modelRef: Qwen/Qwen3-Next-80B-A3B-Instruct         # serverless via HF Inference Providers (routes to novita/featherless-ai)
-    # Instruct (non-thinking) MoE, ~3B active params: answers directly, supports tool-calling. No reasoning-token overhead.
-    # routing suffix optional: append :fastest (default), :cheapest, :novita, or :featherless-ai to pin a provider
-    ctxWindow: 131072                                  # Qwen3-Next-80B-A3B-Instruct context
-    endpointUrl: ${HF_ENDPOINT_URL}
+    provider: hf                                       # "hf" = the OpenAI-compatible cloud provider slot (Bearer ${HF_TOKEN} → ${HF_ENDPOINT_URL})
+    modelRef: gpt-5-mini                               # OpenAI API (switched from HF Inference Providers 2026-07-04; needs an OpenAI API key with credits — ChatGPT Plus is separate)
+    # Supports tool-calling + streaming via the same OpenAI-compatible /v1/chat/completions contract.
+    ctxWindow: 400000                                  # gpt-5-mini context window
+    endpointUrl: ${HF_ENDPOINT_URL}                    # set to https://api.openai.com/v1/chat/completions in .env; HF_TOKEN holds the OpenAI key (legacy var names)
 
   - id: qwen-embed
     kind: embedding
