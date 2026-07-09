@@ -31,3 +31,6 @@ export {
   DEFAULT_BREAKER_MAX_REPLIES,
 } from "./circuitBreaker.js";
 export type { ReplyCircuitBreakerOptions } from "./circuitBreaker.js";
+
+// State store (imessage.db: watermark, sent-fingerprints, processed GUIDs)
+export { ImessageStateStore } from "./store/state.js";
