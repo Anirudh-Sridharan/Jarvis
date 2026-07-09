@@ -125,6 +125,16 @@ export interface PendingSearchResult {
  */
 const ENTITY_MERGE_COSINE_THRESHOLD = 0.92;
 
+/**
+ * T-12-01: cap on surfaced consolidation error message length. `errors[].message`
+ * is `String(err)` from the heavy-tier LLM/provider client, which can echo a
+ * captured record's body (up to 4096 chars) back verbatim on certain failure
+ * modes. Truncating here — the single place both /telemetry and the dashboard
+ * BFF read through — stops full captured content leaking through an
+ * observability surface.
+ */
+const MAX_SURFACED_ERROR_CHARS = 200;
+
 export class MemoryStore {
   /** BM25 index over live nodes (default search path). */
   private bm25Index: BM25Index | null = null;
@@ -995,6 +1005,49 @@ export class MemoryStore {
     `).run(merged.finishedAt, merged.status, merged.stage, merged.counts, merged.errors, id);
   }
 
+  /**
+   * MEM-03: read-only observability aggregate — pending/consolidated/dead-letter
+   * counts over experience_records plus the most recent consolidation_runs row,
+   * fully deserialized. SELECT/SUM only; never calls updateConsolidationRun() or
+   * writes anything. Surfaced lastRun.errors[].message strings are truncated to
+   * MAX_SURFACED_ERROR_CHARS (T-12-01) so a provider error that echoes a
+   * captured record's body cannot leak full content through /telemetry or the
+   * dashboard.
+   */
+  getConsolidationHealth(): import("../types.js").ConsolidationHealth {
+    const counts = this.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN consolidation_pending = 1 AND dead_letter = 0 THEN 1 ELSE 0 END) AS pending,
+           SUM(CASE WHEN consolidation_pending = 0 AND dead_letter = 0 THEN 1 ELSE 0 END) AS consolidated,
+           SUM(CASE WHEN dead_letter = 1 THEN 1 ELSE 0 END) AS deadLetter
+         FROM experience_records`,
+      )
+      .get() as { pending: number | null; consolidated: number | null; deadLetter: number | null };
+
+    const lastRunRow = this.db
+      .prepare(`SELECT * FROM consolidation_runs ORDER BY started_at DESC LIMIT 1`)
+      .get() as RawConsolidationRun | undefined;
+
+    const lastRun = lastRunRow ? this.rowToConsolidationRun(lastRunRow) : null;
+    if (lastRun) {
+      lastRun.errors = lastRun.errors.map((e) => ({
+        ...e,
+        message:
+          e.message.length > MAX_SURFACED_ERROR_CHARS
+            ? `${e.message.slice(0, MAX_SURFACED_ERROR_CHARS)}…[truncated]`
+            : e.message,
+      }));
+    }
+
+    return {
+      pendingCount: counts.pending ?? 0,
+      consolidatedCount: counts.consolidated ?? 0,
+      deadLetterCount: counts.deadLetter ?? 0,
+      lastRun,
+    };
+  }
+
   insertInsight(insight: import("../types.js").Insight): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO insights
@@ -1192,6 +1245,24 @@ export class MemoryStore {
       lastConsolidationError: row.last_consolidation_error ?? null,
       nextRetryAt: row.next_retry_at ?? null,
       deadLetter: row.dead_letter === 1,
+    };
+  }
+
+  private rowToConsolidationRun(
+    row: RawConsolidationRun,
+  ): import("../types.js").ConsolidationRun {
+    return {
+      id: row.id,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at ?? undefined,
+      status: row.status as import("../types.js").ConsolidationRun["status"],
+      stage: row.stage as import("../types.js").ConsolidationRun["stage"],
+      windowStart: row.window_start,
+      windowEnd: row.window_end,
+      inputRecordIds: fromJson(row.input_record_ids, []),
+      counts: fromJson(row.counts, {}),
+      errors: fromJson(row.errors, []),
+      trigger: row.trigger as "scheduler" | "manual",
     };
   }
 }
