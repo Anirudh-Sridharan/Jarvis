@@ -1259,9 +1259,19 @@ export class MemoryStore {
       stage: row.stage as import("../types.js").ConsolidationRun["stage"],
       windowStart: row.window_start,
       windowEnd: row.window_end,
-      inputRecordIds: fromJson(row.input_record_ids, []),
-      counts: fromJson(row.counts, {}),
-      errors: fromJson(row.errors, []),
+      inputRecordIds: fromJson<string[]>(row.input_record_ids, []),
+      counts: fromJson<import("../types.js").ConsolidationRun["counts"]>(row.counts, {
+        recordsProcessed: 0,
+        factsExtracted: 0,
+        factsMerged: 0,
+        factsInvalidated: 0,
+        factsForgotten: 0,
+        factsCompressed: 0,
+        insightsGenerated: 0,
+        embeddingsWritten: 0,
+        conflictsFlagged: 0,
+      }),
+      errors: fromJson<import("../types.js").ConsolidationRun["errors"]>(row.errors, []),
       trigger: row.trigger as "scheduler" | "manual",
     };
   }
