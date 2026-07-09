@@ -19,6 +19,7 @@ import type { InferenceGateway } from "../inference/gateway.js";
 import { AgentLlm } from "./agentLlm.js";
 import { buildToolRegistry } from "./tools/index.js";
 import { getDataDir } from "../dataDir.js";
+import { parseCronNext } from "./cronNext.js";
 
 // ── Real clock ────────────────────────────────────────────────────────────────
 
@@ -166,6 +167,9 @@ export function getAgentSystem(
       clock: realClock,
       dataDir,
       approvalSink: queue.sink,
+      // 11-01: the cron-arming fix — without this, Scheduler.armCron()/
+      // catchUp() silently no-op and NO cron trigger ever fires live.
+      parseCronNext,
       // Feature 20: query-relevant profile facets ground agent runs.
       userContext: memory
         ? (goal: string) => memory.profile.getProfileContext(goal)

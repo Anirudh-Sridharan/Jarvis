@@ -702,6 +702,9 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
       agentSystem,
       integrations: fakeIntegrations as never,
       memory: fakeMemory,
+      http: {} as never,
+      tokenStore: {} as never,
+      capturePaths: {},
     });
 
     // Manually fire the nightly-consolidation trigger
@@ -751,6 +754,9 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
       agentSystem,
       integrations: fakeIntegrations as never,
       memory: fakeMemory,
+      http: {} as never,
+      tokenStore: {} as never,
+      capturePaths: {},
     });
 
     // Manually fire the morning-briefing trigger
@@ -758,6 +764,306 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
 
     expect(run.status).toMatch(/done|running/);
     expect(assembleBriefingSpy).toHaveBeenCalledOnce();
+  });
+
+  it("sync-connectors calls runSync for due connectors with trigger=schedule", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const connectorA = { id: "gcal", auth: "oauth", schedule: "0 * * * *", concurrency: 1, sync: vi.fn() };
+    const connectorB = { id: "github", auth: "pat", schedule: "*/30 * * * *", concurrency: 1, sync: vi.fn() };
+
+    const listSpy = vi.fn().mockReturnValue([connectorA, connectorB]);
+    const getDueConnectorsSpy = vi.fn().mockReturnValue([connectorA, connectorB]);
+    const listRunsSpy = vi.fn().mockReturnValue([]);
+    const runSyncSpy = vi.fn().mockImplementation(async (connector: { id: string }, _http, _tokenStore, trigger) => ({
+      id: `run-${connector.id}`,
+      source: connector.id,
+      stream: `${connector.id}.sync`,
+      trigger,
+      startedAt: new Date().toISOString(),
+      status: "ok",
+      pointsWritten: 0,
+      pagesFetched: 1,
+      cursorBefore: null,
+      cursorAfter: null,
+    }));
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: listSpy } as never,
+      scheduler: {
+        getDueConnectors: getDueConnectorsSpy,
+        listRuns: listRunsSpy,
+        runSync: runSyncSpy,
+      } as never,
+      email: { search: vi.fn(), getThread: vi.fn() } as never,
+    };
+
+    const fakeMemory = {
+      consolidation: { run: vi.fn() },
+      capture: {} as never,
+    };
+
+    const { syncConnectorsTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: {},
+    });
+
+    const run = await agentSystem.triggers.fireTrigger(syncConnectorsTriggerId, "manual");
+
+    expect(run.status).toMatch(/done|running|awaiting-approval/);
+    expect(getDueConnectorsSpy).toHaveBeenCalledOnce();
+    expect(runSyncSpy).toHaveBeenCalledTimes(2);
+    expect(runSyncSpy).toHaveBeenNthCalledWith(1, connectorA, expect.anything(), expect.anything(), "schedule");
+    expect(runSyncSpy).toHaveBeenNthCalledWith(2, connectorB, expect.anything(), expect.anything(), "schedule");
+  });
+
+  it("sync-connectors: missing creds → per-connector error, no crash", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const connector = { id: "gmail", auth: "oauth", schedule: "*/30 * * * *", concurrency: 1, sync: vi.fn() };
+
+    const runSyncSpy = vi.fn().mockResolvedValue({
+      id: "run-gmail-1",
+      source: "gmail",
+      stream: "gmail.sync",
+      trigger: "schedule",
+      startedAt: new Date().toISOString(),
+      status: "error",
+      pointsWritten: 0,
+      pagesFetched: 0,
+      cursorBefore: null,
+      cursorAfter: null,
+      error: { code: "SYNC_ERROR", message: "No OAuth tokens for gmail — run: npm run connect -- gmail", retryable: true },
+    });
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([connector]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([connector]),
+        listRuns: vi.fn().mockReturnValue([]),
+        runSync: runSyncSpy,
+      } as never,
+      email: { search: vi.fn(), getThread: vi.fn() } as never,
+    };
+
+    const fakeMemory = { consolidation: { run: vi.fn() }, capture: {} as never };
+
+    const { syncConnectorsTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: {},
+    });
+
+    const run = await agentSystem.triggers.fireTrigger(syncConnectorsTriggerId, "manual");
+
+    expect(run.status).toMatch(/done|running|awaiting-approval/);
+    expect(runSyncSpy).toHaveBeenCalledOnce();
+    const summary = JSON.stringify(run);
+    expect(summary).toContain("gmail: error");
+    // No token material anywhere in the run summary/output.
+    expect(summary).not.toMatch(/test_access_token|test_refresh_token|accessToken|refreshToken/i);
+  });
+
+  it("sync-connectors: skips already-running source", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const connector = { id: "whoop", auth: "oauth", schedule: "0 7 * * *", concurrency: 1, sync: vi.fn() };
+
+    const runSyncSpy = vi.fn();
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([connector]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([connector]),
+        listRuns: vi.fn().mockReturnValue([{ id: "run-in-flight", source: "whoop", status: "running" }]),
+        runSync: runSyncSpy,
+      } as never,
+      email: { search: vi.fn(), getThread: vi.fn() } as never,
+    };
+
+    const fakeMemory = { consolidation: { run: vi.fn() }, capture: {} as never };
+
+    const { syncConnectorsTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: {},
+    });
+
+    const run = await agentSystem.triggers.fireTrigger(syncConnectorsTriggerId, "manual");
+
+    expect(run.status).toMatch(/done|running|awaiting-approval/);
+    expect(runSyncSpy).not.toHaveBeenCalled();
+    expect(JSON.stringify(run)).toContain("skipped (already running)");
+  });
+
+  it("sync-captures ingests configured sources, skips unconfigured", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    // A real (empty) vault directory so runVaultIngest degrades to 0 scanned,
+    // not an error — proves the vault path actually ran.
+    const vaultDir = mkdtempSync(join(tmpdir(), "jarvis-sync-captures-vault-"));
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([]),
+        listRuns: vi.fn().mockReturnValue([]),
+        runSync: vi.fn(),
+      } as never,
+      email: {
+        search: vi.fn().mockResolvedValue([]),
+        getThread: vi.fn(),
+      } as never,
+    };
+
+    const fakeMemory = {
+      consolidation: { run: vi.fn() },
+      capture: { captureMarkdown: vi.fn(), captureDocument: vi.fn(), captureEmail: vi.fn() } as never,
+    };
+
+    const { syncCapturesTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: { vaultDir }, // filesDir intentionally unset
+    });
+
+    try {
+      const run = await agentSystem.triggers.fireTrigger(syncCapturesTriggerId, "manual");
+
+      expect(run.status).toMatch(/done|running|awaiting-approval/);
+      const summary = JSON.stringify(run);
+      expect(summary).toContain("obsidian:");
+      expect(summary).not.toContain("files:");
+      expect((fakeIntegrations.email.search as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(vaultDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sync-captures: email failure does not abort obsidian/files", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const vaultDir = mkdtempSync(join(tmpdir(), "jarvis-sync-captures-vault2-"));
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([]),
+        listRuns: vi.fn().mockReturnValue([]),
+        runSync: vi.fn(),
+      } as never,
+      email: {
+        search: vi.fn().mockRejectedValue(new Error("no token")),
+        getThread: vi.fn(),
+      } as never,
+    };
+
+    const fakeMemory = {
+      consolidation: { run: vi.fn() },
+      capture: { captureMarkdown: vi.fn(), captureDocument: vi.fn(), captureEmail: vi.fn() } as never,
+    };
+
+    const { syncCapturesTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: { vaultDir },
+    });
+
+    try {
+      const run = await agentSystem.triggers.fireTrigger(syncCapturesTriggerId, "manual");
+
+      // Trigger-level run.status only reflects whether the job handler threw
+      // (it didn't — each source is independently try/caught); the job's own
+      // "partial" status lives in the JobResult stashed at run.result.
+      expect(run.status).toMatch(/done|running|awaiting-approval/);
+      expect((run.result as { status: string }).status).toBe("partial");
+      const summary = JSON.stringify(run);
+      expect(summary).toContain("obsidian:");
+      expect(summary).toContain("email: skipped");
+    } finally {
+      rmSync(vaultDir, { recursive: true, force: true });
+    }
   });
 });
 

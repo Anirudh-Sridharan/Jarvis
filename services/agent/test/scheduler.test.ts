@@ -11,7 +11,7 @@
  *   - Agent-goal trigger wakes agent as reasoner
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -411,5 +411,97 @@ describe("Scheduler", () => {
     const runs = scheduler.listRuns(trigger.id);
     expect(runs.length).toBe(3);
     expect(runs.every((r) => r.triggerId === trigger.id)).toBe(true);
+  });
+
+  it("addTrigger + start(): re-arming is idempotent — one live timer, handler fires exactly once per occurrence (11-01 double-arm regression)", async () => {
+    tmpDir = makeTempDir();
+    // Anchored at an exact period boundary (0) so the computed delay is
+    // deterministically == PERIOD_MS, not "however far Date.now() happens
+    // to be from the next minute boundary" — keeps the advance-by-PERIOD_MS
+    // assertions below exact instead of flaky.
+    const clock = new FixedClock(0);
+    const llm = new FakeLlm();
+    const tools = makeToolRegistry([new FakeSearchTool()]);
+    const { sink } = makeAutoApproveSink();
+
+    const PERIOD_MS = 60_000;
+    // Deterministic periodic parseCronNext: next multiple of PERIOD_MS
+    // strictly after `after` (mirrors the real production */N inversion —
+    // see services/core/src/agent/cronNext.ts — without importing across
+    // the leaf boundary).
+    const parseCronNext = (_expr: string, _tz: string, after = 0): number | null =>
+      Math.ceil((after + 1) / PERIOD_MS) * PERIOD_MS;
+
+    const handlerSpy = vi.fn(async (): Promise<JobResult> => makeFakeJobResult());
+
+    vi.useFakeTimers();
+    try {
+      const scheduler = new Scheduler({
+        dataDir: tmpDir,
+        clock,
+        llm,
+        tools,
+        ...makeSchedulerDeps(tmpDir, clock, sink),
+        parseCronNext,
+      });
+
+      scheduler.registerJob({
+        name: "idempotent-rearm-job",
+        description: "Test",
+        handler: handlerSpy,
+        needsModel: "none",
+        maxDurationSec: 10,
+        singleton: false,
+      });
+
+      // addTrigger() arms immediately — exactly one live timer.
+      scheduler.addTrigger({
+        name: "idempotent-rearm-trigger",
+        kind: "cron",
+        enabled: true,
+        cron: { expr: "*/1 * * * *", timezone: "UTC" },
+        action: { job: "idempotent-rearm-job" },
+        tags: [],
+        catchUp: "skip",
+      });
+      expect(vi.getTimerCount()).toBe(1);
+
+      // start() unconditionally re-arms every enabled trigger. WITHOUT the
+      // idempotent-rearm fix, this leaves a SECOND live (orphaned) timer
+      // for the same trigger id — the Scheduler's `timers` map only
+      // remembers the latest one, but the earlier native timer is never
+      // cleared and still fires independently later.
+      await scheduler.start();
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Advance to the first occurrence: handler fires exactly once (the
+      // advisory lock alone would mask a same-instant double-fire, but a
+      // leaked orphan timer proves itself over the NEXT occurrence below).
+      // NOTE: from here on we stop asserting on the raw vi.getTimerCount()
+      // total — `fire()`'s pre-existing `withTimeout()` helper races the
+      // job against its own uncancelled setTimeout (no clearTimeout on the
+      // winning path), which independently adds one unrelated pending timer
+      // per fire and would contaminate a raw count. That's a separate,
+      // out-of-scope leak (not the cron double-arm bug this test targets;
+      // see SUMMARY "Deferred Issues"). The handler call-count progression
+      // below is the correct, uncontaminated signal for "did a leaked
+      // duplicate cron timer also fire" — a phantom timer fires the job
+      // handler again; it does not touch vi.getTimerCount() bookkeeping
+      // the same way.
+      await vi.advanceTimersByTimeAsync(PERIOD_MS);
+      expect(handlerSpy).toHaveBeenCalledTimes(1);
+
+      // Advance to the following occurrence: exactly one more fire. A
+      // leaked orphan from the pre-fix double-arm would show up here as a
+      // 3rd call, since the phantom timer independently re-arms itself
+      // once per cycle after its own first fire.
+      await vi.advanceTimersByTimeAsync(PERIOD_MS);
+      expect(handlerSpy).toHaveBeenCalledTimes(2);
+
+      scheduler.stop();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

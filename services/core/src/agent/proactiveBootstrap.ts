@@ -8,6 +8,21 @@
  *      Calls integrations.briefing.assembleBriefing() and stores the result
  *      in the EpisodicState for the trigger so the dashboard can surface it.
  *
+ *   3. sync-connectors (cron every 15 min UTC)
+ *      Runs due connector syncs (whoop/gcal/gmail/github) via
+ *      integrations.scheduler.getDueConnectors/runSync with trigger="schedule".
+ *      Skips a source whose most recent sync_runs row is still "running" —
+ *      cheap belt-and-suspenders guard against racing a manual CLI sync of
+ *      the same source (Whoop's rotating refresh token is not safe under
+ *      concurrency — see 11-RESEARCH.md Pitfall 3).
+ *
+ *   4. sync-captures (cron hourly UTC)
+ *      Ingests the Obsidian vault / local documents / email into memory via
+ *      runVaultIngest/runFilesIngest/runEmailIngest. Each source is
+ *      independently try/caught — runEmailIngest's email.search() throws on
+ *      missing/expired Gmail auth, unlike vault/files, which degrade
+ *      internally (see 11-RESEARCH.md Pitfall 4).
+ *
  *   Condition triggers' metricProvider is wired to integrations.metrics via
  *   metric polling in the condition action handlers.
  *
@@ -20,11 +35,19 @@
  */
 
 import type { AgentSystem } from "@jarvis/agent";
-import type { IntegrationsSystem } from "@jarvis/integrations";
+import type { HttpClient, IntegrationsSystem, TokenStore } from "@jarvis/integrations";
 import type { MemorySystem } from "@jarvis/memory";
+import { runVaultIngest } from "../memory/vaultIngest.js";
+import { runFilesIngest } from "../memory/filesIngest.js";
+import { runEmailIngest } from "../memory/emailIngest.js";
 
 let bootstrapped = false;
-const registeredTriggerIds: { consolidation?: string; briefing?: string } = {};
+const registeredTriggerIds: {
+  consolidation?: string;
+  briefing?: string;
+  syncConnectors?: string;
+  syncCaptures?: string;
+} = {};
 
 /** Normalize a thrown value to a string message for job-failure summaries. */
 function errMsg(err: unknown): string {
@@ -33,8 +56,12 @@ function errMsg(err: unknown): string {
 
 export interface ProactiveBootstrapDeps {
   agentSystem: AgentSystem;
-  integrations: Pick<IntegrationsSystem, "briefing" | "metrics">;
-  memory: Pick<MemorySystem, "consolidation">;
+  integrations: Pick<IntegrationsSystem, "briefing" | "metrics" | "connectors" | "scheduler" | "email">;
+  memory: Pick<MemorySystem, "consolidation" | "capture">;
+  http: HttpClient;
+  tokenStore: TokenStore;
+  /** Filesystem sources for sync-captures; unset paths are skipped. */
+  capturePaths: { vaultDir?: string; filesDir?: string };
 }
 
 /**
@@ -47,16 +74,20 @@ export interface ProactiveBootstrapDeps {
 export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
   consolidationTriggerId: string;
   briefingTriggerId: string;
+  syncConnectorsTriggerId: string;
+  syncCapturesTriggerId: string;
 } {
   if (bootstrapped) {
     return {
       consolidationTriggerId: registeredTriggerIds.consolidation ?? "",
       briefingTriggerId: registeredTriggerIds.briefing ?? "",
+      syncConnectorsTriggerId: registeredTriggerIds.syncConnectors ?? "",
+      syncCapturesTriggerId: registeredTriggerIds.syncCaptures ?? "",
     };
   }
   bootstrapped = true;
 
-  const { agentSystem, integrations, memory } = deps;
+  const { agentSystem, integrations, memory, http, tokenStore, capturePaths } = deps;
   const { triggers } = agentSystem;
 
   // ── 1. Register the consolidation ScheduledJob ──────────────────────────────
@@ -125,7 +156,95 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
     },
   });
 
-  // ── 3. Add cron triggers to the scheduler store ──────────────────────────────
+  // ── 3. Register the sync-connectors ScheduledJob ─────────────────────────────
+  triggers.registerJob({
+    name: "sync-connectors",
+    description: "Run due connector syncs (whoop/gcal/gmail/github).",
+    needsModel: "none",
+    maxDurationSec: 180,
+    singleton: true,
+
+    async handler(_ctx) {
+      try {
+        const due = integrations.scheduler.getDueConnectors(integrations.connectors.list());
+        const results: string[] = [];
+        for (const connector of due) {
+          // Belt-and-suspenders pre-flight (Pitfall 3): skip if a run for this
+          // source is already in flight — covers the cross-process race with a
+          // manually-spawned CLI sync (Whoop's rotating refresh token is NOT
+          // safe under concurrency).
+          const [last] = integrations.scheduler.listRuns(connector.id, 1);
+          if (last && last.status === "running") {
+            results.push(`${connector.id}: skipped (already running)`);
+            continue;
+          }
+          const run = await integrations.scheduler.runSync(connector, http, tokenStore, "schedule");
+          results.push(`${connector.id}: ${run.status}`);
+        }
+        return {
+          status: "done",
+          summary: results.join("; ") || "nothing due",
+          episodicUpdate: { lastDecision: `sync-connectors:${new Date().toISOString()}` },
+        };
+      } catch (err) {
+        const message = errMsg(err);
+        return {
+          status: "failed",
+          summary: `sync-connectors failed: ${message}`,
+          error: { code: "sync-connectors-error", message },
+        };
+      }
+    },
+  });
+
+  // ── 4. Register the sync-captures ScheduledJob ───────────────────────────────
+  triggers.registerJob({
+    name: "sync-captures",
+    description: "Ingest obsidian vault, local documents, and email into memory.",
+    needsModel: "none",
+    maxDurationSec: 300,
+    singleton: true,
+
+    async handler(_ctx) {
+      const notes: string[] = [];
+      const { vaultDir, filesDir } = capturePaths;
+
+      if (vaultDir) {
+        try {
+          const r = await runVaultIngest({ memory, vaultDir });
+          notes.push(`obsidian: +${r.captured} (${r.errors} errors)`);
+        } catch (err) {
+          notes.push(`obsidian: failed (${errMsg(err)})`);
+        }
+      }
+      if (filesDir) {
+        try {
+          const r = await runFilesIngest({ memory, dir: filesDir });
+          notes.push(`files: +${r.chunks} chunks`);
+        } catch (err) {
+          notes.push(`files: failed (${errMsg(err)})`);
+        }
+      }
+      // runEmailIngest does NOT catch email.search() failures internally (unlike
+      // vault/files, which degrade on a missing/unreadable directory) — this
+      // try/catch is load-bearing (Pitfall 4).
+      try {
+        const r = await runEmailIngest({ memory, email: integrations.email });
+        notes.push(`email: +${r.chunks} chunks`);
+      } catch (err) {
+        notes.push(`email: skipped (${errMsg(err)})`);
+      }
+
+      const anyFailed = notes.some((n) => n.includes("failed") || n.includes("skipped"));
+      return {
+        status: anyFailed ? "partial" : "done",
+        summary: notes.join("; ") || "no sources configured",
+        episodicUpdate: { lastDecision: `sync-captures:${new Date().toISOString()}` },
+      };
+    },
+  });
+
+  // ── 5. Add cron triggers to the scheduler store ──────────────────────────────
 
   const consolidationTrigger = triggers.addTrigger({
     name: "nightly-consolidation",
@@ -147,12 +266,36 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
     catchUp: "skip",
   });
 
+  const syncConnectorsTrigger = triggers.addTrigger({
+    name: "sync-connectors",
+    kind: "cron",
+    enabled: true,
+    cron: { expr: "*/15 * * * *", timezone: "UTC" },
+    action: { job: "sync-connectors" },
+    tags: ["integrations", "sync"],
+    catchUp: "run-once",
+  });
+
+  const syncCapturesTrigger = triggers.addTrigger({
+    name: "sync-captures",
+    kind: "cron",
+    enabled: true,
+    cron: { expr: "0 * * * *", timezone: "UTC" },
+    action: { job: "sync-captures" },
+    tags: ["memory", "capture", "sync"],
+    catchUp: "run-once",
+  });
+
   registeredTriggerIds.consolidation = consolidationTrigger.id;
   registeredTriggerIds.briefing = briefingTrigger.id;
+  registeredTriggerIds.syncConnectors = syncConnectorsTrigger.id;
+  registeredTriggerIds.syncCaptures = syncCapturesTrigger.id;
 
   return {
     consolidationTriggerId: consolidationTrigger.id,
     briefingTriggerId: briefingTrigger.id,
+    syncConnectorsTriggerId: syncConnectorsTrigger.id,
+    syncCapturesTriggerId: syncCapturesTrigger.id,
   };
 }
 
@@ -172,4 +315,6 @@ export function resetProactiveBootstrap(): void {
   bootstrapped = false;
   registeredTriggerIds.consolidation = undefined;
   registeredTriggerIds.briefing = undefined;
+  registeredTriggerIds.syncConnectors = undefined;
+  registeredTriggerIds.syncCaptures = undefined;
 }
