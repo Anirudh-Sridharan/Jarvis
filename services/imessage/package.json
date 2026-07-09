@@ -1,0 +1,25 @@
+{
+  "name": "@jarvis/imessage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis iMessage channel leaf — hermetic loop-prevention and persistence primitives for texting Jarvis via the native Messages app (Phase 9: safety logic only; live chat.db/AppleScript wiring is Phase 10).",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./testing": "./dist/testing/fakes.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
