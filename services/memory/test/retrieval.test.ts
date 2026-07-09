@@ -261,6 +261,81 @@ describe("MemoryStore.pendingSearch() - MEM-01 pending-record search", () => {
   });
 });
 
+describe("RetrievalService - MEM-01 pendingRetriever (4th retriever + provisional discount)", () => {
+  it("includes a pending candidate in retrieve() output by default", async () => {
+    const { store, retrieval, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    await capture.captureNote({
+      text: "The user just said they are switching to a new email provider",
+      noteId: "pending-fusion-1",
+    });
+
+    const results = await retrieval.retrieve("switching email provider", { k: 5 });
+    expect(results.some((r) => r.kind === "pending")).toBe(true);
+  });
+
+  it("excludes pending candidates when includePending is false", async () => {
+    const { store, retrieval, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    await capture.captureNote({
+      text: "The user just said they are switching to a new email provider",
+      noteId: "pending-fusion-2",
+    });
+
+    const results = await retrieval.retrieve("switching email provider", {
+      k: 5,
+      includePending: false,
+    });
+    expect(results.some((r) => r.kind === "pending")).toBe(false);
+  });
+
+  it("returns existing three-retriever results unchanged when no pending records exist", async () => {
+    const { store, retrieval } = makeRetrieval();
+    await store.upsertEpisode({
+      text: "User prefers TypeScript over Python for type safety",
+      occurredAt: "2026-06-01T10:00:00Z",
+      provenance: { source: "chat", sourceId: "msg-1", confidence: 0.9 },
+    });
+    const results = await retrieval.retrieve("TypeScript programming", { k: 5 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((r) => r.kind !== "pending")).toBe(true);
+  });
+
+  it("a pending candidate never outranks a fact candidate with equal underlying signals", async () => {
+    const { store, retrieval, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    const NOW = 1_700_000_000_000;
+    const text = "Equal-signal fixture text about a rare topic xyzzyplugh";
+
+    const captured = await capture.captureNote({ text, noteId: "equal-signal-pending" });
+    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    // Align the pending record's recency clock to NOW (same as the fact below).
+    db.prepare(`UPDATE experience_records SET ingested_at = ? WHERE id = ?`).run(
+      new Date(NOW).toISOString(),
+      captured.record.id,
+    );
+
+    const fact = await store.upsertFact({
+      subjectId: "self",
+      predicate: "mentions",
+      objectLiteral: "xyzzyplugh",
+      text,
+      validFrom: new Date(NOW).toISOString(),
+      provenance: { source: "system", sourceId: "test", confidence: 1 },
+    });
+    // upsertFact() hardcodes importance=5 (matches pending's default) and
+    // last_accessed_at=Date.now() — align it to NOW for an exact recency match.
+    db.prepare(`UPDATE facts SET last_accessed_at = ? WHERE id = ?`).run(NOW, fact.id);
+
+    const results = await retrieval.retrieve(text, { k: 10, now: NOW });
+    const pendingResult = results.find((r) => r.kind === "pending");
+    const factResult = results.find((r) => r.kind === "fact");
+    expect(pendingResult).toBeDefined();
+    expect(factResult).toBeDefined();
+    expect(pendingResult!.fusedScore).toBeLessThan(factResult!.fusedScore);
+  });
+});
+
 describe("RetrievalService - fusion score breakdown", () => {
   it("returned memories include score breakdown", async () => {
     const { store, retrieval } = makeRetrieval();

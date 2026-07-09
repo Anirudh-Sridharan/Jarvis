@@ -26,13 +26,24 @@ const MMR_LAMBDA = 0.7;
 const CANDIDATE_CAP_VECTOR = 50;
 const CANDIDATE_CAP_BM25 = 50;
 const CANDIDATE_CAP_ENTITY = 30;
+const CANDIDATE_CAP_PENDING = 30;
 const TOTAL_CAP = 80;
 const RERANK_CAP = 20;
+
+/**
+ * MEM-01: multiplier applied to a "pending" (not-yet-consolidated or
+ * dead-lettered) candidate's fusedScore, AFTER scoreMemory() and BEFORE the
+ * relevance-floor filter. A retrieval-layer policy line, not a scoring-math
+ * change — scoring.ts stays untouched. Guarantees a pending candidate never
+ * systematically outranks a vetted fact/episode candidate with equivalent
+ * underlying relevance signals.
+ */
+const PENDING_DISCOUNT = 0.6;
 
 interface InternalCandidate {
   memoryId: string;
   text: string;
-  kind: "episode" | "entity" | "fact";
+  kind: "episode" | "entity" | "fact" | "pending";
   importance: number;
   lastAccessedAt: number;
   validFrom: string;
@@ -91,13 +102,20 @@ export class RetrievalService {
       queryVec = undefined;
     }
 
-    // 2. Fan out three retrievers in parallel
-    const [vectorResults, bm25Results, entityResults] = await Promise.all([
+    // 2. Fan out four retrievers in parallel (MEM-01: pendingRetriever is the
+    // 4th, gated by includePending — defaults to true so a freshly captured,
+    // not-yet-consolidated record is recallable without waiting for a
+    // consolidation pass).
+    const includePending = opts.includePending ?? true;
+    const [vectorResults, bm25Results, entityResults, pendingResults] = await Promise.all([
       queryVec
         ? this.vectorRetriever(queryVec, CANDIDATE_CAP_VECTOR, includeStale, nowMs)
         : ([] as InternalCandidate[]),
       this.bm25Retriever(query, CANDIDATE_CAP_BM25),
       this.entityRetriever(opts.entityIds ?? [], CANDIDATE_CAP_ENTITY),
+      includePending
+        ? this.pendingRetriever(queryVec, query, CANDIDATE_CAP_PENDING)
+        : ([] as InternalCandidate[]),
     ]);
 
     // 3. Merge candidate pools
@@ -125,6 +143,20 @@ export class RetrievalService {
         existing.rawSignals.entityHits = (existing.rawSignals.entityHits ?? 0) + 1;
       } else {
         candidateMap.set(r.memoryId, { ...r, queryScore: 0, signals: {} });
+      }
+    }
+    // pendingSearch() already fuses vector+BM25 internally, so a pending
+    // candidate arrives with both raw signals populated (either may be
+    // undefined). Merge like the others in case a memoryId collision ever
+    // occurs (defensive — experience_record ids and episode/fact ids are
+    // disjoint ULID spaces in practice).
+    for (const r of pendingResults) {
+      const existing = candidateMap.get(r.memoryId);
+      if (existing) {
+        if (r.rawSignals.vecCosine !== undefined) existing.rawSignals.vecCosine = r.rawSignals.vecCosine;
+        if (r.rawSignals.bm25Raw !== undefined) existing.rawSignals.bm25Raw = r.rawSignals.bm25Raw;
+      } else {
+        candidateMap.set(r.memoryId, { ...r, signals: {} });
       }
     }
 
@@ -183,6 +215,15 @@ export class RetrievalService {
         c.queryScore = c.signals.vector;
       } else if (c.queryScore === 0) {
         c.queryScore = scored.relevance;
+      }
+    }
+
+    // 5b. MEM-01: provisional discount — pending candidates never
+    // systematically outrank a vetted fact/episode candidate with equivalent
+    // underlying signals. scoreMemory() itself stays untouched.
+    for (const c of candidates) {
+      if (c.kind === "pending") {
+        c.fusedScore = (c.fusedScore ?? 0) * PENDING_DISCOUNT;
       }
     }
 
@@ -316,6 +357,23 @@ export class RetrievalService {
     const results = this.store.entitySearch({ entityIds, k: cap });
     return results.map((r) => nodeToCandidate(r.node, { entityHits: 1 }));
   }
+
+  /**
+   * MEM-01: 4th retriever over experience_records (not yet consolidated, or
+   * dead-lettered). pendingSearch() itself fuses vector+BM25 and degrades to
+   * [] on any read failure, so a bug here can never break the other three
+   * retrievers.
+   */
+  private pendingRetriever(
+    queryVec: number[] | undefined,
+    query: string,
+    cap: number,
+  ): InternalCandidate[] {
+    const results = this.store.pendingSearch({ query, queryVec, k: cap });
+    return results.map((r) =>
+      experienceToCandidate(r.record, { vecCosine: r.vecCosine, bm25Raw: r.bm25Raw }),
+    );
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -344,6 +402,34 @@ function nodeToCandidate(
     lastAccessedAt: node.lastAccessedAt,
     validFrom,
     embedding: node.embedding,
+    queryScore,
+    signals: {},
+    rawSignals,
+  };
+}
+
+/**
+ * MEM-01: map a pendingSearch() result (ExperienceRecord + raw signals) into
+ * an InternalCandidate. A sibling to nodeToCandidate() — pending candidates
+ * come from ExperienceRecord, not MemoryNode, so they get their own mapper
+ * rather than a coercion into nodeToCandidate()'s MemoryNode param.
+ */
+function experienceToCandidate(
+  record: import("../types.js").ExperienceRecord,
+  rawSignals: InternalCandidate["rawSignals"],
+): InternalCandidate {
+  const queryScore =
+    rawSignals.vecCosine !== undefined ? (rawSignals.vecCosine + 1) / 2 : 0;
+
+  return {
+    memoryId: record.id,
+    text: record.text,
+    kind: "pending",
+    // Pending records have no consolidation-assigned salience yet — default
+    // to 5, mirroring MemoryNode.importance's own documented default.
+    importance: 5,
+    lastAccessedAt: new Date(record.ingested_at).getTime(),
+    validFrom: record.timestamp,
     queryScore,
     signals: {},
     rawSignals,
