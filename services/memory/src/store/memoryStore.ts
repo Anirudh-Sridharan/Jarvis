@@ -107,6 +107,14 @@ export interface SearchResult {
   score: number;
 }
 
+/** MEM-01: a candidate from pendingSearch() — an unconsolidated (or
+ *  dead-lettered) experience_record plus whichever raw signal(s) matched it. */
+export interface PendingSearchResult {
+  record: import("../types.js").ExperienceRecord;
+  vecCosine?: number;
+  bm25Raw?: number;
+}
+
 // ── MemoryStore ───────────────────────────────────────────────────────────────
 
 /**
@@ -816,6 +824,87 @@ export class MemoryStore {
       .prepare(`SELECT * FROM experience_records WHERE dead_letter = 1`)
       .all() as unknown as RawExperience[];
     return rows.map(this.rowToExperience);
+  }
+
+  /**
+   * MEM-01: search the still-unconsolidated (or dead-lettered) capture journal
+   * so freshly captured content is recallable before a consolidation pass
+   * promotes it into episodes/facts. Dead-lettered rows (extraction gave up,
+   * not "the text is meaningless") are deliberately INCLUDED — never hard-
+   * deleted, and never made permanently unrecallable (mirrors this store's
+   * soft-delete-only invariant).
+   *
+   * Vector half reuses topKCosine() over embeddings(node_kind='experience'),
+   * same brute-force pattern as vectorSearchBruteForce(). Keyword half builds
+   * a FRESH, uncached BM25 index per call (no dedicated pending-set cache
+   * field, no invalidateBm25 wiring) — the pending set is burst-bounded
+   * (≤ ~25 records), so rebuilding per query is cheap and avoids a second
+   * cache-invalidation surface. Degrades to [] on any read failure so a bug
+   * here can never break the existing three-retriever path chat depends on.
+   */
+  pendingSearch(args: {
+    query: string;
+    queryVec?: number[];
+    k: number;
+  }): PendingSearchResult[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM experience_records WHERE consolidation_pending = 1 OR dead_letter = 1`,
+        )
+        .all() as unknown as RawExperience[];
+      if (rows.length === 0) return [];
+
+      const records = rows.map((r) => this.rowToExperience(r));
+      const byId = new Map(records.map((r) => [r.id, r]));
+      const scores = new Map<string, { vecCosine?: number; bm25Raw?: number }>();
+
+      // Vector half — cosine over embeddings(node_kind='experience') for this
+      // candidate set, resolved back to the already-fetched record map (no
+      // extra store round-trip).
+      if (args.queryVec && args.queryVec.length > 0) {
+        const ids = records.map((r) => r.id);
+        const placeholders = ids.map(() => "?").join(",");
+        const embedRows = this.db
+          .prepare(
+            `SELECT node_id, embedding FROM embeddings WHERE node_kind = 'experience' AND node_id IN (${placeholders})`,
+          )
+          .all(...ids) as unknown as { node_id: string; embedding: string }[];
+        const entries: VectorEntry[] = embedRows.map((e) => ({
+          id: `exp:${e.node_id}`,
+          embedding: fromJson<number[]>(e.embedding, []),
+        }));
+        if (entries.length > 0) {
+          const topK = topKCosine(args.queryVec, entries, args.k);
+          for (const t of topK) {
+            const id = t.id.slice(4); // strip "exp:" prefix
+            const existing = scores.get(id) ?? {};
+            existing.vecCosine = t.score;
+            scores.set(id, existing);
+          }
+        }
+      }
+
+      // Keyword half — fresh, uncached BM25 over the same candidate set.
+      const docs: BM25Doc[] = records.map((r) => ({ id: `exp:${r.id}`, text: r.text }));
+      const index = buildBM25Index(docs);
+      const bm25Results = index.search(args.query, args.k);
+      for (const b of bm25Results) {
+        const id = b.id.slice(4);
+        const existing = scores.get(id) ?? {};
+        existing.bm25Raw = b.score;
+        scores.set(id, existing);
+      }
+
+      const out: PendingSearchResult[] = [];
+      for (const [id, sig] of scores.entries()) {
+        const record = byId.get(id);
+        if (record) out.push({ record, ...sig });
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   updateExperienceEmbedState(

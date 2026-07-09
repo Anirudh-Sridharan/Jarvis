@@ -10,6 +10,7 @@ import { openDatabase } from "../src/db/database.js";
 import { MemoryStore } from "../src/store/memoryStore.js";
 import { RetrievalService } from "../src/retrieval/retrieval.js";
 import { FakeEmbedder } from "../src/testing/fakes.js";
+import { CaptureService } from "../src/capture/capture.js";
 
 function makeRetrieval() {
   const dir = mkdtempSync(join(tmpdir(), "jarvis-retrieval-test-"));
@@ -199,6 +200,64 @@ describe("RetrievalService - access tracking", () => {
       .get(ep.id) as { access_count: number; last_accessed_at: number };
     expect(row.access_count).toBe(1);
     expect(row.last_accessed_at).toBeGreaterThan(0);
+  });
+});
+
+describe("MemoryStore.pendingSearch() - MEM-01 pending-record search", () => {
+  it("returns [] when the pending set is empty", () => {
+    const { store } = makeRetrieval();
+    const results = store.pendingSearch({ query: "TypeScript", k: 5 });
+    expect(results).toHaveLength(0);
+  });
+
+  it("finds a not-yet-consolidated record via keyword match", async () => {
+    const { store, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    await capture.captureNote({
+      text: "The user just mentioned they prefer TypeScript for new projects",
+      noteId: "pending-note-1",
+    });
+
+    const results = store.pendingSearch({ query: "TypeScript projects", k: 5 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.some((r) => r.record.text.includes("TypeScript"))).toBe(true);
+    expect(results.some((r) => r.bm25Raw !== undefined)).toBe(true);
+  });
+
+  it("finds a not-yet-consolidated record via vector match", async () => {
+    const { store, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    const text = "The user just mentioned they prefer TypeScript for new projects";
+    await capture.captureNote({ text, noteId: "pending-note-2" });
+
+    const [queryVec] = await embedder.embed([text]);
+    const results = store.pendingSearch({ query: "unrelated words", queryVec, k: 5 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.some((r) => r.record.text === text && r.vecCosine !== undefined)).toBe(true);
+  });
+
+  it("still returns a dead-lettered record (never permanently unrecallable)", async () => {
+    const { store, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    const result = await capture.captureNote({
+      text: "A record that failed extraction repeatedly about quantum computing",
+      noteId: "dead-letter-note-1",
+    });
+    store.deadLetterRecord(result.record.id, { attempts: 5, error: "simulated failure" });
+
+    const results = store.pendingSearch({ query: "quantum computing", k: 5 });
+    expect(results.some((r) => r.record.id === result.record.id)).toBe(true);
+    const found = results.find((r) => r.record.id === result.record.id);
+    expect(found?.record.deadLetter).toBe(true);
+  });
+
+  it("degrades to [] rather than throwing when a read fails", () => {
+    const { store } = makeRetrieval();
+    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    // Drop the table underneath the store to force a read failure.
+    db.exec(`DROP TABLE experience_records`);
+    expect(() => store.pendingSearch({ query: "anything", k: 5 })).not.toThrow();
+    expect(store.pendingSearch({ query: "anything", k: 5 })).toEqual([]);
   });
 });
 

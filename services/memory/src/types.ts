@@ -169,7 +169,9 @@ export interface ExperienceRecord {
 }
 
 // ─── Retrieval (feature 5) ────────────────────────────────────────────────────
-export type MemoryKind = "episode" | "entity" | "fact";
+/** MEM-01: "pending" identifies a not-yet-consolidated (or dead-lettered)
+ *  experience_record surfaced via the pendingRetriever — always provisional. */
+export type MemoryKind = "episode" | "entity" | "fact" | "pending";
 
 export interface RetrievedMemory {
   memoryId: string;
@@ -194,6 +196,9 @@ export interface RetrievalOptions {
   includeStale?: boolean;
   minRelevance?: number;
   entityIds?: string[];
+  /** MEM-01: include not-yet-consolidated/dead-lettered experience_records via
+   *  the pendingRetriever. Defaults to true at the RetrievalService call site. */
+  includePending?: boolean;
 }
 
 // ─── Consolidation (feature 6) ────────────────────────────────────────────────
