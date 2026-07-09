@@ -108,6 +108,62 @@ describe("ConsolidationScheduler", () => {
   });
 });
 
+describe("ConsolidationScheduler + MEM-02 backoff — pending accounting is unaffected", () => {
+  /** LLM that always fails extraction for records containing a marker —
+   * exercises MEM-02's real (unmocked) retry/backoff bookkeeping against the
+   * scheduler's real (unmocked) quiet/burst cadence logic. */
+  class AlwaysFailingLlm extends FakeLlm {
+    override async complete(opts: { system?: string; prompt: string; json?: boolean }): Promise<string> {
+      if (opts.prompt.includes("discrete, updateable FACTS") && opts.prompt.includes("FAILME")) {
+        throw new Error("simulated permanent LLM extraction failure");
+      }
+      return super.complete(opts);
+    }
+  }
+
+  it("a permanently-failing record still counts as pending across scheduler ticks — MEM-02's eligible/backoffWaiting split never leaks into getPendingExperienceRecords()", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jarvis-sched-mem02-"));
+    const memory = createMemorySystem({
+      embedder: new FakeEmbedder(),
+      llm: new AlwaysFailingLlm(),
+      dataDir: dir,
+    });
+    await memory.capture.captureNote({ text: "FAILME scheduler backoff test", noteId: "sched-backoff-1" });
+
+    const sched = new ConsolidationScheduler(memory, { burstThreshold: 100, log: () => {} });
+
+    // Tick 1: pending goes -1 → 1 (not quiet, no run yet — baseline settle).
+    await sched.tick();
+    expect(memory.store.getPendingExperienceRecords()).toHaveLength(1);
+
+    // Tick 2: quiet (1 === 1) → real run() executes, extraction fails, record
+    // is scheduled for backoff — but stays pending (not excluded, not dead-lettered).
+    await sched.tick();
+    expect(memory.store.getPendingExperienceRecords()).toHaveLength(1);
+
+    // Tick 3: still quiet (1 === 1) → another real run() — the record is now
+    // backoff-blocked (MEM-02 fast-exit), but pending accounting is unchanged.
+    await sched.tick();
+    expect(memory.store.getPendingExperienceRecords()).toHaveLength(1);
+  });
+
+  it("the existing 'waits while capture is active, then runs once it goes quiet' cadence is unaffected by MEM-02", async () => {
+    // Re-run of the pre-existing cadence assertion (mocked run()) to guard
+    // against MEM-02 having changed anything about the scheduler itself.
+    const memory = makeMemory();
+    const runSpy = vi.spyOn(memory.consolidation, "run").mockResolvedValue({ run: { counts: {} } } as never);
+    const sched = new ConsolidationScheduler(memory, { burstThreshold: 100, log: () => {} });
+
+    await sched.tick();
+    await memory.capture.captureNote({ text: "buy milk", noteId: "mem02-cadence-n1" });
+    await sched.tick();
+    expect(runSpy).not.toHaveBeenCalled();
+    await sched.tick();
+    expect(runSpy).toHaveBeenCalledWith("scheduler");
+    expect(runSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("GatewayLlm timeout → ConsolidationScheduler resilience", () => {
   it("a hung provider rejects via AbortSignal.timeout and the scheduler recovers", async () => {
     // Fake gateway whose chat() NEVER yields unless the threaded-through

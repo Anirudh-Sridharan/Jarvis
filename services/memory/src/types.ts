@@ -158,10 +158,20 @@ export interface ExperienceRecord {
   embed_state: "pending" | "deferred" | "done";
   sync_state: "pending" | "synced" | "error";
   consolidation_pending: boolean;
+  /** MEM-02: number of failed consolidation-extraction attempts for this record. */
+  consolidationAttempts: number;
+  /** MEM-02: message from the most recent failed extraction attempt, if any. */
+  lastConsolidationError: string | null;
+  /** MEM-02: unix ms after which this record is eligible for retry. null = eligible now. */
+  nextRetryAt: number | null;
+  /** MEM-02: true once the record has exhausted its retry budget (never hard-deleted). */
+  deadLetter: boolean;
 }
 
 // ─── Retrieval (feature 5) ────────────────────────────────────────────────────
-export type MemoryKind = "episode" | "entity" | "fact";
+/** MEM-01: "pending" identifies a not-yet-consolidated (or dead-lettered)
+ *  experience_record surfaced via the pendingRetriever — always provisional. */
+export type MemoryKind = "episode" | "entity" | "fact" | "pending";
 
 export interface RetrievedMemory {
   memoryId: string;
@@ -186,6 +196,9 @@ export interface RetrievalOptions {
   includeStale?: boolean;
   minRelevance?: number;
   entityIds?: string[];
+  /** MEM-01: include not-yet-consolidated/dead-lettered experience_records via
+   *  the pendingRetriever. Defaults to true at the RetrievalService call site. */
+  includePending?: boolean;
 }
 
 // ─── Consolidation (feature 6) ────────────────────────────────────────────────
@@ -292,4 +305,15 @@ export interface LlmClient {
  */
 export interface Reranker {
   rerank(query: string, documents: string[]): Promise<number[]>;
+}
+
+/**
+ * Clock interface — injected so consolidation retry/backoff bookkeeping (MEM-02)
+ * is deterministically testable without sleeping or fake timers.
+ *
+ * Mirrored (not imported) from @jarvis/integrations' identical Clock interface —
+ * leaf packages are siblings and must not depend on each other.
+ */
+export interface Clock {
+  now(): number; // Unix timestamp ms
 }

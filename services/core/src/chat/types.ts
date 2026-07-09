@@ -38,6 +38,14 @@ export interface RetrievedMemory {
   timestamp?: string;
   score: number; // recency × importance × relevance
   sourceRef: string;
+  /**
+   * MEM-01: true for not-yet-consolidated/dead-lettered memories (the
+   * pendingRetriever). A separate axis from `tier` (episodic-vs-semantic) —
+   * provisional memories render in a distinct, separately-labeled prompt
+   * block and never blend into "## Relevant memories" with vetted-fact
+   * confidence. Falsy/absent for vetted memories.
+   */
+  provisional?: boolean;
 }
 
 export interface AssembledPrompt {
@@ -48,6 +56,8 @@ export interface AssembledPrompt {
     profile: number; // feature 20 "About the user" block (0 when not injected)
     agenda: number; // connected-app calendar block (0 when not injected)
     memories: number;
+    /** MEM-01: distinct "recently mentioned" provisional-memory block (0 when none). */
+    pending: number;
     history: number;
     total: number;
     replyHeadroom: number;

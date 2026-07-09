@@ -23,6 +23,7 @@
 import type {
   LlmClient,
   Embedder,
+  Clock,
   ConsolidationRun,
   ExperienceRecord,
   ExtractedFact,
@@ -35,6 +36,7 @@ import { extractFacts } from "./extract.js";
 import { resolveFact } from "./contradictions.js";
 import { computeForgetDecisions, applyForgetDecisions } from "./forget.js";
 import { updateProceduralBlock } from "./procedural.js";
+import { isRetryEligible, computeNextRetryAt, DEAD_LETTER_THRESHOLD } from "./retryPolicy.js";
 
 export interface ConsolidationResult {
   run: ConsolidationRun;
@@ -63,6 +65,8 @@ export class ConsolidationService {
     private readonly store: MemoryStore,
     private readonly llm: LlmClient,
     private readonly embedder: Embedder,
+    /** MEM-02: injected for deterministic retry/backoff bookkeeping. Defaults to the real system clock. */
+    private readonly clock: Clock = { now: () => Date.now() },
   ) {}
 
   async run(trigger: "scheduler" | "manual" = "manual"): Promise<ConsolidationResult> {
@@ -98,17 +102,48 @@ export class ConsolidationService {
     run.counts.recordsProcessed = pending.length;
     this.checkpoint(run, 1);
 
+    // MEM-02: split pending records into those eligible for extraction now vs
+    // those still inside a prior failure's backoff window. getPendingExperienceRecords()
+    // itself is untouched (still returns ALL non-dead-lettered pending records,
+    // including backoff-waiting ones) so ConsolidationScheduler's quiet/burst
+    // cadence — which reads pending.length — keeps working unmodified.
+    const nowMs = this.clock.now();
+    const eligible = pending.filter((r) => isRetryEligible(r.nextRetryAt, nowMs));
+
+    if (eligible.length === 0) {
+      // Fast-exit: everything pending is backoff-blocked from a prior failure.
+      // Zero LLM calls — neither stage 2 (EXTRACT) nor stage 3 (REFLECT) runs.
+      run.status = "completed";
+      run.finishedAt = new Date().toISOString();
+      run.stage = 9;
+      this.store.updateConsolidationRun(runId, run);
+      return { run, briefing: { insights: [], newFacts: [], invalidatedFactIds: [], proceduralUpdated: false } };
+    }
+
     // ── Stage 2: EXTRACT ──────────────────────────────────────────────────
     let extractedFacts: ExtractedFact[] = [];
     // Only records whose extraction succeeded may be marked consolidated in
     // stage 9 — failed records stay pending for the next run.
     let extractionProcessedIds = new Set<string>();
     try {
-      const extraction = await extractFacts(pending, this.llm, runId);
+      const extraction = await extractFacts(eligible, this.llm, runId);
       extractedFacts = extraction.facts;
       extractionProcessedIds = new Set(extraction.processedRecordIds);
       for (const failure of extraction.failures) {
         run.errors.push({ stage: 2, message: failure.message, recordId: failure.recordId });
+        // MEM-02: retry-with-backoff bookkeeping, hung off the extraction's
+        // existing failures signal — extract.ts itself is unmodified.
+        const failedRecord = eligible.find((r) => r.id === failure.recordId);
+        const attempts = (failedRecord?.consolidationAttempts ?? 0) + 1;
+        if (attempts >= DEAD_LETTER_THRESHOLD) {
+          this.store.deadLetterRecord(failure.recordId, { attempts, error: failure.message });
+        } else {
+          this.store.recordConsolidationRetry(failure.recordId, {
+            attempts,
+            error: failure.message,
+            nextRetryAt: computeNextRetryAt(failure.recordId, attempts, nowMs),
+          });
+        }
       }
       run.counts.factsExtracted = extractedFacts.length;
     } catch (err) {
@@ -123,7 +158,7 @@ export class ConsolidationService {
     // fact ids and be written into the searchable graph.
     const insights: Insight[] = [];
     try {
-      const generated = await this.reflectInsights(pending, extractedFacts, runId);
+      const generated = await this.reflectInsights(eligible, extractedFacts, runId);
       insights.push(...generated);
       run.counts.insightsGenerated = insights.length;
     } catch (err) {

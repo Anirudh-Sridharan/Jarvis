@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Embedder, LlmClient, Reranker } from "../types.js";
+import type { Clock, Embedder, LlmClient, Reranker } from "../types.js";
 
 const EMBEDDING_DIM = 256;
 
@@ -158,4 +158,25 @@ function jaccardOverlap(query: string, doc: string): number {
   for (const t of q) if (d.has(t)) inter++;
   const union = q.size + d.size - inter;
   return union === 0 ? 0 : inter / union;
+}
+
+/**
+ * FixedClock — deterministic Clock fake for MEM-02 backoff/retry tests.
+ * Mirrors @jarvis/integrations' FixedClock exactly (leaf packages are
+ * siblings — this is a local re-declaration, not an import).
+ */
+export class FixedClock implements Clock {
+  constructor(private timestamp: number = Date.now()) {}
+
+  now(): number {
+    return this.timestamp;
+  }
+
+  advance(ms: number): void {
+    this.timestamp += ms;
+  }
+
+  setTo(isoOrMs: string | number): void {
+    this.timestamp = typeof isoOrMs === "string" ? new Date(isoOrMs).getTime() : isoOrMs;
+  }
 }

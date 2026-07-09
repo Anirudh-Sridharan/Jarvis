@@ -48,6 +48,10 @@ function adaptMemory(m: MemRetrievedMemory): RetrievedMemory {
     sourceRef: m.memoryId,
     timestamp:
       m.validFrom > 0 ? new Date(m.validFrom).toISOString() : undefined,
+    // MEM-01: pendingRetriever candidates flow through kind === "pending" —
+    // includePending defaults true store-side, so retrieveMemories() below
+    // needs no change to receive them.
+    provisional: m.kind === "pending",
   };
 }
 
