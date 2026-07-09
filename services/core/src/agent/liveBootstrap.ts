@@ -51,7 +51,9 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
   try {
     // GatewayLlm satisfies the integrations LlmClient too (same structural
     // shape) — the morning-briefing trigger can generate via HF.
-    const { system } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
+    // Retain http/tokenStore (previously discarded) — sync-connectors needs
+    // them to run scheduled connector syncs in-process.
+    const { system, http, tokenStore } = createLiveIntegrations({ llm: new GatewayLlm(gateway) });
     cachedCalendarMirror = system.calendar.mirror;
     // Memory first: the agent system grounds its runs in the profile (feature 20).
     const memory = getMemorySystem(gateway);
@@ -64,11 +66,18 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     if (memory) {
       // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
       startIngestBridge({ memory, integrations: system });
-      // Proactive triggers (nightly consolidation, morning briefing) + live cron.
+      // Proactive triggers (nightly consolidation, morning briefing, sync-
+      // connectors, sync-captures) + live cron.
       registerProactiveTriggers({
         agentSystem: bag.agentSystem,
         integrations: system,
         memory,
+        http,
+        tokenStore,
+        capturePaths: {
+          vaultDir: process.env["JARVIS_OBSIDIAN_VAULT"],
+          filesDir: process.env["JARVIS_FILES_DIR"],
+        },
       });
       void bag.agentSystem.triggers.start().catch((err: unknown) => {
         console.warn(
