@@ -134,6 +134,10 @@ app.get("/telemetry", (c) => {
     ok: true,
     summary: telemetrySink.summary(Number.isFinite(sinceHours) ? sinceHours : 24),
     recent: telemetrySink.recent(Number.isFinite(limit) ? Math.min(limit, 200) : 50),
+    // MEM-03: pending/consolidated/dead-letter counts + last-pass status.
+    // Best-effort read — degrades to null rather than a 503 (unlike
+    // /consolidate, which is an explicit action) when memory failed to init.
+    memory: memory ? memory.store.getConsolidationHealth() : null,
   });
 });
 
