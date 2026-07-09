@@ -1,8 +1,21 @@
 /**
- * Consolidation — placeholder. Feature 6 (nightly consolidation) is future.
+ * Consolidation — MEM-03. Live pending/consolidated/dead-letter counts and
+ * last-pass status from memory.db, fetched fresh on every navigation
+ * (fetchEnvelope's cache: "no-store" — no client polling, per the locked
+ * "minimal UI" decision).
  */
 
-export default function ConsolidationPage() {
+import type { WidgetEnvelope, ConsolidationHealthContract } from "@/app/lib/contracts";
+import ConsolidationHealthPanel from "@/app/components/ConsolidationHealthPanel";
+import { fetchEnvelope } from "@/app/lib/fetchEnvelope";
+
+function fetchConsolidationHealth(): Promise<WidgetEnvelope<ConsolidationHealthContract>> {
+  return fetchEnvelope<ConsolidationHealthContract>("/api/memory/health");
+}
+
+export default async function ConsolidationPage() {
+  const env = await fetchConsolidationHealth();
+
   return (
     <div className="page">
       <div className="page-header">
@@ -10,13 +23,7 @@ export default function ConsolidationPage() {
         <h1 className="page-title">Consolidation</h1>
         <p className="text-dim text-sm">Nightly memory consolidation status.</p>
       </div>
-      <div className="card">
-        <div className="card__title">Last Run</div>
-        <p className="text-dim">No consolidation runs recorded yet.</p>
-        <p className="text-dim text-sm" style={{ marginTop: 12 }}>
-          The full consolidation history and controls arrive with feature 6.
-        </p>
-      </div>
+      <ConsolidationHealthPanel envelope={env} />
     </div>
   );
 }
