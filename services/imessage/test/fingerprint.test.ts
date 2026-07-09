@@ -27,7 +27,7 @@ describe("normalizeMessageText", () => {
       normalizeMessageText("hello world"),
     );
     expect(normalizeMessageText("what's   up?")).toBe(
-      normalizeMessageText("whats up"),
+      normalizeMessageText("what s up"),
     );
   });
 

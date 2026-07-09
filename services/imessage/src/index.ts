@@ -16,3 +16,18 @@ export type {
   MessageSender,
   ChatHandler,
 } from "./types.js";
+
+// Fingerprint (TXT-04 secondary loop-prevention net)
+export {
+  normalizeMessageText,
+  computeFingerprint,
+  DEFAULT_FINGERPRINT_TTL_MS,
+} from "./fingerprint.js";
+
+// Reply-rate circuit breaker (TXT-04 hard ceiling)
+export {
+  ReplyCircuitBreaker,
+  DEFAULT_BREAKER_WINDOW_MS,
+  DEFAULT_BREAKER_MAX_REPLIES,
+} from "./circuitBreaker.js";
+export type { ReplyCircuitBreakerOptions } from "./circuitBreaker.js";
