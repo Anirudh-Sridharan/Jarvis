@@ -777,6 +777,47 @@ export class MemoryStore {
       .run(id);
   }
 
+  /**
+   * MEM-02: record a failed consolidation-extraction attempt and schedule the
+   * next retry (soft state only — never touches dead_letter/consolidation_pending).
+   */
+  recordConsolidationRetry(
+    recordId: string,
+    args: { attempts: number; error: string; nextRetryAt: number },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE experience_records
+         SET consolidation_attempts = ?, last_consolidation_error = ?, next_retry_at = ?
+         WHERE id = ?`,
+      )
+      .run(args.attempts, args.error, args.nextRetryAt, recordId);
+  }
+
+  /**
+   * MEM-02: dead-letter a record that has exhausted its retry budget.
+   * Atomic invariant: dead_letter = 1 ⟹ consolidation_pending = 0, set in the
+   * same UPDATE — never a DELETE (mirrors invalidateFact()'s soft-delete-only
+   * pattern; the row must remain readable for MEM-01's pending retrieval).
+   */
+  deadLetterRecord(recordId: string, args: { attempts: number; error: string }): void {
+    this.db
+      .prepare(
+        `UPDATE experience_records
+         SET consolidation_attempts = ?, last_consolidation_error = ?, dead_letter = 1, consolidation_pending = 0
+         WHERE id = ?`,
+      )
+      .run(args.attempts, args.error, recordId);
+  }
+
+  /** MEM-02: all dead-lettered records (accessor only — surfacing is Phase 12/MEM-03). */
+  getDeadLetterRecords(): import("../types.js").ExperienceRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM experience_records WHERE dead_letter = 1`)
+      .all() as unknown as RawExperience[];
+    return rows.map(this.rowToExperience);
+  }
+
   updateExperienceEmbedState(
     id: string,
     state: "pending" | "deferred" | "done",
