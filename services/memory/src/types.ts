@@ -158,6 +158,14 @@ export interface ExperienceRecord {
   embed_state: "pending" | "deferred" | "done";
   sync_state: "pending" | "synced" | "error";
   consolidation_pending: boolean;
+  /** MEM-02: number of failed consolidation-extraction attempts for this record. */
+  consolidationAttempts: number;
+  /** MEM-02: message from the most recent failed extraction attempt, if any. */
+  lastConsolidationError: string | null;
+  /** MEM-02: unix ms after which this record is eligible for retry. null = eligible now. */
+  nextRetryAt: number | null;
+  /** MEM-02: true once the record has exhausted its retry budget (never hard-deleted). */
+  deadLetter: boolean;
 }
 
 // ─── Retrieval (feature 5) ────────────────────────────────────────────────────
@@ -292,4 +300,15 @@ export interface LlmClient {
  */
 export interface Reranker {
   rerank(query: string, documents: string[]): Promise<number[]>;
+}
+
+/**
+ * Clock interface — injected so consolidation retry/backoff bookkeeping (MEM-02)
+ * is deterministically testable without sleeping or fake timers.
+ *
+ * Mirrored (not imported) from @jarvis/integrations' identical Clock interface —
+ * leaf packages are siblings and must not depend on each other.
+ */
+export interface Clock {
+  now(): number; // Unix timestamp ms
 }

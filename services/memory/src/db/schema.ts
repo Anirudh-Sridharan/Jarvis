@@ -187,4 +187,9 @@ export function applySchema(db: import("node:sqlite").DatabaseSync): void {
   }
   // feature 20: pin column on databases created before the column existed
   ensureColumn(db, "facts", "pinned", "pinned INTEGER NOT NULL DEFAULT 0");
+  // MEM-02: consolidation retry/dead-letter bookkeeping columns.
+  ensureColumn(db, "experience_records", "consolidation_attempts", "consolidation_attempts INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "experience_records", "last_consolidation_error", "last_consolidation_error TEXT");
+  ensureColumn(db, "experience_records", "next_retry_at", "next_retry_at INTEGER");
+  ensureColumn(db, "experience_records", "dead_letter", "dead_letter INTEGER NOT NULL DEFAULT 0");
 }

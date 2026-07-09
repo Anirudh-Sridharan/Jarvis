@@ -68,6 +68,10 @@ export function buildConversationRecord(opts: {
     embed_state: "pending", // short text → embed immediately
     sync_state: "pending",
     consolidation_pending: true,
+    consolidationAttempts: 0,
+    lastConsolidationError: null,
+    nextRetryAt: null,
+    deadLetter: false,
   };
 }
 
@@ -110,6 +114,10 @@ export function buildNoteRecord(opts: {
     embed_state: "pending",
     sync_state: "pending",
     consolidation_pending: true,
+    consolidationAttempts: 0,
+    lastConsolidationError: null,
+    nextRetryAt: null,
+    deadLetter: false,
   };
 }
 
@@ -154,5 +162,9 @@ export function buildExternalRecord(opts: {
     embed_state: "pending",
     sync_state: "pending",
     consolidation_pending: true,
+    consolidationAttempts: 0,
+    lastConsolidationError: null,
+    nextRetryAt: null,
+    deadLetter: false,
   };
 }

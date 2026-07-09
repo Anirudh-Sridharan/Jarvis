@@ -21,10 +21,10 @@ import type { buildExternalRecord } from "./capture/experience.js";
 import { RetrievalService } from "./retrieval/retrieval.js";
 import { ConsolidationService } from "./consolidation/consolidation.js";
 import { ProfileService } from "./profile/profile.js";
-import type { Embedder, LlmClient, Reranker, RetrievalOptions, RetrievedMemory } from "./types.js";
+import type { Clock, Embedder, LlmClient, Reranker, RetrievalOptions, RetrievedMemory } from "./types.js";
 import type { ConsolidationResult } from "./consolidation/consolidation.js";
 
-export type { Embedder, LlmClient, Reranker };
+export type { Embedder, LlmClient, Reranker, Clock };
 export type {
   ExperienceRecord,
   Entity,
@@ -82,6 +82,8 @@ export interface MemorySystemConfig {
   dataDir: string;
   /** Optional second-stage reranker for sharper retrieval. Omit to disable. */
   reranker?: Reranker;
+  /** Optional Clock for consolidation retry/backoff bookkeeping. Omit for the real system clock. */
+  clock?: Clock;
 }
 
 export interface MemorySystem {

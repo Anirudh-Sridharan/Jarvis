@@ -1058,6 +1058,10 @@ export class MemoryStore {
       embed_state: row.embed_state as "pending" | "deferred" | "done",
       sync_state: row.sync_state as "pending" | "synced" | "error",
       consolidation_pending: row.consolidation_pending === 1,
+      consolidationAttempts: row.consolidation_attempts,
+      lastConsolidationError: row.last_consolidation_error ?? null,
+      nextRetryAt: row.next_retry_at ?? null,
+      deadLetter: row.dead_letter === 1,
     };
   }
 }
@@ -1161,6 +1165,10 @@ interface RawExperience {
   embed_state: string;
   sync_state: string;
   consolidation_pending: number;
+  consolidation_attempts: number;
+  last_consolidation_error: string | null;
+  next_retry_at: number | null;
+  dead_letter: number;
 }
 
 interface RawConsolidationRun {
