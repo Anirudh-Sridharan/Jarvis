@@ -5,24 +5,26 @@
  * All AI stages use FakeLlm — deterministic, no network calls.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db/database.js";
 import { MemoryStore } from "../src/store/memoryStore.js";
 import { ConsolidationService } from "../src/consolidation/consolidation.js";
-import { FakeEmbedder, FakeLlm } from "../src/testing/fakes.js";
+import { FakeEmbedder, FakeLlm, FixedClock } from "../src/testing/fakes.js";
 import { CaptureService } from "../src/capture/capture.js";
+import { DEAD_LETTER_THRESHOLD } from "../src/consolidation/retryPolicy.js";
+import type { Clock } from "../src/types.js";
 
-function makeConsolidation(fakeLlm?: FakeLlm) {
+function makeConsolidation(fakeLlm?: FakeLlm, clock?: Clock) {
   const dir = mkdtempSync(join(tmpdir(), "jarvis-consol-test-"));
   const db = openDatabase(dir);
   const embedder = new FakeEmbedder();
   const store = new MemoryStore(db, embedder);
   const llm = fakeLlm ?? new FakeLlm();
   const capture = new CaptureService(store, embedder);
-  const consolidation = new ConsolidationService(store, llm, embedder);
+  const consolidation = new ConsolidationService(store, llm, embedder, clock);
   return { store, consolidation, capture, llm };
 }
 
@@ -371,5 +373,117 @@ describe("Contradiction resolution - source trust and validity intervals", () =>
     const losing = store.getFactById(result.factId)!;
     expect(losing.validTo).toBe(incoming.validFrom);
     expect(losing.validTo! >= losing.validFrom).toBe(true);
+  });
+});
+
+describe("ConsolidationService - MEM-02 retry backoff + dead-letter", () => {
+  /** LLM that ALWAYS fails extraction for records containing a marker (unlike
+   * the single-shot PartiallyFailingLlm above — used to exercise repeated
+   * retry passes against a permanently-malformed record). */
+  class AlwaysFailingLlm extends FakeLlm {
+    override async complete(opts: {
+      system?: string;
+      prompt: string;
+      json?: boolean;
+    }): Promise<string> {
+      if (
+        opts.prompt.includes("discrete, updateable FACTS") &&
+        opts.prompt.includes("FAILME")
+      ) {
+        throw new Error("simulated permanent LLM extraction failure");
+      }
+      return super.complete(opts);
+    }
+  }
+
+  it("a failed extraction attempt increments consolidation_attempts and schedules a future next_retry_at (record stays pending)", async () => {
+    const clock = new FixedClock(1_700_000_000_000);
+    const { store, capture, consolidation } = makeConsolidation(new AlwaysFailingLlm(), clock);
+    const { record } = await capture.captureNote({ text: "FAILME first attempt", noteId: "backoff-1" });
+
+    const result = await consolidation.run("manual");
+    expect(result.run.status).toBe("partial");
+
+    const pending = store.getPendingExperienceRecords();
+    const updated = pending.find((r) => r.id === record.id);
+    expect(updated).toBeDefined();
+    expect(updated!.consolidationAttempts).toBe(1);
+    expect(updated!.nextRetryAt).not.toBeNull();
+    expect(updated!.nextRetryAt!).toBeGreaterThan(clock.now());
+    expect(updated!.consolidation_pending).toBe(true);
+    expect(updated!.deadLetter).toBe(false);
+  });
+
+  it("an immediately-following run() at the same clock time does not re-attempt a backoff-blocked record", async () => {
+    const clock = new FixedClock(1_700_000_000_000);
+    const llm = new AlwaysFailingLlm();
+    const { capture, consolidation } = makeConsolidation(llm, clock);
+    await capture.captureNote({ text: "FAILME again", noteId: "backoff-2" });
+
+    await consolidation.run("manual"); // first failure — schedules backoff
+    const completeSpy = vi.spyOn(llm, "complete");
+
+    await consolidation.run("manual"); // same clock tick — record is backoff-blocked
+    expect(completeSpy).not.toHaveBeenCalled();
+  });
+
+  it("fast-exits with zero LLM calls across N consecutive runs once the sole pending record is backoff-blocked", async () => {
+    const clock = new FixedClock(1_700_000_000_000);
+    const llm = new AlwaysFailingLlm();
+    const { capture, consolidation } = makeConsolidation(llm, clock);
+    await capture.captureNote({ text: "FAILME blocked", noteId: "backoff-3" });
+
+    await consolidation.run("manual"); // triggers the first failure + backoff scheduling
+    const completeSpy = vi.spyOn(llm, "complete");
+
+    for (let i = 0; i < 3; i++) {
+      const result = await consolidation.run("manual");
+      expect(result.run.status).toBe("completed"); // fast-exit, not partial/failed
+    }
+    expect(completeSpy).not.toHaveBeenCalled();
+  });
+
+  it(`dead-letters a record after ${String(DEAD_LETTER_THRESHOLD)} failed passes, never hard-deleting it`, async () => {
+    const clock = new FixedClock(1_700_000_000_000);
+    const llm = new AlwaysFailingLlm();
+    const { store, capture, consolidation } = makeConsolidation(llm, clock);
+    const { record } = await capture.captureNote({ text: "FAILME dead letter", noteId: "backoff-4" });
+
+    for (let i = 0; i < DEAD_LETTER_THRESHOLD; i++) {
+      await consolidation.run("manual");
+      // Advance well past any backoff window (max cap is 6hr) before the next pass.
+      clock.advance(7 * 60 * 60_000);
+    }
+
+    // Excluded from pending
+    const pending = store.getPendingExperienceRecords();
+    expect(pending.map((r) => r.id)).not.toContain(record.id);
+
+    // Row still exists — never hard-deleted — and is flagged correctly
+    const dead = store.getDeadLetterRecords();
+    const found = dead.find((r) => r.id === record.id);
+    expect(found).toBeDefined();
+    expect(found!.deadLetter).toBe(true);
+    expect(found!.consolidation_pending).toBe(false);
+    expect(found!.consolidationAttempts).toBe(DEAD_LETTER_THRESHOLD);
+  });
+
+  it("extract.ts's per-record isolation contract is unchanged — a healthy record alongside a backoff-blocked one still extracts normally", async () => {
+    const clock = new FixedClock(1_700_000_000_000);
+    const llm = new AlwaysFailingLlm();
+    const { store, capture, consolidation } = makeConsolidation(llm, clock);
+
+    const bad = await capture.captureNote({ text: "FAILME poison record", noteId: "mixed-bad" });
+    await consolidation.run("manual"); // bad record now backoff-blocked
+
+    // Advance the clock so bad's backoff window is still open, but capture a
+    // fresh healthy record that has no next_retry_at (eligible immediately).
+    const good = await capture.captureNote({ text: "I prefer TypeScript", noteId: "mixed-good" });
+    const result = await consolidation.run("manual");
+
+    // The healthy record was processed even though the poison one is blocked.
+    expect(store.getPendingExperienceRecords().map((r) => r.id)).toContain(bad.record.id);
+    expect(store.getPendingExperienceRecords().map((r) => r.id)).not.toContain(good.record.id);
+    expect(result.run.counts.factsExtracted).toBeGreaterThanOrEqual(1);
   });
 });
