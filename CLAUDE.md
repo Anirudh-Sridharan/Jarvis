@@ -13,9 +13,26 @@ Jarvis is a **local-first, single-user personal AI assistant** ("second brain"):
 
 **Execution workflow lives in `.planning/` (GSD).** Milestone/phase planning and execution state are tracked under `.planning/` — `PROJECT.md`, `ROADMAP.md`, `STATE.md`, `REQUIREMENTS.md`, per-phase plan/summary files under `.planning/phases/`, and codebase-map docs under `.planning/codebase/`. These own *how work is sequenced and verified*; `features.md` + `features/` + `architecture/` remain the *product/architecture* source of truth. Read the relevant phase's PLAN before executing it.
 
-**Use GSD the entire way, mirroring the SEO-Automator project's structure** (`~/SEO-Automator/.planning/`): milestone cycles (`new-milestone` → REQUIREMENTS → ROADMAP), phase numbering sequential *across* milestones, each phase run discuss → plan → execute → verify → ship, closed milestones audited and archived under `.planning/milestones/` with `MILESTONES.md` + `RETROSPECTIVE.md`. Working rules:
-- **Commit regularly** — small atomic commits as work lands, never batch a phase into one commit.
-- **Branch per phase** (`gsd/phase-{N}-{slug}`); when using worktrees or phase branches, open PRs with thorough, well-written descriptions and **merge them** — don't leave branches stranded.
+<!-- GSD:workflow-start source:GSD defaults -->
+## GSD Workflow Enforcement
+
+**GSD must be used for ALL work in this repo — no exceptions.** Every task, however small (code, docs, config, debugging, planning), goes through a GSD command so planning artifacts and execution context stay in sync. Never use Edit, Write, or other file-changing tools outside a GSD workflow. Structure mirrors the SEO-Automator project (`~/SEO-Automator/.planning/`): milestone cycles (`/gsd-new-milestone` → REQUIREMENTS → ROADMAP), phase numbering sequential *across* milestones, each phase run discuss → plan → execute → verify → ship, closed milestones audited and archived under `.planning/milestones/` with `MILESTONES.md` + `RETROSPECTIVE.md`.
+
+Use these entry points:
+- `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
+- `/gsd-debug` for investigation and bug fixing
+- `/gsd-execute-phase` for planned phase work
+- `/gsd-new-milestone`, `/gsd-plan-phase`, `/gsd-discuss-phase` for planning
+- `/gsd-progress` when unsure which command fits — it routes freeform intent
+
+Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
+<!-- GSD:workflow-end -->
+
+## Git & Parallel Work (every session)
+
+- **Commit regularly.** Don't let work pile up uncommitted — commit at each meaningful checkpoint (task complete, tests passing), small and atomic, conventional-commit style, and push regularly.
+- **Branch per phase, PRs merged.** Each GSD phase gets its own branch (`gsd/phase-{N}-{slug}`, per `.planning/config.json`), lands via a PR with a good, detailed description — what changed, why, how it was verified — and the PR gets **merged** into `main`, never left stranded. Trivial fixes/docs can go straight to `main`.
+- **Parallelize with subagents + worktrees.** When building multiple features (or independent parts of one feature) that don't share state, spawn subagents in isolated git worktrees, each on its own branch, then merge the branches at the end — each with a good PR message. Only parallelize when the pieces are genuinely independent; sequential work stays on one branch.
 
 ## Commands
 
