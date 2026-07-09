@@ -80,10 +80,18 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
   // Compact timestamped bullets; the TOP-scored memory is emitted LAST so it
   // abuts the recent history (a prompt edge); weakest memories sit in the
   // attention-dead middle.
+  //
+  // MEM-01: vetted (!provisional) and pending (provisional) memories are
+  // split BEFORE rendering — pending memories never blend into "## Relevant
+  // memories" with vetted-fact confidence. They render in their own,
+  // distinctly-labeled block instead (below).
+  const vettedMemories = a.memories.filter((m) => !m.provisional);
+  const pendingMemories = a.memories.filter((m) => m.provisional);
+
   let memoryBlock = "";
   const injected: RetrievedMemory[] = [];
-  if (a.memories.length > 0) {
-    const ascending = [...a.memories].sort((x, y) => x.score - y.score); // weak->strong
+  if (vettedMemories.length > 0) {
+    const ascending = [...vettedMemories].sort((x, y) => x.score - y.score); // weak->strong
     const lines = ascending.map((m) => {
       injected.push(m);
       const ts = m.timestamp ? ` (${m.timestamp.slice(0, 10)})` : "";
@@ -100,6 +108,26 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
       "that are not in this conversation — say the information isn't stored and " +
       "offer to look it up.";
   } // no memory system wired: omit scaffolding; the persona grounding rules still apply
+
+  // --- MEM-01: pending memories — distinct, separately-labeled block --------
+  // Raw, unreviewed text (not yet consolidated, or extraction gave up) —
+  // framed explicitly as provisional so the model never treats it with
+  // vetted-fact confidence, and defers to "## Relevant memories" on conflict.
+  let pendingBlock = "";
+  if (pendingMemories.length > 0) {
+    const ascending = [...pendingMemories].sort((x, y) => x.score - y.score); // weak->strong
+    const lines = ascending.map((m) => {
+      injected.push(m);
+      const ts = m.timestamp ? ` (${m.timestamp.slice(0, 10)})` : "";
+      return `- ${m.text}${ts}`;
+    });
+    pendingBlock =
+      "## Recently mentioned (not yet fully processed)\n" +
+      "This is raw, unreviewed text the user just said — treat it as provisional, " +
+      "not a confirmed fact. If it conflicts with something in \"## Relevant memories\", " +
+      "the confirmed fact wins.\n" +
+      lines.join("\n");
+  }
 
   // --- History: rolling summary first, then newest verbatim turns ----------
   const historyMsgs: { role: Role; content: string }[] = [];
@@ -119,6 +147,7 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
     { role: "system", content: systemBlock },
     ...(agenda ? [{ role: "system" as Role, content: agenda }] : []),
     ...(memoryBlock ? [{ role: "system" as Role, content: memoryBlock }] : []),
+    ...(pendingBlock ? [{ role: "system" as Role, content: pendingBlock }] : []),
     ...historyMsgs,
     { role: "user", content: a.userMessage },
   ];
@@ -127,9 +156,10 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
   const system = countTokens(systemBlock);
   const agendaTok = countTokens(agenda);
   const memTok = countTokens(memoryBlock);
+  const pendingTok = countTokens(pendingBlock);
   const histTok = historyMsgs.reduce((s, m) => s + countTokens(m.content), 0);
   const userTok = countTokens(a.userMessage);
-  const total = system + agendaTok + memTok + histTok + userTok;
+  const total = system + agendaTok + memTok + pendingTok + histTok + userTok;
   const ceiling = a.contextWindow - REPLY_HEADROOM - SAFETY_SLACK;
 
   if (total > ceiling) {
@@ -146,6 +176,7 @@ export function assemblePrompt(a: AssembleArgs): AssembledPrompt {
       profile: countTokens(profile),
       agenda: agendaTok,
       memories: memTok,
+      pending: pendingTok,
       history: histTok,
       total,
       replyHeadroom: REPLY_HEADROOM,
