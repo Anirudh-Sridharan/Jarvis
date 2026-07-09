@@ -159,7 +159,7 @@ export function createMemorySystem(config: MemorySystemConfig): MemorySystem {
   const store = new MemoryStore(db, config.embedder);
   const captureService = new CaptureService(store, config.embedder);
   const retrievalService = new RetrievalService(store, config.embedder, undefined, config.reranker);
-  const consolidationService = new ConsolidationService(store, config.llm, config.embedder);
+  const consolidationService = new ConsolidationService(store, config.llm, config.embedder, config.clock);
   const profileService = new ProfileService(store, config.llm);
 
   return {

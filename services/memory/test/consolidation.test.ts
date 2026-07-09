@@ -313,15 +313,22 @@ describe("ConsolidationService - partial runs keep failed records pending", () =
     expect(pending.map((r) => r.id)).not.toContain(good.record.id);
   });
 
-  it("a follow-up run with a healthy LLM consolidates the previously-failed record", async () => {
-    const { store, capture, consolidation } = makeConsolidation(new PartiallyFailingLlm());
+  it("a follow-up run with a healthy LLM consolidates the previously-failed record (after its backoff window elapses)", async () => {
+    // MEM-02: a failed record is now backoff-blocked on the very next pass
+    // (that's the fix — no more retry-storm), so the follow-up run must
+    // advance the clock past the scheduled next_retry_at to observe the retry.
+    const clock = new FixedClock(1_700_000_000_000);
+    const { store, capture, consolidation } = makeConsolidation(new PartiallyFailingLlm(), clock);
     await capture.captureNote({ text: "FAILME again", noteId: "retry-note" });
     await consolidation.run("manual");
     expect(store.getPendingExperienceRecords()).toHaveLength(1);
 
-    // Same store, healthy LLM
+    // Past the 1st-failure backoff window (5min base + up to ~20% jitter).
+    clock.advance(10 * 60_000);
+
+    // Same store, same clock, healthy LLM
     const { ConsolidationService } = await import("../src/consolidation/consolidation.js");
-    const healthy = new ConsolidationService(store, new FakeLlm(), new FakeEmbedder());
+    const healthy = new ConsolidationService(store, new FakeLlm(), new FakeEmbedder(), clock);
     const result = await healthy.run("manual");
     expect(result.run.status).toBe("completed");
     expect(store.getPendingExperienceRecords()).toHaveLength(0);
