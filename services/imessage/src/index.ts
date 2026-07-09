@@ -34,3 +34,7 @@ export type { ReplyCircuitBreakerOptions } from "./circuitBreaker.js";
 
 // State store (imessage.db: watermark, sent-fingerprints, processed GUIDs)
 export { ImessageStateStore } from "./store/state.js";
+
+// Orchestrator (the tick() safety pipeline composing the above primitives)
+export { MessageOrchestrator } from "./orchestrator.js";
+export type { OrchestratorDeps, OrchestratorConfig, TickResult } from "./orchestrator.js";
