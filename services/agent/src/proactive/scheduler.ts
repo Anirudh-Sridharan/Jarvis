@@ -285,6 +285,20 @@ export class Scheduler {
   private armCron(t: Trigger): void {
     if (!t.cron || !this.opts.parseCronNext) return;
 
+    // Idempotent re-arm (11-01 fix): addTrigger() arms immediately, and
+    // start() unconditionally re-arms every enabled trigger — without this
+    // guard, a trigger added then started ends up with TWO live setTimeout
+    // timers (the advisory lock in fireLocked() keeps double-fire from
+    // happening, but the leaked timer still fires and wastes a cycle, and
+    // repeated start()/re-arm cycles compound the leak). Clear any existing
+    // armed timer for this trigger id before arming a new one so arming is
+    // last-write-wins idempotent.
+    const existingTimer = this.timers.get(t.id);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.timers.delete(t.id);
+    }
+
     const nextMs = this.opts.parseCronNext(
       t.cron.expr,
       t.cron.timezone,
