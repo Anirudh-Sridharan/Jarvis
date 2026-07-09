@@ -83,9 +83,34 @@ export interface BriefingContract {
 export interface MemoryContract {
   memoryId: string;
   text: string;
-  kind: "episode" | "entity" | "fact";
+  // "pending" (MEM-01, phase 8): a not-yet-consolidated/dead-lettered
+  // experience_record surfaced via the pendingRetriever, alongside the three
+  // consolidated-graph kinds. Widened here to match @jarvis/memory's
+  // MemoryKind (services/memory/src/types.ts) — narrower before this fixed a
+  // latent tsc error in app/api/memory/route.ts's toContract() that a stale
+  // dist/ output had been masking.
+  kind: "episode" | "entity" | "fact" | "pending";
   validFrom: number; // unix ms
   fusedScore: number;
+}
+
+// ── Consolidation health (MEM-03) ──────────────────────────────────────────────
+
+export interface ConsolidationRunSummaryContract {
+  id: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "completed" | "failed" | "partial";
+  stage: number;
+  errors: { stage: number; message: string; recordId?: string }[];
+  trigger: "scheduler" | "manual";
+}
+
+export interface ConsolidationHealthContract {
+  pendingCount: number;
+  consolidatedCount: number;
+  deadLetterCount: number;
+  lastRun: ConsolidationRunSummaryContract | null;
 }
 
 // ── Profile (feature 20) ──────────────────────────────────────────────────────

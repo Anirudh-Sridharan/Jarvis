@@ -267,6 +267,16 @@ export interface ConsolidationRun {
   trigger: "scheduler" | "manual";
 }
 
+/** MEM-03: pending/consolidated/dead-letter corpus counts plus the most
+ *  recent consolidation_runs row — the read-only observability surface
+ *  consumed by core's GET /telemetry and the dashboard's /api/memory/health. */
+export interface ConsolidationHealth {
+  pendingCount: number;
+  consolidatedCount: number;
+  deadLetterCount: number;
+  lastRun: ConsolidationRun | null;
+}
+
 // ─── Injected interfaces (DI) ─────────────────────────────────────────────────
 /**
  * Embedding function interface — injected so @jarvis/memory does NOT depend on
