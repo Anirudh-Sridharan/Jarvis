@@ -3,10 +3,10 @@
 > **Status note (updated 2026-07-04):** §1 below has been corrected to the *current* implementation. §§2-9 describe an earlier/aspirational deployment design — launchd LaunchAgents, a FalkorDB/Neo4j graph DB, LanceDB/Chroma vectors, DuckDB analytics, a Swift/Tauri menu-bar voice daemon, and an app-bundle install wizard — that the system does **not** currently use. That content is retained below a divider marking it future/aspirational (see §§2-9 heading) and is **not current ground truth**. For what actually runs today see `CLAUDE.md` and `.planning/codebase/{ARCHITECTURE,STACK,INTEGRATIONS}.md`.
 
 How every piece of Jarvis runs on a single MacBook Air M3 (16 GB, macOS Tahoe 26.5),
-plus the one remote dependency: a Hugging Face Inference Endpoint. Jarvis is
-**local-first** — every component lives on the user's machine except the cloud
-fallback model, and the system stays fully usable offline (degrading only the
-heaviest reasoning to the remote endpoint when present).
+plus the remote dependency: serverless cloud inference providers (Fireworks AI,
+Anthropic Claude). Jarvis is **local-first** — every component lives on the user's
+machine except the cloud fallback model, and the system stays fully usable offline
+(degrading only the heaviest reasoning to the remote providers when present).
 
 This document is the operational counterpart to the component design docs: it
 describes processes, ports, lifecycle, on-disk layout, install, updates, and the
@@ -26,7 +26,7 @@ listens on a public interface; all sockets bind to `127.0.0.1`.
 | c | **MLX sidecar** | Python `mlx-lm` OpenAI-compatible server | **on-demand**, spawned/idle-unloaded (~10 min) by core | HTTP `127.0.0.1:8088` |
 | d | **Web dashboard** | Next.js | on-demand (dev/local) | HTTP `127.0.0.1:3000` |
 | e | **Storage** | `node:sqlite` (in-process, built-in) under `$JARVIS_DATA_DIR` (real data home `services/core/data/`) — bi-temporal knowledge graph, facts/entities, vectors, metrics, agent checkpoints | embedded, no separate process | file(s) on disk; `sqlite-vec` optional loadable accelerator, JS cosine fallback; JS BM25 keyword search (no FTS5) |
-| f | **HF Inference Providers** | remote, serverless OpenAI-compatible router | always available (network) | HTTPS to `router.huggingface.co` (`HF_ENDPOINT_URL`) |
+| f | **Cloud inference providers** | remote, serverless OpenAI-compatible | always available (network) | Fireworks AI: HTTPS to `api.fireworks.ai` (`FIREWORKS_API_KEY`); Anthropic: HTTPS to `api.anthropic.com` (`ANTHROPIC_API_KEY`) |
 
 ### Communication
 
@@ -35,10 +35,10 @@ listens on a public interface; all sockets bind to `127.0.0.1`.
   to core over HTTP/SSE for chat + hands-free session state (`POST /voice/start|stop`,
   `GET /voice/status|events`, `POST /voice/wake`).
 - **Core → MLX sidecar**: HTTP `POST /v1/chat/completions` with SSE streaming
-  (`stream: true`), identical wire format to HF, so the inference
+  (`stream: true`), identical wire format to the cloud providers, so the inference
   gateway can swap local ⇄ remote behind one interface.
-- **Core → HF Inference Providers**: HTTPS, same OpenAI schema, bearer token (`HF_TOKEN`)
-  from `.env`.
+- **Core → Fireworks / Anthropic**: HTTPS, OpenAI-compatible schema, `Authorization: Bearer`
+  with the provider's key (`FIREWORKS_API_KEY` / `ANTHROPIC_API_KEY`) from `.env`.
 - **Core ↔ storage**: in-process `node:sqlite` file handles — no network hop, no separate
   DB server or protocol; there is no graph-DB or vector-DB process to talk to.
 - **Dashboard ↔ storage**: the dashboard is a **second, independent reader** of the same
@@ -63,13 +63,13 @@ flowchart TB
     DASH["(d) Dashboard<br/>Next.js :3000<br/>(second reader via BFF)"]
     SDB[("(e) node:sqlite under $JARVIS_DATA_DIR<br/>graph + facts + vectors + metrics + checkpoints")]
   end
-  HF["(f) HF Inference Providers<br/>remote · serverless OpenAI-compatible · HTTPS"]
+  CLOUD["(f) Cloud inference providers<br/>Fireworks AI · Anthropic Claude<br/>remote · serverless OpenAI-compatible · HTTPS"]
 
   VO -- "HTTP+SSE :8080" --> Core
   DASH -- "HTTP+SSE :8080 (chat/status)" --> Core
   DASH -. "direct SQLite read (BFF)" .-> SDB
   GW -- "HTTP/SSE :8088 (local)" --> SC
-  GW -- "HTTPS (reasoning/consolidation/agent)" --> HF
+  GW -- "HTTPS (consolidation → Fireworks; reasoning, agent → Anthropic)" --> CLOUD
   MEM --- SDB
   AG --- SDB
   SCH --- SDB
@@ -169,9 +169,9 @@ The core service owns the sidecar process directly:
 - **Spawn**: `child_process.spawn("python", ["-m", "mlx_lm.server", ...])` with
   a fixed `--port 8770`. Core captures stdout/stderr into `logs/mlx.log`.
 - **Readiness**: core polls `GET 127.0.0.1:8770/v1/models` until it answers
-  (or times out → fall back to HF).
+  (or times out → fall back to the configured cloud provider).
 - **Supervise**: a health check on each request; if the sidecar dies mid-stream
-  the gateway retries against HF and re-spawns lazily.
+  the gateway retries against the cloud provider and re-spawns lazily.
 - **Kill on idle**: an idle timer (default 5 min, configurable) sends `SIGTERM`
   to free RAM; `SIGKILL` after a grace period. The core process being the parent
   guarantees the sidecar dies if core dies (no orphan model server).
@@ -185,17 +185,17 @@ loaded at boot. In runtime terms:
 
 1. **Idle / boot**: only core + voice daemon + DBs are resident. Sidecar absent;
    ~0 GB of model memory in use. Routine work (memory, scheduling, light agent
-   steps, anything routed to HF) runs without it.
+   steps, anything routed to the cloud lane) runs without it.
 2. **Wake**: a voice/dashboard request that needs local inference triggers core
    to spawn the sidecar (§2), which loads weights into unified memory. First
    request after a cold start pays the load latency; subsequent requests are warm.
 3. **Serving**: while warm, all local-routed inference hits `:8770`.
 4. **Idle unload**: after the idle window with no local requests, core kills the
    sidecar, returning unified memory to the system.
-5. **HF endpoint** is **always available remotely** and stateless — used as the
-   default for heavy reasoning when the local model is unloaded, when RAM is
-   pressured (§8), or when explicitly preferred by routing policy. No local
-   memory cost.
+5. **The cloud providers (Fireworks, Anthropic)** are **always available remotely**
+   and stateless — used as the default for heavy reasoning when the local model is
+   unloaded, when RAM is pressured (§8), or when explicitly preferred by routing
+   policy. No local memory cost.
 
 This makes "model loaded" a transient, observable state (surfaced in §9), not a
 permanent resource commitment — the right trade-off on a 16 GB fanless machine.
@@ -211,7 +211,7 @@ Secrets do **not** live here — they go in the **macOS Keychain**.
 ~/Library/Application Support/Jarvis/
 ├── config/
 │   ├── config.json            # user settings (ports, idle timeout, routing policy)
-│   ├── models.json            # model registry: local model id, HF endpoint URL, embed model
+│   ├── models.json            # model registry: local model id, cloud provider endpoint URLs, embed model
 │   └── sources.json           # connected sources (calendar, mail, notes…) — no secrets
 ├── journal/                   # SOURCE OF TRUTH — append-only capture log
 │   ├── 2026/06/09.jsonl       # raw events, one JSON object per line, never edited
@@ -227,7 +227,7 @@ Secrets do **not** live here — they go in the **macOS Keychain**.
 │   └── analytics.duckdb       # (optional) read-only analytics over metrics
 ├── models/                    # downloaded local model weights (MLX format)
 │   └── <org>--<model>/        # cached snapshot; large — excluded from cloud backup
-├── cache/                     # regenerable: embedding cache, HF response cache, tmp
+├── cache/                     # regenerable: embedding cache, cloud-provider response cache, tmp
 └── secrets.note               # README only: "secrets are in Keychain, see below"
 
 ~/Library/Logs/Jarvis/         # logs (macOS convention, separate from app support)
@@ -237,10 +237,13 @@ Secrets do **not** live here — they go in the **macOS Keychain**.
 └── ...
 ```
 
-**Secrets in Keychain.** HF token, source OAuth tokens, and any API keys are
-stored as generic password items under service `com.jarvis` (e.g.
-`security add-generic-password -s com.jarvis -a hf_token -w <token>`), read by
-core at runtime. They are never written to `config/` or the journal.
+**Secrets in Keychain.** Source OAuth tokens and any API keys are stored as
+generic password items under service `com.jarvis` (e.g.
+`security add-generic-password -s com.jarvis -a fireworks_api_key -w <key>`), read
+by core at runtime. (In the current shipped implementation the Fireworks/Anthropic
+keys instead live in the gitignored repo-root `.env`, loaded by `loadEnv.js` at
+boot — see `architecture/privacy-and-security.md`.) They are never written to
+`config/` or the journal.
 
 **Source-of-truth principle.** `journal/` is append-only and authoritative. The
 graph, vectors, and metrics DBs are **derived** and can be rebuilt by replaying
@@ -315,14 +318,15 @@ Launching `Jarvis.app` the first time opens the dashboard wizard:
    `config/`, `journal/`, empty DBs.
 2. **Connect sources** — OAuth/permission flows for calendar, mail, notes, etc.;
    tokens stored in Keychain, source list in `sources.json`.
-3. **Set HF endpoint** — paste the Inference Endpoint URL + token (→ Keychain),
-   write the URL into `models.json`; wizard does a test call.
+3. **Set cloud provider keys** — paste the Fireworks and Anthropic API keys
+   (→ Keychain), write the endpoint URLs into `models.json`; wizard does a test
+   call to each.
 4. **Pick & pull local model** — choose from the registry, then
    `jarvis model pull` downloads the MLX weights into `models/`.
 5. **Grant macOS permissions** — Microphone (voice daemon), Accessibility/Login
    Items so launchd agents survive reboot.
-6. **Smoke test** — wizard fires one local and one HF inference and confirms the
-   health view (§9) is green.
+6. **Smoke test** — wizard fires one local and one cloud-provider inference and
+   confirms the health view (§9) is green.
 
 ---
 
@@ -332,8 +336,8 @@ Launching `Jarvis.app` the first time opens the dashboard wizard:
   re-install); the LaunchAgents point at stable paths so a restart picks up new
   binaries. `launchctl kickstart -k` restarts core after an update.
 - **Model updates**: edit `config/models.json` (the model registry) to point at a
-  new local model id or a new HF endpoint, then `jarvis model pull`. Old weights
-  in `models/` can be garbage-collected with `jarvis model gc`.
+  new local model id or a new cloud provider endpoint, then `jarvis model pull`.
+  Old weights in `models/` can be garbage-collected with `jarvis model gc`.
 - **DB schema migrations**: core runs versioned migrations on startup. SQLite
   migrations are forward-only with a recorded `schema_version`; the graph store
   has its own migration steps. A failed migration aborts startup rather than
@@ -344,8 +348,8 @@ Launching `Jarvis.app` the first time opens the dashboard wizard:
   change triggers a full **reindex**: re-embed every memory from the journal/graph
   into a new LanceDB table, then atomically swap it in. This is offloaded to a
   background job (it can be long and RAM-heavy) and may route batches through the
-  HF endpoint to spare local memory. The old table is kept until the new one
-  verifies, then dropped.
+  configured cloud provider to spare local memory. The old table is kept until the
+  new one verifies, then dropped.
 
 ---
 
@@ -359,16 +363,16 @@ and model weights — so deployment is tuned to stay light.
   hence the on-demand lifecycle (§3). Two heavy things at once is the danger.
 - **Thermal / fanless throttling**: sustained local inference heats the SoC and
   the CPU/GPU clock down. Mitigations: prefer short bursts, cap concurrent local
-  requests to 1, and lean on the always-cool HF endpoint for long/heavy jobs.
+  requests to 1, and lean on the always-cool cloud providers for long/heavy jobs.
   `ProcessType=Background` + `Nice` in the plists keep background work yielding.
 - **Under RAM pressure** (core watches `memory_pressure` / vm stats):
   1. **Unload the local model** (kill the sidecar) immediately.
-  2. **Route inference to the HF endpoint** until pressure clears.
+  2. **Route inference to the configured cloud provider** until pressure clears.
   3. Pause/throttle background consolidation and reindex jobs.
   4. Shrink caches (`cache/`) if needed.
   These steps are automatic and surfaced as events in the dashboard.
-- **Battery**: local inference is the biggest drain; routing policy can prefer HF
-  when on battery and prefer local when plugged in.
+- **Battery**: local inference is the biggest drain; routing policy can prefer the
+  cloud lane when on battery and prefer local when plugged in.
 
 ---
 
@@ -384,22 +388,24 @@ work too since launchd output is captured.
 ### Metrics & runs
 
 `db/metrics.sqlite` records every run with timestamps, latency, token counts,
-route (local vs HF), and outcome — for inference calls, source syncs, memory
-consolidations, and agent runs. The optional DuckDB view enables ad-hoc queries.
+route (local vs. the configured cloud provider), and outcome — for inference calls,
+source syncs, memory consolidations, and agent runs. The optional DuckDB view
+enables ad-hoc queries.
 
 ### Dashboard health views
 
 The Next.js dashboard (`:3000`, data via core SSE) surfaces:
 
 - **Model status** — local model loaded/unloaded, sidecar PID + uptime, current
-  resident memory, HF endpoint reachability and latency, active route.
+  resident memory, cloud provider reachability and latency, active route.
 - **Sync runs** — per-source last-run time, items ingested, errors.
 - **Consolidation runs** — memory consolidation history (entities/edges written,
   vectors added) and the next scheduled run.
 - **Agent runs** — live and historical agent executions with step traces and
   checkpoint state from `checkpoints.sqlite`.
 - **System** — unified-memory headroom, memory-pressure state, recent
-  auto-mitigations (model unloaded / routed-to-HF), and reindex job progress.
+  auto-mitigations (model unloaded / routed to the cloud provider), and reindex
+  job progress.
 
 Health is also exposed at `GET 127.0.0.1:8765/healthz` for scripts and for the
 setup wizard's smoke test.

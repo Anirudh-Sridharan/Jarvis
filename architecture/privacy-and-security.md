@@ -22,23 +22,23 @@ source of truth.
 
 **Own storage, rent intelligence.** We own the data layer permanently and locally. We
 *rent* heavy compute on demand: large-model reasoning, transcription, embeddings, and
-similar workloads run on Hugging Face cloud endpoints.
+similar workloads run on serverless cloud providers (Fireworks AI, Anthropic Claude).
 
 **The tradeoff, stated plainly.** Renting cloud intelligence means **data does leave the
 machine** for those specific calls. Email bodies, journal snippets, transcripts, and
-prompts are sent to the HF cloud to be processed and the results returned. Note the heavy
-tier now uses **HF Inference Providers (serverless router)**, which **forwards each request
-to a rotating third-party partner provider** (e.g. Featherless AI, OVHcloud) rather than a
-GPU that is ours — so the data is seen by both HF and the selected partner, subject to that
-partner's retention policy. Given the user's stance (cost and privacy not a concern), this
-is an accepted tradeoff, not a leak — but it is called out explicitly so it is never a
-surprise:
+prompts are sent to the cloud to be processed and the results returned. Requests go
+directly to the named provider's own API — **Fireworks AI** (`api.fireworks.ai`) for
+nightly consolidation, **Anthropic** (`api.anthropic.com`) for reasoning/agent — so the
+data is seen by that one provider under its own retention policy, with no rotating
+third-party intermediary in between. Given the user's stance (cost and privacy not a
+concern), this is an accepted tradeoff, not a leak — but it is called out explicitly so
+it is never a surprise:
 
 - We send what the task needs, not the whole journal, on each call (scope-of-need, for
   cost and latency reasons rather than privacy ones).
-- HF calls are over TLS; tokens are stored as described in §4. To constrain *which* partner
-  sees the data, a specific provider can be pinned via a `:provider` suffix on the model id
-  (e.g. `…:featherless-ai`) instead of letting the router auto-select.
+- Cloud calls are over TLS; keys are stored as described in §4. Which provider handles
+  which task class is fixed by config (`routing.cloudTaskProviders` in
+  `config/models.yaml`), not auto-selected at request time.
 - If the threat model ever changes (see §7), the local-vs-cloud boundary is the first
   thing to revisit, because it is the only place data routinely leaves the device.
 
@@ -130,7 +130,8 @@ integration/auth flow; this section is the security contract.)
 |--------|---------|----------------------|
 | Gmail / Calendar / Drive OAuth tokens | macOS Keychain | Refresh tokens stored encrypted by Keychain; access tokens held in memory only, refreshed on expiry; least-privilege scopes |
 | Whoop OAuth (rotating refresh) | macOS Keychain | Whoop issues a **new refresh token on every refresh** — old one is invalidated. The new refresh token must be written back to Keychain atomically on each refresh, or the integration locks out. Handle refresh failures by re-prompting for re-auth, never by retrying with the dead token |
-| Hugging Face API token | macOS Keychain | Single long-lived token; read into memory at use; rotate manually if exposed |
+| `FIREWORKS_API_KEY` | Gitignored repo-root `.env` (loaded by `loadEnv.js` at boot) — **not** Keychain | Single long-lived key; read into memory at use; rotate manually if exposed |
+| `ANTHROPIC_API_KEY` | Gitignored repo-root `.env` (loaded by `loadEnv.js` at boot) — **not** Keychain | Single long-lived key; read into memory at use; rotate manually if exposed |
 | Any local DB / encryption keys (if added) | macOS Keychain | Never checked into the repo or written to the journal |
 
 **Rules that hold regardless of the relaxed privacy stance:**
@@ -140,8 +141,11 @@ integration/auth flow; this section is the security contract.)
 - **Never embed secrets in prompts or memory.** Tokens are attached at the HTTP layer
   (Authorization header), not interpolated into model context. They never enter the
   capture journal or memory store.
-- **Keychain is the only home.** No `.env` with live tokens, no plaintext config, no
-  secrets in shell history.
+- **Keychain is the home for connector OAuth tokens.** No plaintext config, no secrets
+  in shell history. **Documented exception:** the `FIREWORKS_API_KEY`/`ANTHROPIC_API_KEY`
+  pair lives in the gitignored repo-root `.env` (loaded by `loadEnv.js` at boot) instead
+  of Keychain — a deliberate, narrow exception stated plainly here rather than silently
+  contradicting the rule above.
 
 ---
 

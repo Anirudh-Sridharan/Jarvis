@@ -28,9 +28,9 @@ Three hard constraints shape every decision below:
 |------|-------|-------|--------------|-------|
 | Chat (default) | Qwen3-4B-Instruct-2507 | Local (MLX) | ~2.5 GB @ 4-bit | Primary interactive model (`mlx-community/Qwen3-4B-Instruct-2507-4bit`). Fast TTFT, fits comfortably with voice loaded. |
 | Chat (quality tier) | Qwen3.5-9B-class-Instruct | Local (MLX) | ~5–6 GB @ 4-bit | Optional "thoughtful" local mode. Cannot coexist with voice; load on demand. |
-| Heavy reasoning | Qwen3-Next-80B-A3B-Instruct | HF Inference Providers (serverless router) | n/a (hosted) | 80B MoE (~3B active), instruct/non-thinking, tool-calling, 131K ctx. **Does NOT fit on 16 GB locally** — hosted only. |
-| Frontier reasoning | Qwen3.7-Max | HF / Qwen API | API-only | **No open weights.** Used for the hardest reasoning + nightly consolidation quality pass. |
-| Nightly consolidation | Qwen3-Next-80B-A3B-Instruct *or* Qwen3.7-Max | HF router / API | n/a | Batch memory summarization/dedup. Runs while the Air sleeps/charges (see §4). |
+| Heavy reasoning | Qwen3-Next-80B-A3B-Instruct (`accounts/fireworks/models/qwen3-next-80b-a3b-instruct`) | Fireworks AI (serverless, OpenAI-compatible) | n/a (hosted) · 262K ctx | 80B MoE (~3B active), instruct/non-thinking, tool-calling. **Does NOT fit on 16 GB locally** — hosted only. |
+| Frontier reasoning | Claude Sonnet 5 (`claude-sonnet-5`) | Anthropic Claude (serverless, OpenAI-SDK-compatible) | API-only · 1M ctx | **No open weights.** The quality-critical lane for the `reasoning` + `agent` task classes. |
+| Nightly consolidation | Qwen3-Next-80B-A3B-Instruct (`accounts/fireworks/models/qwen3-next-80b-a3b-instruct`) | Fireworks AI (serverless, OpenAI-compatible) | n/a · 262K ctx | Batch memory summarization/dedup. Runs while the Air sleeps/charges (see §4). |
 | Embeddings | Qwen3-Embedding-0.6B-8bit | Local (MLX) | ~0.6 GB @ 8-bit | RAG vectorization (`mlx-community/Qwen3-Embedding-0.6B-8bit`). The sidecar pools the transformer's hidden states (last-token) — not `model()` logits. |
 | Reranker | Qwen3-Reranker-0.6B | Local (MLX) | ~0.6 GB @ 8-bit | Cross-encoder rerank of retrieved chunks. Loaded on retrieval, can unload after. |
 | Draft (optional) | Qwen3.5-0.5B | Local (MLX) | ~0.3 GB @ 4-bit | Speculative-decoding draft model for the chat tier (see §5). Off by default. |
@@ -40,13 +40,13 @@ Notes on the heavy tier:
 - **Qwen3-Next-80B-A3B-Instruct** is an 80B mixture-of-experts model with only ~3B active
   params per token — near-large-model quality at small-model cost/latency. It is an
   **instruct (non-thinking)** model: it answers directly instead of emitting reasoning
-  tokens, supports tool-calling, and has a 131K context. At 80B total weights it is far too
-  large to keep resident in the Air's 16 GB pool, so it is a **hosted-only** model in
-  Jarvis, reached **serverless** (no weights downloaded, no GPU provisioned) via HF
-  Inference Providers — see §3.
-- **Qwen3.7-Max** ships **no downloadable weights** — it is an API product. We treat it
+  tokens, supports tool-calling, and has a 262K context on Fireworks. At 80B total weights
+  it is far too large to keep resident in the Air's 16 GB pool, so it is a **hosted-only**
+  model in Jarvis, reached **serverless** (no weights downloaded, no GPU provisioned) via
+  Fireworks AI — see §3.
+- **Claude Sonnet 5** ships **no downloadable weights** — it is an API product. We treat it
   as the top quality lever for tasks where correctness matters more than privacy or cost
-  (deep reasoning, nightly consolidation final pass).
+  (deep reasoning, agent planning).
 - The two local chat tiers are **mutually exclusive with voice**: the 9B tier and the
   STT/TTS stack cannot both be resident on 16 GB (see RAM budget in §4).
 
@@ -63,8 +63,8 @@ memory architecture and Metal.
   retrieved context, so this matters more than raw tokens/sec.
 - **`mlx-lm` ships an OpenAI-compatible HTTP server.** We run it as a **Python sidecar**
   process (`mlx_lm.server`). The inference gateway (Feature 1) talks to it over
-  `http://127.0.0.1:<port>/v1/...` exactly as it talks to HF — same request shape, so
-  routing local↔remote is a URL/header swap, not a code fork.
+  `http://127.0.0.1:<port>/v1/...` exactly as it talks to the cloud providers — same
+  request shape, so routing local↔remote is a URL/header swap, not a code fork.
 - **Unified memory = zero copy.** Weights and KV cache live in the same pool the OS and
   app use; there is no VRAM/host-RAM transfer. This is also *why* the RAM budget (§4) is
   so tight — there's no separate GPU memory to hide in.
@@ -93,14 +93,15 @@ is high.
 
 ---
 
-## 3. Why HF Inference Providers (serverless) for the heavy tier
+## 3. Why serverless third-party providers for the heavy tier
 
 The fanless Air cannot serve a 27B model, and even if it could, **sustained** heavy
 generation would thermally throttle within minutes and crater interactive latency for
-everything else. We offload the heavy tier to **Hugging Face Inference Providers** — a
-**serverless, OpenAI-compatible router** (`https://router.huggingface.co/v1`) that
-forwards each request to a partner provider hosting the model (e.g. Featherless AI,
-OVHcloud), billed per-token through a single HF token.
+everything else. We offload the heavy tier to two **serverless, OpenAI-compatible
+providers** reached directly (no rotating third-party router in between): **Fireworks
+AI** (`https://api.fireworks.ai/inference/v1`) for the open Qwen heavy/consolidation
+lane, and **Anthropic Claude** (`https://api.anthropic.com/v1`) for the quality-critical
+reasoning/agent lane — each billed per-token through its own API key.
 
 > **Decision update (2026-06-09):** this tier originally targeted a *dedicated* HF
 > Inference Endpoint (TGI, kept warm). We switched to **serverless Inference Providers**.
@@ -110,44 +111,53 @@ OVHcloud), billed per-token through a single HF token.
 > sizing, region availability, and endpoint lifecycle to operate. Serverless removes all
 > of that.
 
-Why serverless Inference Providers specifically:
+> **Decision update (2026-07-31):** the heavy tier moved off the HF Inference Providers
+> router to **Fireworks AI** (open Qwen, cost-efficient, high-volume consolidation) plus
+> **Anthropic Claude** (quality-critical `reasoning`/`agent`), because the HF-era
+> token/endpoint pair had gone stale and 401'd (Phase 8 finding) and the credits now
+> available are Fireworks + Anthropic. The "why serverless, why not a dedicated GPU"
+> rationale above is unchanged — only the provider identity changed.
+
+Why serverless providers specifically:
 
 - **Zero idle cost.** Pay only per token actually generated; nothing runs between
   requests. A dedicated GPU sitting idle ~99% of the day (our actual usage profile) is
   pure waste. There is also a free monthly tier.
 - **Nothing to operate.** No GPU instance to size, no region/availability hunting, no
-  scale-to-zero to remember to enable, no endpoint URL/name to manage — just an HF token
-  and a model id. The fixed router URL drops straight into the existing provider code with
-  no change.
+  scale-to-zero to remember to enable, no endpoint URL/name to manage — just a provider
+  API key and a model id. Each provider's fixed base URL drops straight into the shared
+  `openAiCompatProvider.ts` client with no code change.
 - **Thermals are someone else's problem.** Long reasoning chains and the nightly
-  consolidation batch run on a partner's GPU, off the Air entirely. The Air stays cool.
+  consolidation batch run on the provider's GPU, off the Air entirely. The Air stays cool.
 - **Cost is explicitly not a concern** for this project, but serverless is *also* the
   cheaper and simpler choice here, so there is no tradeoff to optimize away.
 
-**Accepted tradeoffs.** Requests route through a **rotating third-party partner** rather
-than a GPU that is ours — the same outbound-data posture as a dedicated HF endpoint, but
-worth noting for privacy (see `privacy-and-security.md`; voice/chat still stay local).
-First-token latency varies by provider. The default heavy model is **instruct
-(non-thinking)** so it returns content directly; note that if a *thinking* model is ever
-selected for this tier it emits reasoning tokens before any content, so `max_tokens` must
-be budgeted generously or the response can come back empty. Model choice is limited to what
-providers currently serve; pick via the catalog and optionally pin a provider with a
-`:provider` suffix on the model id.
+**Accepted tradeoffs.** Requests go directly to the named provider's own API — Fireworks
+for consolidation, Anthropic for reasoning/agent — so the data is seen by that one
+provider under its own retention policy, with no rotating third-party intermediary in
+between (see `privacy-and-security.md`; voice/chat still stay local). First-token latency
+varies by provider. The default heavy model is **instruct (non-thinking)** so it returns
+content directly; note that if a *thinking* model is ever selected for this tier it emits
+reasoning tokens before any content, so `max_tokens` must be budgeted generously or the
+response can come back empty. Model choice per task class is fixed in `config/models.yaml`
+(`routing.cloudTaskProviders`).
 
-### How the gateway routes local ↔ HF (ref Feature 1)
+### How the gateway routes local ↔ cloud (ref Feature 1)
 
 The inference gateway is the single client-facing entry point. It exposes one
 OpenAI-compatible API and routes per request:
 
-- **Routing key = model role** declared in the registry (§7), plus optional request
-  hints (`reasoning: high`, `privacy: strict`, `batch: true`).
-- `chat` / `chat-quality` → local MLX sidecar.
+- **Routing key = taskHint** (`voice`/`chat`/`reasoning`/`consolidation`/`agent`/
+  `embedding`/`rerank`), resolved deterministically against the registry (§7) plus the
+  routing config.
+- `voice` / `chat` → local MLX sidecar.
 - `embedding` / `rerank` → local MLX (always local; never leaves the device).
-- `heavy` / `frontier` / nightly `consolidate` → HF Inference Providers router or Qwen API.
-- **`privacy: strict` overrides routing to local-only**, even for heavy requests
-  (degrading to the local 9B tier rather than sending data off-device).
-- **Failover:** if the HF endpoint is unreachable, the gateway falls back to the best
-  available local tier and flags the response as degraded.
+- `consolidation` → **Fireworks AI**; `reasoning` / `agent` → **Anthropic Claude** —
+  selected per task class by `routing.cloudTaskProviders` in `config/models.yaml` (§7),
+  with `defaultCloudProvider` as the fallback for token-overflow/RAM-guard escalation on
+  hints with no explicit entry.
+- **Failover:** if the configured cloud provider is unreachable, the gateway retries once
+  on the local model and records `fallbackActive` in telemetry.
 
 Auth/secrets for the endpoint (token, base URL) come from the secrets layer described in
 `auth-and-integrations.md` — never hard-coded.
@@ -187,14 +197,14 @@ So the gateway treats resident models as a **managed cache, not a static set**:
   tier and full voice stack are **mutually exclusive**.
 - The **reranker** is loaded for a retrieval burst and may be unloaded after.
 - Heavy/frontier requests cost **0 local RAM** — they're remote — which is another reason
-  the heavy tier lives on HF: it lets the local pool stay small.
+  the heavy tier lives on Fireworks/Anthropic: it lets the local pool stay small.
 - An **LRU + role-priority eviction policy** decides what to drop under pressure
   (embeddings are stickiest; draft model is droppable first).
 
 ### Nightly consolidation profile
 
 Nightly memory consolidation runs **while the Air is idle/charging**. It is offloaded to
-HF/Qwen-API, so it consumes **no local RAM and generates no local heat** — exactly the
+Fireworks AI, so it consumes **no local RAM and generates no local heat** — exactly the
 workload class the fanless design cannot do well on-device.
 
 ---
@@ -265,16 +275,16 @@ models:
     repo: Qwen/Qwen3.5-9B-Instruct-4bit
     quant: q4
     resident: false          # load on demand; mutually exclusive with voice
-  heavy:
-    role: heavy
-    engine: hf                           # OpenAI-compatible HF Inference Providers router
-    endpoint: ${HF_ENDPOINT_URL}         # https://router.huggingface.co/v1/chat/completions
-    model: Qwen/Qwen3-Next-80B-A3B-Instruct   # optional provider pin: …:novita or …:featherless-ai
-  frontier:
-    role: frontier
-    engine: api
-    endpoint: ${QWEN_API_URL}
-    model: qwen3.7-max
+  fireworks-heavy:
+    role: heavy                          # consolidation + heavy chat lane
+    engine: fireworks                    # OpenAI-compatible Fireworks AI
+    endpoint: ${FIREWORKS_ENDPOINT_URL}  # https://api.fireworks.ai/inference/v1
+    model: accounts/fireworks/models/qwen3-next-80b-a3b-instruct
+  anthropic-agent:
+    role: reasoning                      # reasoning + agent lane
+    engine: anthropic                    # Anthropic's OpenAI-SDK-compatible endpoint
+    endpoint: ${ANTHROPIC_ENDPOINT_URL}  # https://api.anthropic.com/v1
+    model: claude-sonnet-5
   embedding:
     role: embedding
     engine: mlx
@@ -285,13 +295,26 @@ models:
     engine: mlx
     repo: Qwen/Qwen3-Reranker-0.6B
     quant: q8
+
+routing:
+  agentLocalTokenCap: 12000
+  localCtxSafe: 14000
+  ramFloorGB: 2
+  agentLatencyBudgetMs: 8000
+  cloudTaskProviders:
+    consolidation: fireworks
+    reasoning: anthropic
+    agent: anthropic
+  defaultCloudProvider: fireworks    # token-overflow / RAM-guard escalation default
+  agentPreferCloud: true             # agent task class defaults to its configured cloud provider
 ```
 
 Consequences:
 
-- **Flipping local↔HF is a config edit.** Point `heavy` at a local engine, or point
-  `chat-default` at an HF endpoint, with no gateway code changes — the gateway routes by
-  `role` and dials the declared `engine`/`endpoint`.
+- **Flipping local↔cloud, or rebalancing which cloud provider serves a task class, is a
+  config edit — no gateway code changes.** Point `fireworks-heavy` at a local engine, or
+  point `chat-default` at a cloud provider, and the gateway routes by `role` and dials the
+  declared `engine`/`endpoint`.
 - **Upgrade path is a registry bump.** When the next Qwen ships (e.g. a Qwen3.6 dense
   small model, or a Qwen3.8-Max), swap the `repo`/`model` field, re-quantize if local, and
   the rest of Jarvis is unchanged. Roles are stable; the models behind them rotate.
@@ -312,22 +335,26 @@ Consequences:
 - **llama.cpp / GGUF:** install for the agentic tool-call profile (§2); register models
   with `engine: gguf`.
 
-### HF Inference Providers (serverless — no endpoint to create)
+### Fireworks AI (serverless — no endpoint to create)
 
-1. Create a **fine-grained HF token** with the **"Make calls to Inference Providers"**
-   permission at `hf.co/settings/tokens`. There is no GPU, region, or endpoint to
+1. Create an API key at `fireworks.ai/account/api-keys`. There is no GPU, region, or
+   endpoint to provision.
+2. Base URL is fixed: `https://api.fireworks.ai/inference/v1` (override via
+   `FIREWORKS_ENDPOINT_URL`). Streaming and OpenAI-compatible tool/JSON params work as on
+   any OpenAI endpoint.
+
+### Anthropic
+
+1. Create an API key at `console.anthropic.com/settings/keys`. Serverless, nothing to
    provision.
-2. Pick a model the providers actually serve from the catalog
-   (`huggingface.co/models?inference_provider=all`); optionally pin a provider or routing
-   policy with a suffix on the model id (`:fastest` default, `:cheapest`, or
-   `:featherless-ai`).
-3. The router base URL is fixed: `https://router.huggingface.co/v1/chat/completions`.
-   Streaming and OpenAI-compatible tool/JSON params work as on any OpenAI endpoint.
+2. Base URL is fixed: `https://api.anthropic.com/v1` (override via
+   `ANTHROPIC_ENDPOINT_URL`) — Anthropic's OpenAI-SDK-compatible endpoint; `max_tokens` is
+   always sent (its compat layer requires it).
 
 ### Secrets / env (ref `auth-and-integrations.md`)
 
-- `HF_ENDPOINT_URL` (= the fixed router URL above), `HF_TOKEN` — Inference Providers.
-- `QWEN_API_URL`, `QWEN_API_KEY` — frontier (Qwen3.7-Max) API.
+- `FIREWORKS_API_KEY`, `FIREWORKS_ENDPOINT_URL` — Fireworks AI (heavy/consolidation lane).
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_ENDPOINT_URL` — Anthropic Claude (reasoning/agent lane).
 - All injected from the secrets layer; **never** committed to the registry or source.
   The registry references them via `${VAR}` interpolation only.
 
@@ -354,9 +381,9 @@ flowchart TB
         Secrets[("Secrets layer<br/>auth-and-integrations")]
     end
 
-    subgraph Cloud["Hugging Face / Qwen API"]
-        HF["HF Inference Providers (serverless router)<br/>Qwen3-Next-80B-A3B-Instruct"]
-        API["Qwen API<br/>Qwen3.7-Max"]
+    subgraph Cloud["Fireworks AI / Anthropic Claude"]
+        FIREWORKS["Fireworks AI (serverless OpenAI-compatible)<br/>Qwen3-Next-80B-A3B-Instruct"]
+        ANTHROPIC["Anthropic Claude<br/>claude-sonnet-5"]
     end
 
     Client --> Gateway
@@ -365,18 +392,18 @@ flowchart TB
     Gateway -->|"role: embedding"| Embed
     Gateway -->|"role: rerank"| Rerank
     MLX -.->|speculative| Draft
-    Gateway -->|"role: heavy / consolidate"| HF
-    Gateway -->|"role: frontier"| API
+    Gateway -->|"consolidation → Fireworks"| FIREWORKS
+    Gateway -->|"reasoning, agent → Anthropic"| ANTHROPIC
 
     Registry -.config.-> Gateway
     Secrets -.token+URL.-> Gateway
 
     classDef remote fill:#fde,stroke:#a36;
-    class HF,API remote;
+    class FIREWORKS,ANTHROPIC remote;
 ```
 
 **Reading the diagram:** the gateway is the only thing clients talk to. Chat, embeddings,
-reranking, and the optional draft model stay **on-device**; only the heavy and frontier
-roles cross the network to HF/Qwen. The registry supplies routing config and the secrets
-layer supplies endpoint credentials — both feed the gateway, neither is exposed to the
-client.
+reranking, and the optional draft model stay **on-device**; only the consolidation,
+reasoning, and agent task classes cross the network to Fireworks/Anthropic. The registry
+supplies routing config and the secrets layer supplies endpoint credentials — both feed
+the gateway, neither is exposed to the client.
