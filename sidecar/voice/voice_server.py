@@ -9,7 +9,8 @@ Contract (keep exact — the TS ``voiceClient`` calls these):
 
     GET  /health
         → { state, components: { stt, tts, vad, wake },
-            stt_engine: { configured, active, reason } }
+            stt_engine: { configured, active, reason },
+            tts_engine: { configured, active, reason } }
 
     WS   /stt/stream
         Client sends binary PCM-16 mono 16 kHz frames (any frame size,
@@ -22,10 +23,13 @@ Contract (keep exact — the TS ``voiceClient`` calls these):
             { "type": "error",    "detail": "…" }
         Close the WebSocket to cancel.
 
-    POST /tts   { "text": "…", "request_id": "<optional uuid>" }
+    POST /tts   { "text": "…", "request_id": "<optional uuid>", "engine": "kokoro|aura" }
         → Streams raw PCM-16 LE mono 24 kHz audio chunks (Content-Type:
           audio/pcm; rate=24000).  Request-id header ``X-TTS-Request-Id``
-          echoed back.  Close the response / call /tts/cancel to abort.
+          echoed back.  ``engine`` is optional (defaults to the TTS_ENGINE
+          env value); Kokoro is always the default and the fallback — an
+          Aura failure yields Kokoro audio for the same request, never a
+          500 or silence.  Close the response / call /tts/cancel to abort.
 
     POST /tts/cancel   { "request_id": "…" }
         → { "cancelled": bool }
@@ -116,6 +120,13 @@ DEEPGRAM_MODEL = os.environ.get("DEEPGRAM_MODEL", "nova-3")
 DEEPGRAM_STT_ENABLED = os.environ.get("DEEPGRAM_STT_ENABLED", "1")
 DEEPGRAM_CONNECT_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_CONNECT_TIMEOUT_MS", "2000"))
 DEEPGRAM_FINALIZE_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_FINALIZE_TIMEOUT_MS", "600"))
+
+# Deepgram Aura-2 streaming-TTS config (parallel to the STT block above).
+# "kokoro" is the COMMITTED DEFAULT — it stays the default until the user
+# makes an explicit decision in plan 13.2-06 (13.2-CONTEXT.md D-05). No agent
+# may change this default.
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "kokoro")
+DEEPGRAM_TTS_MODEL = os.environ.get("DEEPGRAM_TTS_MODEL", "aura-2-draco-en")
 
 ComponentState = Literal["unloaded", "loading", "ready", "error"]
 
@@ -386,6 +397,30 @@ def _configured_stt_reason() -> Optional[str]:
     return None
 
 
+# Active TTS engine status, updated at each /tts request. Surfaced verbatim
+# (minus the key, which never enters this dict) via GET /health's top-level
+# "tts_engine" key — mirrors _stt_engine_status above.
+_tts_engine_status: Dict[str, Optional[str]] = {"active": None, "reason": None}
+
+
+def _configured_tts_engine() -> str:
+    """Which TTS engine is configured (not necessarily last active).
+
+    "aura" only when TTS_ENGINE asks for it AND a key is present; otherwise
+    "kokoro" — the committed default (D-05).
+    """
+    if TTS_ENGINE.lower() == "aura" and DEEPGRAM_API_KEY:
+        return "aura"
+    return "kokoro"
+
+
+def _configured_tts_reason() -> Optional[str]:
+    """Why the configured engine is kokoro, or None when aura."""
+    if TTS_ENGINE.lower() == "aura" and not DEEPGRAM_API_KEY:
+        return "DEEPGRAM_API_KEY not set"
+    return None
+
+
 def resolve_voice(pipeline: Any, spec: str) -> Any:
     """Resolve a voice spec to what KPipeline accepts (str or style tensor).
 
@@ -461,12 +496,18 @@ async def health() -> Dict[str, Any]:
             "configured": "deepgram" | "faster-whisper",
             "active": "deepgram" | "faster-whisper" | null,
             "reason": "<short, key-free degradation reason>" | null
+          },
+          "tts_engine": {
+            "configured": "aura" | "kokoro",
+            "active": "aura" | "kokoro" | null,
+            "reason": "<short, key-free degradation reason>" | null
           }
         }
 
-    ``stt_engine`` is a NEW TOP-LEVEL key (never inside ``components`` — an
-    engine name there would permanently force ``state`` to "degraded" since
-    the overall-state computation below iterates ``components.values()``).
+    ``stt_engine``/``tts_engine`` are ADDITIVE TOP-LEVEL keys (never inside
+    ``components`` — an engine name there would permanently force ``state``
+    to "degraded" since the overall-state computation below iterates
+    ``components.values()``, which stays exactly the four existing keys).
     """
     components = {
         "stt": stt_mgr.state,
@@ -489,6 +530,11 @@ async def health() -> Dict[str, Any]:
             "configured": _configured_stt_engine(),
             "active": _stt_engine_status["active"],
             "reason": _stt_engine_status["reason"] or _configured_stt_reason(),
+        },
+        "tts_engine": {
+            "configured": _configured_tts_engine(),
+            "active": _tts_engine_status["active"],
+            "reason": _tts_engine_status["reason"] or _configured_tts_reason(),
         },
     }
 
@@ -690,14 +736,28 @@ class TTSRequest(BaseModel):
     )
     voice: Optional[str] = Field(default=None, description="Kokoro voice ID. Defaults to TTS_VOICE env.")
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    engine: Optional[str] = Field(
+        default=None, description="kokoro | aura — defaults to the TTS_ENGINE env value."
+    )
 
 
 @app.post("/tts")
 async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
-    """Synthesize text with Kokoro; stream raw PCM-16 LE mono 24 kHz back.
+    """Synthesize text with Kokoro or Aura-2; stream raw PCM-16 LE mono 24 kHz.
 
     The client sends ``{ "text": "…" }`` and receives a chunked binary stream
-    of raw PCM-16 LE mono audio at 24 000 Hz.
+    of raw PCM-16 LE mono audio at 24 000 Hz — identical for both engines.
+
+    Engine selection
+    ----------------
+    ``req.engine`` (``"kokoro"`` | ``"aura"``) overrides the ``TTS_ENGINE`` env
+    default for this one request; the TS client never sends it, so a live
+    conversation is governed entirely by the sidecar's own env. Anything
+    other than exactly ``"aura"`` is treated as ``"kokoro"``. Requesting
+    ``"aura"`` with no ``DEEPGRAM_API_KEY`` configured degrades to Kokoro
+    (never a 400/503) — see ``GET /health``'s ``tts_engine.reason``. A zero-
+    byte Aura stream mid-request also falls through to Kokoro for the SAME
+    request, so a failed cloud voice never produces silence.
 
     Response headers
     ----------------
@@ -708,8 +768,8 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     ------------
     Call ``POST /tts/cancel { "request_id": "<id>" }`` while the response is
     streaming to abort synthesis mid-stream.  The HTTP response will end after
-    the current Kokoro chunk completes.  Alternatively, close the HTTP
-    connection; the server detects disconnect and stops generating.
+    the current chunk completes, for either engine.  Alternatively, close the
+    HTTP connection; the server detects disconnect and stops generating.
 
     Barge-in
     --------
@@ -725,17 +785,39 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     cancel_event = asyncio.Event()
     _tts_cancel[request_id] = cancel_event
 
-    try:
-        voice = _voice_for(req.voice or TTS_VOICE)
-    except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
-        _tts_cancel.pop(request_id, None)
-        raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
+    # Resolve the engine BEFORE resolving the voice — an Aura voice id must
+    # never enter the Kokoro-only _resolved_voices cache below.
+    requested_engine = (req.engine or TTS_ENGINE).lower()
+    if requested_engine != "aura":
+        requested_engine = "kokoro"
+    use_aura = requested_engine == "aura"
+
+    if use_aura and not DEEPGRAM_API_KEY:
+        # An unset key must degrade to Kokoro, never 400/503 (D-05 / T-13.2-10).
+        use_aura = False
+        _tts_engine_status["reason"] = "DEEPGRAM_API_KEY not set"
+    else:
+        _tts_engine_status["reason"] = None
+
+    if use_aura:
+        # Plain string — Aura voice ids are never cached/resolved via
+        # _voice_for (that cache is Kokoro-only).
+        aura_voice = req.voice or DEEPGRAM_TTS_MODEL
+        kokoro_voice = None
+    else:
+        try:
+            kokoro_voice = _voice_for(req.voice or TTS_VOICE)
+        except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
+            _tts_cancel.pop(request_id, None)
+            raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
+        aura_voice = None
 
     async def _generate() -> AsyncGenerator[bytes, None]:
         from tts import synthesize_streaming  # type: ignore[import]
 
         loop = asyncio.get_running_loop()
-        try:
+
+        async def _kokoro_chunks(voice: Any) -> AsyncGenerator[bytes, None]:
             async for pcm_chunk in synthesize_streaming(
                 text=req.text,
                 pipeline=tts_mgr.get_pipeline(),
@@ -748,6 +830,51 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                     log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
                     return
                 yield pcm_chunk
+
+        try:
+            if use_aura:
+                import deepgram_tts  # type: ignore[import]
+
+                bytes_yielded = 0
+                async for pcm_chunk in deepgram_tts.synthesize_streaming_aura(
+                    text=req.text,
+                    api_key=DEEPGRAM_API_KEY,
+                    voice=aura_voice,
+                    cancel_event=cancel_event,
+                ):
+                    if cancel_event.is_set():
+                        log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
+                        return
+                    bytes_yielded += len(pcm_chunk)
+                    yield pcm_chunk
+
+                if cancel_event.is_set():
+                    return
+
+                if bytes_yielded > 0:
+                    _tts_engine_status["active"] = "aura"
+                    return
+
+                # Zero bytes and not cancelled: Aura failed somewhere between
+                # connect and Flushed (deepgram_tts.py already logged the
+                # specific reason on its own). A failed cloud voice must
+                # never produce silence — fall through to Kokoro for the
+                # SAME request (T-13.2-10).
+                reason = f"Aura produced no audio for request_id={request_id}"
+                log.warning("Aura TTS unavailable (falling back to Kokoro): %s", reason)
+                _tts_engine_status["active"] = "kokoro"
+                _tts_engine_status["reason"] = reason[:200]
+                try:
+                    fallback_voice = _voice_for(TTS_VOICE)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Kokoro fallback voice resolution failed: %s", exc)
+                    return
+                async for pcm_chunk in _kokoro_chunks(fallback_voice):
+                    yield pcm_chunk
+            else:
+                _tts_engine_status["active"] = "kokoro"
+                async for pcm_chunk in _kokoro_chunks(kokoro_voice):
+                    yield pcm_chunk
         finally:
             _tts_cancel.pop(request_id, None)
 
