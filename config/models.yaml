@@ -31,7 +31,7 @@ models:
   - id: fireworks-heavy
     kind: chat
     provider: fireworks                                 # Fireworks AI serverless OpenAI-compatible endpoint
-    modelRef: accounts/fireworks/models/qwen3-next-80b-a3b-instruct
+    modelRef: accounts/fireworks/models/qwen3p7-plus
     ctxWindow: 262144
     endpointUrl: ${FIREWORKS_ENDPOINT_URL}               # optional override; empty (uses built-in default) when unset
     default: true

@@ -28,22 +28,25 @@ Three hard constraints shape every decision below:
 |------|-------|-------|--------------|-------|
 | Chat (default) | Qwen3-4B-Instruct-2507 | Local (MLX) | ~2.5 GB @ 4-bit | Primary interactive model (`mlx-community/Qwen3-4B-Instruct-2507-4bit`). Fast TTFT, fits comfortably with voice loaded. |
 | Chat (quality tier) | Qwen3.5-9B-class-Instruct | Local (MLX) | ~5–6 GB @ 4-bit | Optional "thoughtful" local mode. Cannot coexist with voice; load on demand. |
-| Heavy reasoning | Qwen3-Next-80B-A3B-Instruct (`accounts/fireworks/models/qwen3-next-80b-a3b-instruct`) | Fireworks AI (serverless, OpenAI-compatible) | n/a (hosted) · 262K ctx | 80B MoE (~3B active), instruct/non-thinking, tool-calling. **Does NOT fit on 16 GB locally** — hosted only. |
+| Heavy reasoning | Qwen 3.7 Plus (`accounts/fireworks/models/qwen3p7-plus`) | Fireworks AI (serverless, OpenAI-compatible) | n/a (hosted) | Qwen-family hosted flagship, thinking-capable. **Does NOT fit on 16 GB locally** — hosted only. |
 | Frontier reasoning | Claude Sonnet 5 (`claude-sonnet-5`) | Anthropic Claude (serverless, OpenAI-SDK-compatible) | API-only · 1M ctx | **No open weights.** The quality-critical lane for the `reasoning` + `agent` task classes. |
-| Nightly consolidation | Qwen3-Next-80B-A3B-Instruct (`accounts/fireworks/models/qwen3-next-80b-a3b-instruct`) | Fireworks AI (serverless, OpenAI-compatible) | n/a · 262K ctx | Batch memory summarization/dedup. Runs while the Air sleeps/charges (see §4). |
+| Nightly consolidation | Qwen 3.7 Plus (`accounts/fireworks/models/qwen3p7-plus`) | Fireworks AI (serverless, OpenAI-compatible) | n/a (hosted) | Batch memory summarization/dedup. Runs while the Air sleeps/charges (see §4). |
 | Embeddings | Qwen3-Embedding-0.6B-8bit | Local (MLX) | ~0.6 GB @ 8-bit | RAG vectorization (`mlx-community/Qwen3-Embedding-0.6B-8bit`). The sidecar pools the transformer's hidden states (last-token) — not `model()` logits. |
 | Reranker | Qwen3-Reranker-0.6B | Local (MLX) | ~0.6 GB @ 8-bit | Cross-encoder rerank of retrieved chunks. Loaded on retrieval, can unload after. |
 | Draft (optional) | Qwen3.5-0.5B | Local (MLX) | ~0.3 GB @ 4-bit | Speculative-decoding draft model for the chat tier (see §5). Off by default. |
 
 Notes on the heavy tier:
 
-- **Qwen3-Next-80B-A3B-Instruct** is an 80B mixture-of-experts model with only ~3B active
-  params per token — near-large-model quality at small-model cost/latency. It is an
-  **instruct (non-thinking)** model: it answers directly instead of emitting reasoning
-  tokens, supports tool-calling, and has a 262K context on Fireworks. At 80B total weights
-  it is far too large to keep resident in the Air's 16 GB pool, so it is a **hosted-only**
-  model in Jarvis, reached **serverless** (no weights downloaded, no GPU provisioned) via
-  Fireworks AI — see §3.
+- **Qwen 3.7 Plus** is the Qwen-family hosted flagship on Fireworks' serverless catalog —
+  chosen to keep the heavy lane in the same model family as the local chat tier (consistent
+  prompt behavior). It is **thinking-capable** (emits reasoning tokens before answering), so
+  callers must budget `max_tokens` generously. Far too large for the Air's 16 GB pool, it is
+  a **hosted-only** model in Jarvis, reached **serverless** (no weights downloaded, no GPU
+  provisioned) via Fireworks AI — see §3. **NB:** Fireworks' serverless catalog rotates —
+  the original pin (Qwen3‑Next‑80B‑A3B‑Instruct) disappeared from the account's accessible
+  list between planning and live verification (2026-08-01). If this pin ever 404s, check
+  `GET /v1/models` and repin `config/models.yaml` `fireworks-heavy.modelRef` to the current
+  closest Qwen-family entry.
 - **Claude Sonnet 5** ships **no downloadable weights** — it is an API product. We treat it
   as the top quality lever for tasks where correctness matters more than privacy or cost
   (deep reasoning, agent planning).
@@ -279,7 +282,7 @@ models:
     role: heavy                          # consolidation + heavy chat lane
     engine: fireworks                    # OpenAI-compatible Fireworks AI
     endpoint: ${FIREWORKS_ENDPOINT_URL}  # https://api.fireworks.ai/inference/v1
-    model: accounts/fireworks/models/qwen3-next-80b-a3b-instruct
+    model: accounts/fireworks/models/qwen3p7-plus
   anthropic-agent:
     role: reasoning                      # reasoning + agent lane
     engine: anthropic                    # Anthropic's OpenAI-SDK-compatible endpoint
@@ -382,7 +385,7 @@ flowchart TB
     end
 
     subgraph Cloud["Fireworks AI / Anthropic Claude"]
-        FIREWORKS["Fireworks AI (serverless OpenAI-compatible)<br/>Qwen3-Next-80B-A3B-Instruct"]
+        FIREWORKS["Fireworks AI (serverless OpenAI-compatible)<br/>Qwen 3.7 Plus"]
         ANTHROPIC["Anthropic Claude<br/>claude-sonnet-5"]
     end
 

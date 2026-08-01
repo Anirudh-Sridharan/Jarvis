@@ -53,7 +53,7 @@ describe("loadConfig() against the real config/models.yaml", () => {
       (e) => e.provider === "fireworks" && e.kind === "chat",
     );
     expect(entry).toBeDefined();
-    expect(entry?.modelRef).toBe("accounts/fireworks/models/qwen3-next-80b-a3b-instruct");
+    expect(entry?.modelRef).toBe("accounts/fireworks/models/qwen3p7-plus");
     expect(entry?.default).toBe(true);
   });
 
