@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { estimateTokens, estimateRequestTokens } from "../src/inference/tokens.js";
+import { estimateTokens, estimateRequestTokens, IMAGE_PART_TOKEN_ESTIMATE } from "../src/inference/tokens.js";
 
 describe("estimateTokens (BPE)", () => {
   it("returns 0 for empty input", () => {
@@ -43,5 +43,51 @@ describe("estimateRequestTokens", () => {
       { type: "function", function: { name: "t", description: "d", parameters: {} } },
     ] as never);
     expect(withTools).toBeGreaterThan(estimateRequestTokens(messages));
+  });
+
+  // Regression guard (phase 15 ContentPart widening): a plain-string message
+  // estimate must be byte-for-byte unchanged from the pre-widening behavior.
+  it("plain-string message estimate is unchanged by the ContentPart widening", () => {
+    const messages = [{ role: "user" as const, content: "hello world" }];
+    expect(estimateRequestTokens(messages)).toBe(6); // 2 tokens + 4 framing
+  });
+
+  it("a [{type:'text'}] array message estimates the same as the equivalent plain string", () => {
+    const stringMessages = [{ role: "user" as const, content: "hello world" }];
+    const partsMessages = [
+      { role: "user" as const, content: [{ type: "text" as const, text: "hello world" }] },
+    ];
+    expect(estimateRequestTokens(partsMessages)).toBe(estimateRequestTokens(stringMessages));
+  });
+
+  it("each image part adds exactly IMAGE_PART_TOKEN_ESTIMATE to the estimate", () => {
+    const withoutImage = [
+      { role: "user" as const, content: [{ type: "text" as const, text: "hello world" }] },
+    ];
+    const withOneImage = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "hello world" },
+          { type: "image_url" as const, image_url: { url: "data:image/png;base64,AAA" } },
+        ],
+      },
+    ];
+    const withTwoImages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "hello world" },
+          { type: "image_url" as const, image_url: { url: "data:image/png;base64,AAA" } },
+          { type: "image_url" as const, image_url: { url: "data:image/png;base64,BBB" } },
+        ],
+      },
+    ];
+    expect(estimateRequestTokens(withOneImage) - estimateRequestTokens(withoutImage)).toBe(
+      IMAGE_PART_TOKEN_ESTIMATE,
+    );
+    expect(estimateRequestTokens(withTwoImages) - estimateRequestTokens(withoutImage)).toBe(
+      IMAGE_PART_TOKEN_ESTIMATE * 2,
+    );
   });
 });

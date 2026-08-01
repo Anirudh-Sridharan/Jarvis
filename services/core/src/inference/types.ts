@@ -32,12 +32,60 @@ export type Provider = "mlx" | "fireworks" | "anthropic" | "lmstudio";
 
 export type Quant = "4bit" | "8bit" | "fp16";
 
+/**
+ * OpenAI-compatible message content parts (phase 15, Tier 3 plumbing).
+ *
+ * Additive widening of `ChatMessage.content` from a plain string to
+ * `string | ContentPart[]` — every existing caller passing a plain string
+ * remains valid (15-RESEARCH.md Open Question 1: widen, don't fork a second
+ * request path). `image_url` is the exact wire shape Anthropic's
+ * OpenAI-compat layer and Fireworks both accept verbatim; both providers
+ * forward `messages` unmodified, so no provider-side transformation is
+ * needed.
+ */
+export interface TextContentPart {
+  type: "text";
+  text: string;
+}
+
+export interface ImageContentPart {
+  type: "image_url";
+  image_url: { url: string; detail?: "auto" | "low" | "high" };
+}
+
+export type ContentPart = TextContentPart | ImageContentPart;
+
 /** OpenAI-compatible chat message. */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | ContentPart[];
   name?: string;
   tool_call_id?: string;
+}
+
+/**
+ * Returns the text content of a message: the string unchanged, or the
+ * `text` fields of `type: "text"` parts joined with a newline (image parts
+ * are ignored — there is no text representation of an image).
+ */
+export function messageText(content: string | ContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is TextContentPart => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+/** True when a single message carries at least one image content part. */
+export function messageHasImagePart(msg: ChatMessage): boolean {
+  if (typeof msg.content === "string") return false;
+  return msg.content.some((part) => part.type === "image_url");
+}
+
+/** True when any message in a request carries at least one image content part. */
+export function requestHasImagePart(messages: ChatMessage[] | undefined): boolean {
+  if (!messages) return false;
+  return messages.some((m) => messageHasImagePart(m));
 }
 
 /** Minimal OpenAI-style tool spec (consumed in full by feature 16). */
