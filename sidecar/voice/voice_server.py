@@ -52,6 +52,7 @@ for lower cold-start).  See README.md → "Model downloads".
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import json
 import logging
@@ -548,9 +549,13 @@ async def stt_stream(ws: WebSocket) -> None:
 
     Engine note
     -----------
-    faster-whisper (small int8) is the default.  For lower latency on Apple
-    Silicon the MLX sidecar can expose Parakeet-TDT; see ``stt.py`` for the
-    alternative integration path.
+    faster-whisper (small int8) is the default.  When ``DEEPGRAM_API_KEY`` is
+    configured, Deepgram's streaming ``/v1/listen`` supplies the text instead
+    — Silero VAD still owns every ``speech_start``/``speech_end``/
+    ``silence_ms`` boundary (see ``deepgram_stt.py``'s module docstring); a
+    missing key, failed connect, or mid-session socket death degrades to
+    faster-whisper automatically and is surfaced on ``GET /health``'s
+    ``stt_engine`` key, never as an ``error`` frame or an abnormal close.
     """
     await ws.accept()
     log.info("STT WebSocket connected.")
@@ -563,6 +568,7 @@ async def stt_stream(ws: WebSocket) -> None:
         return
 
     from stt import AudioBuffer, run_vad_and_transcribe  # type: ignore[import]
+    import stt  # type: ignore[import]  # module reference, for stt.SAMPLE_RATE below
 
     buf = AudioBuffer()
     loop = asyncio.get_running_loop()
@@ -573,21 +579,86 @@ async def stt_stream(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
 
+    # -----------------------------------------------------------------------
+    # STT engine selection — attempted once, at session start, before the mic
+    # loop. Silero VAD (below) remains the sole speech_start/speech_end/
+    # silence_ms authority regardless of which engine wins; Deepgram only
+    # ever supplies text, finalized on Silero's own cue (Pitfall 1).
+    # -----------------------------------------------------------------------
+    session: Any = None
+    use_deepgram = False
+    if _configured_stt_engine() == "deepgram":
+        import deepgram_stt  # type: ignore[import]  # lazy, module-level so tests can patch the class
+
+        session = deepgram_stt.DeepgramSttSession(
+            DEEPGRAM_API_KEY,
+            DEEPGRAM_MODEL,
+            stt.SAMPLE_RATE,
+            DEEPGRAM_CONNECT_TIMEOUT_MS / 1000,
+            DEEPGRAM_FINALIZE_TIMEOUT_MS / 1000,
+        )
+        use_deepgram = await session.connect()
+        if use_deepgram:
+            log.info("STT engine: deepgram (model=%s).", DEEPGRAM_MODEL)
+            _stt_engine_status["active"] = "deepgram"
+            _stt_engine_status["reason"] = None
+        else:
+            # A failed connect must never send an error frame or abnormally
+            # close the socket — those are reserved for a genuine STT load
+            # failure above.
+            _stt_engine_status["active"] = "faster-whisper"
+            _stt_engine_status["reason"] = session.last_error
+            log.warning(
+                "Deepgram STT unavailable (falling back to faster-whisper): %s",
+                session.last_error,
+            )
+
     try:
         async for message in ws.iter_bytes():
             buf.extend(message)
 
-            # Run VAD + transcription step on executor so we don't block the loop.
+            if use_deepgram:
+                sent_ok = await session.send_audio(message)
+                if not sent_ok:
+                    # Mid-session death: only the in-flight segment's text is
+                    # lost, and that loss is logged. Deliberately no retry
+                    # loop here (out of scope; a PTT session is seconds long).
+                    use_deepgram = False
+                    _stt_engine_status["active"] = "faster-whisper"
+                    _stt_engine_status["reason"] = session.last_error
+                    log.warning(
+                        "Deepgram STT lost mid-session (falling back to faster-whisper): %s",
+                        session.last_error,
+                    )
+                    await session.close()
+
+            # Run VAD + transcription step on executor so we don't block the
+            # loop. transcribe is explicitly the inverse of use_deepgram: the
+            # Whisper decode never runs while Deepgram is serving the segment.
             events = await loop.run_in_executor(
                 None,
-                run_vad_and_transcribe,
-                buf,
-                stt_mgr.get_vad_model(),
-                stt_mgr.get_whisper(),
-                VAD_THRESHOLD,
+                functools.partial(
+                    run_vad_and_transcribe,
+                    buf,
+                    stt_mgr.get_vad_model(),
+                    stt_mgr.get_whisper(),
+                    VAD_THRESHOLD,
+                    transcribe=not use_deepgram,
+                ),
             )
             for event in events:
                 await _send(event)
+                # speech_end is sent BEFORE the Finalize flush is awaited —
+                # this ordering is load-bearing (the orchestrator commits
+                # finals only after it has seen the segment's speech_end).
+                if use_deepgram and event.get("type") == "speech_end":
+                    final_frame = await session.finalize_segment()
+                    if final_frame is not None:
+                        await _send(final_frame)
+
+            if use_deepgram:
+                for partial_frame in session.drain_partials():
+                    await _send(partial_frame)
 
     except WebSocketDisconnect:
         log.info("STT WebSocket disconnected (client close / barge-in).")
@@ -598,6 +669,11 @@ async def stt_stream(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:  # noqa: BLE001
+                pass
         log.info("STT session ended.")
 
 
