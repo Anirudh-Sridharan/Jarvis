@@ -8,7 +8,8 @@ importing Python.
 Contract (keep exact — the TS ``voiceClient`` calls these):
 
     GET  /health
-        → { state, components: { stt, tts, vad, wake } }
+        → { state, components: { stt, tts, vad, wake },
+            stt_engine: { configured, active, reason } }
 
     WS   /stt/stream
         Client sends binary PCM-16 mono 16 kHz frames (any frame size,
@@ -105,6 +106,15 @@ VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
 
 # Wake word model path or name recognised by openWakeWord.
 WAKE_WORD_MODEL = os.environ.get("WAKE_WORD_MODEL", "hey_jarvis")
+
+# Deepgram streaming-STT config. The key is read ONCE here and is never
+# logged, printed, or returned by any endpoint — /health only ever reports
+# whether an engine is configured/active and a short, key-free reason.
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")  # None = disabled
+DEEPGRAM_MODEL = os.environ.get("DEEPGRAM_MODEL", "nova-3")
+DEEPGRAM_STT_ENABLED = os.environ.get("DEEPGRAM_STT_ENABLED", "1")
+DEEPGRAM_CONNECT_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_CONNECT_TIMEOUT_MS", "2000"))
+DEEPGRAM_FINALIZE_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_FINALIZE_TIMEOUT_MS", "600"))
 
 ComponentState = Literal["unloaded", "loading", "ready", "error"]
 
@@ -353,6 +363,27 @@ _tts_cancel: Dict[str, asyncio.Event] = {}
 # Resolved voice cache: spec string → str | torch.FloatTensor.
 _resolved_voices: Dict[str, Any] = {}
 
+# Active STT engine status, updated at session start and on mid-session
+# Deepgram death. Surfaced verbatim (minus the key, which never enters this
+# dict) via GET /health's top-level "stt_engine" key.
+_stt_engine_status: Dict[str, Optional[str]] = {"active": None, "reason": None}
+
+
+def _configured_stt_engine() -> str:
+    """Which STT engine is configured (not necessarily currently active)."""
+    if DEEPGRAM_API_KEY and DEEPGRAM_STT_ENABLED != "0":
+        return "deepgram"
+    return "faster-whisper"
+
+
+def _configured_stt_reason() -> Optional[str]:
+    """Why the configured engine is faster-whisper, or None when deepgram."""
+    if not DEEPGRAM_API_KEY:
+        return "DEEPGRAM_API_KEY not set"
+    if DEEPGRAM_STT_ENABLED == "0":
+        return "DEEPGRAM_STT_ENABLED=0"
+    return None
+
 
 def resolve_voice(pipeline: Any, spec: str) -> Any:
     """Resolve a voice spec to what KPipeline accepts (str or style tensor).
@@ -424,8 +455,17 @@ async def health() -> Dict[str, Any]:
             "tts":  "unloaded|loading|ready|error",
             "vad":  "unloaded|loading|ready|error",  # shares stt_mgr
             "wake": "unloaded|loading|ready|error|disabled"
+          },
+          "stt_engine": {
+            "configured": "deepgram" | "faster-whisper",
+            "active": "deepgram" | "faster-whisper" | null,
+            "reason": "<short, key-free degradation reason>" | null
           }
         }
+
+    ``stt_engine`` is a NEW TOP-LEVEL key (never inside ``components`` — an
+    engine name there would permanently force ``state`` to "degraded" since
+    the overall-state computation below iterates ``components.values()``).
     """
     components = {
         "stt": stt_mgr.state,
@@ -441,7 +481,15 @@ async def health() -> Dict[str, Any]:
         overall = "ready"
     else:
         overall = "degraded"
-    return {"state": overall, "components": components}
+    return {
+        "state": overall,
+        "components": components,
+        "stt_engine": {
+            "configured": _configured_stt_engine(),
+            "active": _stt_engine_status["active"],
+            "reason": _stt_engine_status["reason"] or _configured_stt_reason(),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
