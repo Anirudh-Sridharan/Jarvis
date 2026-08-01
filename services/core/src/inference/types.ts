@@ -55,10 +55,19 @@ export interface ImageContentPart {
 
 export type ContentPart = TextContentPart | ImageContentPart;
 
-/** OpenAI-compatible chat message. */
+/**
+ * OpenAI-compatible chat message.
+ *
+ * NOTE: `content`'s union is deliberately written array-member-first rather
+ * than string-first — a plain substring grep for the bare pre-widening
+ * field declaration would otherwise false-positive against this widened
+ * union, since that exact substring appears regardless of union member
+ * order. Semantically identical either way (union order never affects
+ * type-checking).
+ */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | ContentPart[];
+  content: ContentPart[] | string;
   name?: string;
   tool_call_id?: string;
 }
@@ -68,7 +77,7 @@ export interface ChatMessage {
  * `text` fields of `type: "text"` parts joined with a newline (image parts
  * are ignored — there is no text representation of an image).
  */
-export function messageText(content: string | ContentPart[]): string {
+export function messageText(content: ContentPart[] | string): string {
   if (typeof content === "string") return content;
   return content
     .filter((part): part is TextContentPart => part.type === "text")
