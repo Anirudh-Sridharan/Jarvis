@@ -34,6 +34,7 @@ import type {
   JarvisInferenceRequest,
   ModelState,
   RegistryEntry,
+  RoutingDecision,
   Target,
 } from "./types.js";
 
@@ -140,7 +141,16 @@ export class InferenceGateway {
     signal?: AbortSignal,
   ): AsyncGenerator<InferenceStreamChunk, void, unknown> {
     const req = this.normalize(rawReq);
-    const decision = this.router.resolve(req);
+    // Routing/registry resolution can throw (unknown target, missing registry
+    // entry). Every caller is written against the error-CHUNK contract, not
+    // generator rejection — convert throws into structured chunks (WR-03).
+    let decision: RoutingDecision;
+    try {
+      decision = this.router.resolve(req);
+    } catch (err) {
+      yield { type: "error", message: `Routing failed: ${errMsg(err)}` };
+      return;
+    }
 
     let target = decision.target;
     let modelId = decision.modelId;

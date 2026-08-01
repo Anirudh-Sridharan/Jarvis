@@ -215,6 +215,29 @@ describe("Router.resolve — task-class routing matrix", () => {
     expect(decision.reason).toBe("forced");
   });
 
+  it("embedding with a token-overflow-sized prompt stays LOCAL — no cloud embedding entry exists to escalate to (WR-03)", () => {
+    const router = new Router(makeRegistry(), AMPLE_RAM, makeRoutingConfig());
+    const decision = router.resolve(request("embedding", OVER_LOCAL_CTX_SAFE));
+    expect(decision.target).toBe("local");
+    expect(decision.modelId).toBe("local-embed");
+    expect(decision.reason).toBe("task-local");
+  });
+
+  it("embedding under RAM pressure stays LOCAL — the RAM downgrade only applies to chat-kind hints (WR-03)", () => {
+    const lowRam: RamProbe = { headroomGB: () => 0.5, totalGB: () => 16 };
+    const router = new Router(makeRegistry(), lowRam, makeRoutingConfig({ ramFloorGB: 2 }));
+    const decision = router.resolve(request("embedding", "embed me"));
+    expect(decision.target).toBe("local");
+    expect(decision.modelId).toBe("local-embed");
+  });
+
+  it('an unknown routing target (stale forceTarget "hf") throws a config-style error naming the target (WR-03)', () => {
+    const registry = makeRegistry();
+    expect(() => registry.defaultFor("chat", "hf" as never)).toThrow(
+      /Unknown routing target "hf"/,
+    );
+  });
+
   it("SC1 heart — a config rebalance (consolidation -> anthropic) flips the resolved target with ZERO code change", () => {
     const rebalanced = makeRoutingConfig({
       cloudTaskProviders: { consolidation: "anthropic", reasoning: "anthropic", agent: "anthropic" },

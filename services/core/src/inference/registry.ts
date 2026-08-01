@@ -34,6 +34,14 @@ export class Registry {
         return ["fireworks"];
       case "anthropic":
         return ["anthropic"];
+      default:
+        // Runtime guard (WR-03): normalize() performs no runtime validation,
+        // so a stale forceTarget (e.g. the deleted "hf") can reach here at
+        // runtime despite the exhaustive compile-time switch. Name the bad
+        // target instead of surfacing an opaque TypeError downstream.
+        throw new Error(
+          `Unknown routing target "${String(target)}" — valid targets: local, fireworks, anthropic.`,
+        );
     }
   }
 

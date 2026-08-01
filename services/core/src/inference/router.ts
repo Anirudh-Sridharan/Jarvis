@@ -82,8 +82,11 @@ export class Router {
       return this.decide(req.forceTarget, req.taskHint, "forced", estPromptTokens);
     }
 
-    // 5. hard context ceiling — overrides task preference
-    if (estPromptTokens > this.cfg.localCtxSafe) {
+    // 5. hard context ceiling — overrides task preference. Chat-kind hints
+    // only (WR-03): no cloud embedding/reranker registry entries exist, so a
+    // cloud escalation for embedding/rerank would resolve a nonexistent
+    // (kind, target) pair and throw instead of routing.
+    if (kindFor(req.taskHint) === "chat" && estPromptTokens > this.cfg.localCtxSafe) {
       return this.decide(
         this.cloudTargetFor(req.taskHint),
         req.taskHint,
@@ -157,9 +160,12 @@ export class Router {
     // plausibly a privacy/cost decision ("do not send this to the cloud") —
     // silently rerouting it to a cloud provider breaks that contract. A
     // forced-local pick under pressure fails loudly at load time instead
-    // (the gateway's fallback paths carry the same exemption).
+    // (the gateway's fallback paths carry the same exemption). Non-chat kinds
+    // (embedding/rerank) are exempt too (WR-03): they have no cloud registry
+    // entries to downgrade to.
     if (
       reason !== "forced" &&
+      kindFor(hint) === "chat" &&
       target === "local" &&
       this.ram.headroomGB() < this.cfg.ramFloorGB
     ) {

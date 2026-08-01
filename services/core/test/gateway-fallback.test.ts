@@ -234,6 +234,27 @@ describe("cloud-pinned consolidation (CR-01)", () => {
   });
 });
 
+// ── WR-03: routing/registry throws surface as ERROR CHUNKS, not generator ──
+// rejections — every gateway caller is written against the chunk contract.
+describe("routing failures surface as error chunks (WR-03)", () => {
+  it('a stale forceTarget "hf" yields a structured error chunk naming the bad target instead of rejecting', async () => {
+    const { gw } = buildGateway({ cloudFails: false, cloudTarget: "fireworks" });
+    const chunks = await collect(
+      gw.chat({
+        messages: [{ role: "user" as const, content: "hi" }],
+        taskHint: "chat",
+        forceTarget: "hf" as never,
+      }),
+    );
+
+    const error = chunks.find((c) => c.type === "error") as { message: string } | undefined;
+    expect(error).toBeDefined();
+    expect(error!.message).toContain("Routing failed");
+    expect(error!.message).toContain('Unknown routing target "hf"');
+    expect(chunks.filter((c) => c.type === "error")).toHaveLength(1);
+  });
+});
+
 // ── WR-02: forceTarget:"local" is a privacy/cost pin — the request must ──
 // NEVER be silently shipped to a cloud provider, whatever fails.
 describe('forceTarget="local" privacy pin (WR-02)', () => {
