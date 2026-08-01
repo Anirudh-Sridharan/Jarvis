@@ -9,12 +9,24 @@
 
 import { describe, it, expect } from "vitest";
 import { writeFile as fsWriteFile } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
 import { makeComputerUseTools, COMPUTER_MAX_ELEMENTS } from "../src/agent/tools/computerUseTools.js";
 import { imageToScreenPoint } from "../src/mac/screenshotRunner.js";
 import type { ChatMessage, JarvisInferenceRequest, InferenceStreamChunk } from "../src/inference/types.js";
 import type { InferenceGateway } from "../src/inference/gateway.js";
-import { getToolMeta } from "@jarvis/agent";
+import { getToolMeta, createAgentSystem } from "@jarvis/agent";
+import { FakeLlm, FixedClock, ManualApprovalSink, makeToolRegistry } from "@jarvis/agent/testing";
+import { buildToolRegistry } from "../src/agent/tools/index.js";
+import { createIntegrations } from "@jarvis/integrations";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  FixedClock as IntegrationsFixedClock,
+  FakeLlm as IntegrationsFakeLlm,
+} from "@jarvis/integrations/testing";
 
 const SCREENCAPTURE = "/usr/sbin/screencapture";
 
@@ -382,5 +394,131 @@ describe("computer_click / computer_type — gated, zero inference", () => {
     const gateway = new FakeGateway();
     const tool = toolByName(fake.runner, gateway, "computer_type");
     expect(tool.description).toMatch(/never types? credentials/i);
+  });
+});
+
+// ── Registry wiring — Tier 3 requires BOTH macRun and visionGateway ────────────
+
+const TIER1_NAMES = [
+  "mac_list_apps",
+  "mac_frontmost_app",
+  "mac_list_shortcuts",
+  "mac_open",
+  "mac_run_script",
+  "mac_run_shortcut",
+];
+const TIER2_NAMES = ["mac_ui_snapshot", "mac_ui_click", "mac_ui_type", "mac_ui_press_key"];
+const TIER3_NAMES = ["computer_screenshot", "computer_click", "computer_type"];
+const ALL_MAC_NAMES = [...TIER1_NAMES, ...TIER2_NAMES, ...TIER3_NAMES];
+
+function makeIntegrationsForRegistryTest() {
+  const dir = mkdtempSync(join(tmpdir(), "jarvis-computer-use-registry-test-"));
+  return createIntegrations({
+    http: new FakeHttp(),
+    clock: new IntegrationsFixedClock(),
+    tokenStore: new MemoryTokenStore(),
+    llm: new IntegrationsFakeLlm(),
+    dataDir: dir,
+  });
+}
+
+describe("registry wiring — Tier 3 requires both macRun and visionGateway", () => {
+  it("buildToolRegistry(integrations, null, macRun, visionGateway) contains all thirteen mac tool names", () => {
+    const integrations = makeIntegrationsForRegistryTest();
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const registry = buildToolRegistry(integrations, null, fake.runner, gateway);
+    for (const name of ALL_MAC_NAMES) {
+      expect(registry.has(name)).toBe(true);
+    }
+  });
+
+  it("buildToolRegistry(integrations, null, macRun) contains the ten Tier 1/2 names and none of Tier 3", () => {
+    const integrations = makeIntegrationsForRegistryTest();
+    const fake = new FakeMacRunner();
+    const registry = buildToolRegistry(integrations, null, fake.runner);
+    for (const name of [...TIER1_NAMES, ...TIER2_NAMES]) {
+      expect(registry.has(name)).toBe(true);
+    }
+    for (const name of TIER3_NAMES) {
+      expect(registry.has(name)).toBe(false);
+    }
+  });
+
+  it("buildToolRegistry(integrations, null) contains none of the thirteen mac tool names", () => {
+    const integrations = makeIntegrationsForRegistryTest();
+    const registry = buildToolRegistry(integrations, null);
+    for (const name of ALL_MAC_NAMES) {
+      expect(registry.has(name)).toBe(false);
+    }
+  });
+});
+
+// ── Tier 3 end-to-end approval ordering — no gate-bypassing loop (15-SC5) ──────
+
+describe("Tier 3 end-to-end approval ordering (15-SC5)", () => {
+  it("computer_screenshot runs with zero approvals; computer_click pauses for approval; exactly one gateway call for the whole run", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "jarvis-computer-use-approval-test-"));
+    try {
+      await withApiKey("test-key", async () => {
+        const fake = new FakeMacRunner();
+        fake.responses = [
+          ...RETINA_CAPTURE_SEQUENCE,
+          { stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false }, // clickAt
+        ];
+        const gateway = new FakeGateway();
+        gateway.chunks = [
+          {
+            type: "token",
+            text: JSON.stringify({
+              description: "a Save button",
+              elements: [{ label: "Save", role: "button", x: 700, y: 350 }],
+            }),
+          },
+          { type: "done" },
+        ];
+
+        const tools = makeToolRegistry(makeComputerUseTools(fake.runner, gateway));
+        const llm = new FakeLlm().setScript([
+          JSON.stringify({ tool: "computer_screenshot", args: {} }),
+          JSON.stringify({ tool: "computer_click", args: { x: 500, y: 250, element: "Save button" } }),
+          JSON.stringify({ tool: "__done__", args: { result: "clicked Save" } }),
+        ]);
+        const clock = new FixedClock(Date.now());
+        const manualSink = new ManualApprovalSink();
+
+        const agentSystem = createAgentSystem({
+          llm,
+          tools,
+          clock,
+          dataDir: tmpDir,
+          approvalSink: manualSink.sink,
+        });
+
+        const runPromise = agentSystem.agent.run("look at the screen and click Save", { source: "manual" });
+
+        // Wait for the screenshot step to run (0 approvals) and the click's
+        // approval request to arrive.
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(manualSink.requests.length).toBe(1);
+        expect(manualSink.requests[0]!.summary).toContain("computer_click");
+        // Only the screenshot's native calls have happened so far — no click yet.
+        expect(fake.calls.length).toBe(RETINA_CAPTURE_SEQUENCE.length);
+
+        const requestId = manualSink.requests[0]!.id;
+        manualSink.approve(requestId, "test-user");
+
+        await runPromise;
+
+        // Exactly one more native call — the click — after approval.
+        expect(fake.calls.length).toBe(RETINA_CAPTURE_SEQUENCE.length + 1);
+        // Exactly one gateway call across the ENTIRE run — the single
+        // perception call — proving no tool ran an internal sample-and-act loop.
+        expect(gateway.calls.length).toBe(1);
+      });
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
