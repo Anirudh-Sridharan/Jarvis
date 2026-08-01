@@ -25,8 +25,24 @@ export class Registry {
 
   /** Provider that backs a given routing target. */
   private static providerForTarget(target: Target): RegistryEntry["provider"][] {
-    // 'local' is served by mlx (or lmstudio in dev); 'hf' by the hf provider.
-    return target === "local" ? ["mlx", "lmstudio"] : ["hf"];
+    // 'local' is served by mlx (or lmstudio in dev); each cloud target is
+    // served by its own same-named provider (fireworks/anthropic).
+    switch (target) {
+      case "local":
+        return ["mlx", "lmstudio"];
+      case "fireworks":
+        return ["fireworks"];
+      case "anthropic":
+        return ["anthropic"];
+      default:
+        // Runtime guard (WR-03): normalize() performs no runtime validation,
+        // so a stale forceTarget (e.g. the deleted "hf") can reach here at
+        // runtime despite the exhaustive compile-time switch. Name the bad
+        // target instead of surfacing an opaque TypeError downstream.
+        throw new Error(
+          `Unknown routing target "${String(target)}" — valid targets: local, fireworks, anthropic.`,
+        );
+    }
   }
 
   /**

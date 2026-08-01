@@ -4,18 +4,24 @@
  * chat(req):
  *   1. normalize -> JarvisInferenceRequest (defaults: stream=true)
  *   2. Router.resolve() -> RoutingDecision {target, modelId, reason}
- *   3. local: ModelManager.ensureReady(); on load failure fall back to HF once
+ *   3. local: ModelManager.ensureReady(); on load failure fall back to the
+ *      task hint's configured cloud provider once
  *   4. dispatch to the chosen provider, stream content deltas
- *   5. on local runtime error mid-generation BEFORE first token, retry on HF once
- *      (oom-fallback); idle timer reset on completion
- *   6. on HF runtime error BEFORE first token, retry on the local model once
- *      (cloud-unavailable fallback: depleted credits/402, network, 5xx)
+ *   5. on local runtime error mid-generation BEFORE first token, retry once on
+ *      the task hint's configured cloud provider (oom-fallback); idle timer
+ *      reset on completion
+ *   6. on a cloud runtime error BEFORE first token, retry on the local model
+ *      once (cloud-unavailable fallback: depleted credits/402, network, 5xx)
  *
  * Emits a unified InferenceStreamChunk stream (status/token/done/error).
  */
 import type { AppConfig } from "../config.js";
 import { EventBus } from "./events.js";
-import { HfProvider } from "./providers/hfProvider.js";
+import {
+  ANTHROPIC_BASE_URL,
+  FIREWORKS_BASE_URL,
+  OpenAiCompatProvider,
+} from "./providers/openAiCompatProvider.js";
 import { MlxProvider } from "./providers/mlxProvider.js";
 import { OsRamProbe, type RamProbe } from "./ram.js";
 import { Registry } from "./registry.js";
@@ -28,6 +34,7 @@ import type {
   JarvisInferenceRequest,
   ModelState,
   RegistryEntry,
+  RoutingDecision,
   Target,
 } from "./types.js";
 
@@ -47,7 +54,8 @@ export class InferenceGateway {
   /** Exposed so memory adapters (GatewayEmbedder) can call /v1/embeddings. */
   readonly mlx: MlxProvider;
   private readonly ram: RamProbe;
-  private readonly hf: HfProvider;
+  private readonly fireworks: OpenAiCompatProvider;
+  private readonly anthropic: OpenAiCompatProvider;
 
   constructor(private readonly cfg: AppConfig) {
     this.registry = new Registry(cfg.registry);
@@ -57,10 +65,29 @@ export class InferenceGateway {
     this.router = new Router(this.registry, this.ram, cfg.routing);
     this.modelManager = new ModelManager(this.mlx, this.events, this.ram, cfg.lifecycle);
 
-    // HF provider is constructed lazily-ish: endpoint may be empty if unconfigured.
-    const hfEntry = cfg.registry.find((e) => e.provider === "hf");
-    const endpoint = cfg.env.hfEndpointUrl ?? hfEntry?.endpointUrl ?? "";
-    this.hf = new HfProvider(endpoint, cfg.env.hfToken);
+    // Cloud providers are constructed lazily-ish: endpoint may be empty if
+    // unconfigured, in which case the built-in base URL is used. Note the
+    // `||` chain (NOT `??`) — an `endpointUrl: ${FIREWORKS_ENDPOINT_URL}`
+    // interpolation in models.yaml expands to an EMPTY STRING when the var is
+    // unset, and `??` would not skip an empty string.
+    const fireworksEntry = cfg.registry.find((e) => e.provider === "fireworks");
+    const fireworksEndpoint =
+      cfg.env.fireworksEndpointUrl || fireworksEntry?.endpointUrl || FIREWORKS_BASE_URL;
+    this.fireworks = new OpenAiCompatProvider({
+      endpointUrl: fireworksEndpoint,
+      apiKey: cfg.env.fireworksApiKey,
+      label: "fireworks",
+    });
+
+    const anthropicEntry = cfg.registry.find((e) => e.provider === "anthropic");
+    const anthropicEndpoint =
+      cfg.env.anthropicEndpointUrl || anthropicEntry?.endpointUrl || ANTHROPIC_BASE_URL;
+    this.anthropic = new OpenAiCompatProvider({
+      endpointUrl: anthropicEndpoint,
+      apiKey: cfg.env.anthropicApiKey,
+      defaultMaxTokens: 8192,
+      label: "anthropic",
+    });
   }
 
   /** Normalize an incoming request, filling defaults. */
@@ -95,7 +122,14 @@ export class InferenceGateway {
   }
 
   private providerFor(target: Target): ChatProvider {
-    return target === "local" ? this.mlx : this.hf;
+    switch (target) {
+      case "local":
+        return this.mlx;
+      case "fireworks":
+        return this.fireworks;
+      case "anthropic":
+        return this.anthropic;
+    }
   }
 
   /**
@@ -107,7 +141,16 @@ export class InferenceGateway {
     signal?: AbortSignal,
   ): AsyncGenerator<InferenceStreamChunk, void, unknown> {
     const req = this.normalize(rawReq);
-    const decision = this.router.resolve(req);
+    // Routing/registry resolution can throw (unknown target, missing registry
+    // entry). Every caller is written against the error-CHUNK contract, not
+    // generator rejection — convert throws into structured chunks (WR-03).
+    let decision: RoutingDecision;
+    try {
+      decision = this.router.resolve(req);
+    } catch (err) {
+      yield { type: "error", message: `Routing failed: ${errMsg(err)}` };
+      return;
+    }
 
     let target = decision.target;
     let modelId = decision.modelId;
@@ -130,18 +173,30 @@ export class InferenceGateway {
         this.modelManager.setFallbackActive(false);
         yield { type: "status", state: "ready" };
       } catch (err) {
-        // Load failure -> fall back to HF for this request (local-unavailable-fallback).
-        const hfEntry = this.tryDefault("hf");
-        if (!hfEntry) {
+        // WR-02: an explicit local pin is a privacy/cost contract — never
+        // silently ship a forceTarget:"local" request to a cloud provider.
+        // Fail loudly instead.
+        if (req.forceTarget === "local") {
           yield {
             type: "error",
-            message: `Local model failed to load and no HF fallback is configured: ${errMsg(err)}`,
+            message: `Local model failed to load and forceTarget="local" forbids cloud fallback: ${errMsg(err)}`,
           };
           return;
         }
-        target = "hf";
-        modelId = hfEntry.id;
-        entry = hfEntry;
+        // Load failure -> fall back to the task hint's configured cloud
+        // provider for this request (local-unavailable-fallback).
+        const cloudTarget = this.router.cloudTargetFor(req.taskHint);
+        const cloudEntry = this.tryDefault(cloudTarget);
+        if (!cloudEntry) {
+          yield {
+            type: "error",
+            message: `Local model failed to load and no ${cloudTarget} fallback is configured: ${errMsg(err)}`,
+          };
+          return;
+        }
+        target = cloudTarget;
+        modelId = cloudEntry.id;
+        entry = cloudEntry;
         this.modelManager.setFallbackActive(true);
         yield { type: "status", state: "error" };
       }
@@ -172,19 +227,29 @@ export class InferenceGateway {
       timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive() });
       yield { type: "done" };
     } catch (err) {
-      // Runtime failure on the LOCAL path BEFORE any token -> retry once on HF
-      // (oom-fallback). After tokens have flown we cannot cleanly restart.
-      if (target === "local" && !firstTokenSeen && !signal?.aborted) {
-        const hfEntry = this.tryDefault("hf");
-        if (hfEntry) {
-          // Close out the local request bookkeeping before retrying on HF.
+      // Runtime failure on the LOCAL path BEFORE any token -> retry once on
+      // the task hint's configured cloud provider (oom-fallback). After
+      // tokens have flown we cannot cleanly restart. forceTarget:"local"
+      // requests are exempt (WR-02): an explicit local pin must never be
+      // silently shipped to a cloud provider — they fall through to the
+      // structured error below instead.
+      if (
+        target === "local" &&
+        !firstTokenSeen &&
+        !signal?.aborted &&
+        req.forceTarget !== "local"
+      ) {
+        const cloudTarget = this.router.cloudTargetFor(req.taskHint);
+        const cloudEntry = this.tryDefault(cloudTarget);
+        if (cloudEntry) {
+          // Close out the local request bookkeeping before retrying on cloud.
           this.modelManager.endRequest();
           localRequestOpen = false;
           this.modelManager.setFallbackActive(true);
           yield { type: "status", state: "error" };
           try {
-            for await (const text of this.hf.streamChat({
-              modelRef: hfEntry.modelRef,
+            for await (const text of this.providerFor(cloudTarget).streamChat({
+              modelRef: cloudEntry.modelRef,
               messages: req.messages,
               tools: req.tools,
               maxTokens: req.maxTokens,
@@ -193,20 +258,58 @@ export class InferenceGateway {
               timer.recordToken();
               yield { type: "token", text };
             }
-            timer.finish({ modelId: hfEntry.id, target: "hf", fallbackActive: true });
+            timer.finish({ modelId: cloudEntry.id, target: cloudTarget, fallbackActive: true });
             yield { type: "done" };
             return;
-          } catch (hfErr) {
-            yield { type: "error", message: `Cloud fallback failed: ${errMsg(hfErr)}` };
+          } catch (cloudErr) {
+            // WR-04: record the failed turn — a dead provider must be
+            // queryable in /telemetry, not indistinguishable from no traffic.
+            timer.finish({ modelId: cloudEntry.id, target: cloudTarget, fallbackActive: true, ok: false });
+            yield {
+              type: "error",
+              message: `Cloud fallback (${cloudTarget}) failed: ${errMsg(cloudErr)}`,
+            };
             return;
           }
         }
       }
-      // Runtime failure on the HF path BEFORE any token -> retry once locally
-      // (cloud-unavailable fallback: depleted credits (402), network down, 5xx).
-      // The local 4B model is weaker, but a degraded answer beats a dead turn;
-      // telemetry records fallbackActive so the quality drop is visible.
-      if (target === "hf" && !firstTokenSeen && !signal?.aborted) {
+      // Runtime failure on a CLOUD path BEFORE any token -> retry once
+      // locally (cloud-unavailable fallback: depleted credits (402), network
+      // down, 5xx). The local 4B model is weaker, but a degraded answer beats
+      // a dead turn; telemetry records fallbackActive so the quality drop is
+      // visible. `!== "local"` (not an explicit cloud-target list) so a
+      // future fourth target needs no edit here.
+      //
+      // EXCEPTION — cloud-PINNED requests must fail loudly instead (CR-01):
+      // consolidation output is PERSISTED into the permanent memory graph, so
+      // silently substituting the local 4B's extraction would write degraded
+      // facts as if the heavy lane produced them. Failing with a structured
+      // error hands the failure to the consolidation pipeline's existing
+      // retry/backoff/dead-letter machinery (GatewayLlm throws on error
+      // chunks). Interactive chat/voice/agent turns keep the graceful local
+      // fallback — there a degraded answer really does beat a dead turn.
+      //
+      // Also pinned (WR-01): a prompt whose estimate exceeds localCtxSafe
+      // physically cannot fit the local ctxWindow — a local retry could only
+      // hard-error after a wasted model load or silently truncate the prompt.
+      // Deliberately keyed on estPromptTokens (not reason === "token-overflow"):
+      // the agent latency-budget escalation reuses that reason with SMALL
+      // prompts, and those retain a viable local fallback.
+      const promptExceedsLocal = decision.estPromptTokens > this.cfg.routing.localCtxSafe;
+      const cloudPinned = req.taskHint === "consolidation" || promptExceedsLocal;
+      if (target !== "local" && !firstTokenSeen && !signal?.aborted && cloudPinned) {
+        const pinReason = promptExceedsLocal
+          ? `the prompt (~${decision.estPromptTokens} tokens) exceeds the local context ceiling`
+          : `${req.taskHint} is cloud-pinned (local fallback would persist degraded output)`;
+        // WR-04: record the failed turn against the dead cloud lane.
+        timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive(), ok: false });
+        yield {
+          type: "error",
+          message: `${target} failed and ${pinReason}: ${errMsg(err)}`,
+        };
+        return;
+      }
+      if (target !== "local" && !firstTokenSeen && !signal?.aborted) {
         const localEntry = this.tryDefault("local");
         if (localEntry) {
           yield { type: "status", state: "error" };
@@ -234,14 +337,19 @@ export class InferenceGateway {
             yield { type: "done" };
             return;
           } catch (localErr) {
+            // WR-04: record the double failure against the originally-routed
+            // cloud lane (the lane whose death matters operationally).
+            timer.finish({ modelId, target, fallbackActive: true, ok: false });
             yield {
               type: "error",
-              message: `HF failed (${errMsg(err)}); local fallback also failed: ${errMsg(localErr)}`,
+              message: `${target} failed (${errMsg(err)}); local fallback also failed: ${errMsg(localErr)}`,
             };
             return;
           }
         }
       }
+      // WR-04: generic error exit — still a failed turn worth counting.
+      timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive(), ok: false });
       yield { type: "error", message: errMsg(err) };
     } finally {
       if (localRequestOpen) this.modelManager.endRequest();

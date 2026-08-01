@@ -1,13 +1,22 @@
 # Model registry + routing config (consumed by services/core inference module — feature 1).
 # MLX repo IDs verified on the HF Hub (mlx-community, 2026-06). See architecture/model-serving.md.
+# Cloud lane is Fireworks AI (heavy consolidation) + Anthropic Claude (reasoning/agent) — verified 2026-07-31.
 
 idleTimeoutSeconds: 600        # unload local model after 10 min idle
 
 routing:
-  agentLocalTokenCap: 12000    # agent requests above this escalate to HF
-  localCtxSafe: 14000          # any request above this goes to HF regardless
+  agentLocalTokenCap: 12000    # agent requests above this escalate to cloud
+  localCtxSafe: 14000          # any request above this goes to cloud regardless
                                # (must fit the LOCAL ctxWindow 16384 minus ~2.4k
                                #  reply headroom — 24000 could never fire before overflow)
+  ramFloorGB: 2                # below this headroom, a local pick downgrades to cloud
+  agentLatencyBudgetMs: 8000   # agent loops expected to exceed this escalate to cloud
+  cloudTaskProviders:          # D-04: which cloud provider serves each task class
+    consolidation: fireworks
+    reasoning: anthropic
+    agent: anthropic
+  defaultCloudProvider: fireworks  # escalation default for hints with no explicit entry above
+  agentPreferCloud: true       # agent task class runs on its cloud provider BY DEFAULT (D-04 cost change)
 
 models:
   - id: qwen-local-chat
@@ -19,13 +28,21 @@ models:
     approxRamGB: 6
     default: true
 
-  - id: openai-heavy
+  - id: fireworks-heavy
     kind: chat
-    provider: hf                                       # "hf" = the OpenAI-compatible cloud provider slot (Bearer ${HF_TOKEN} → ${HF_ENDPOINT_URL})
-    modelRef: gpt-5-mini                               # OpenAI API (switched from HF Inference Providers 2026-07-04; needs an OpenAI API key with credits — ChatGPT Plus is separate)
-    # Supports tool-calling + streaming via the same OpenAI-compatible /v1/chat/completions contract.
-    ctxWindow: 400000                                  # gpt-5-mini context window
-    endpointUrl: ${HF_ENDPOINT_URL}                    # set to https://api.openai.com/v1/chat/completions in .env; HF_TOKEN holds the OpenAI key (legacy var names)
+    provider: fireworks                                 # Fireworks AI serverless OpenAI-compatible endpoint
+    modelRef: accounts/fireworks/models/qwen3p7-plus
+    ctxWindow: 262144
+    endpointUrl: ${FIREWORKS_ENDPOINT_URL}               # optional override; empty (uses built-in default) when unset
+    default: true
+
+  - id: anthropic-agent
+    kind: chat
+    provider: anthropic                                 # Anthropic Claude via its OpenAI-SDK-compatible endpoint
+    modelRef: claude-sonnet-5
+    ctxWindow: 1000000
+    endpointUrl: ${ANTHROPIC_ENDPOINT_URL}                # optional override; empty (uses built-in default) when unset
+    default: true
 
   - id: qwen-embed
     kind: embedding

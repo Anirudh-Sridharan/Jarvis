@@ -19,21 +19,23 @@ negotiable defaults — they are the spine.
 
 - **Local-first.** The brain runs on your machine. Chat, voice, memory, and the
   dashboard all work with the network off. The cloud is an *accelerator*, never a
-  dependency. If HF is down, Jarvis degrades to the local model, not to nothing.
+  dependency. If the cloud provider is down, Jarvis degrades to the local model, not to nothing.
 - **Own the storage, rent the intelligence.** Your data — memories, metrics,
   conversations, audit log — lives in local files (DBs on disk) that you own and
   can back up. Heavy *compute* (big-model reasoning, nightly consolidation) is
-  rented from Hugging Face endpoints on demand. We never rent storage of personal data.
+  rented from serverless cloud providers on demand. We never rent storage of personal data.
 - **Capture everything.** Single user, privacy is not a constraint on *capture*
   (it is still a constraint on *outbound action* — see the approval gate). Default
   every source ON. The harder problem is not "what to keep" but "how to consolidate
   and forget" — that's what nightly sleep-time does.
 - **Free / OSS preferred.** Pipecat, LangGraph, Graphiti, openWakeWord, MLX,
   faster-whisper, Kokoro, LanceDB — all free/OSS. Build from primitives only where
-  nothing good exists. The one paid line item is HF endpoints (cost is not a constraint).
+  nothing good exists. The one paid line item is the serverless cloud providers
+  (Fireworks, Anthropic) (cost is not a constraint).
 - **Hybrid local + cloud compute.** Small local Qwen (MLX, 4-bit) for the
-  latency-critical chat + voice loop; HF Inference Providers (serverless router) for heavy
-  reasoning and overnight batch. The model layer is swappable behind one gateway.
+  latency-critical chat + voice loop; Fireworks AI for the overnight consolidation
+  batch and Anthropic Claude for heavy reasoning and agent planning. The model layer
+  is swappable behind one gateway.
 - **Stream everything.** Wake word, STT, LLM tokens, TTS audio — every stage is
   streaming. Perceived latency is dominated by *time-to-first* of each stage, not
   total time, so we optimize first-token / first-audio relentlessly.
@@ -63,7 +65,8 @@ flowchart TB
     subgraph Gateway["Inference Gateway · OpenAI-compatible"]
         registry[Model Registry<br/>chat / embed / rerank]
         mlx[MLX Sidecar<br/>Qwen3 4-bit · Python<br/>load-on-wake / unload-idle]
-        hf[(HF Inference Providers<br/>serverless router · heavy reasoning<br/>· nightly consolidation)]
+        fireworks[(Fireworks AI<br/>serverless · nightly consolidation)]
+        anthropic[(Anthropic Claude<br/>serverless · heavy reasoning + agent)]
     end
 
     subgraph Core["Chat / Agent Core · TS/Node"]
@@ -100,7 +103,8 @@ flowchart TB
     chat <--> registry
     agent <--> registry
     registry --> mlx
-    registry --> hf
+    registry --> fireworks
+    registry --> anthropic
 
     chat <--> agent
     agent <--> mcp
@@ -115,7 +119,7 @@ flowchart TB
     chat <--> retrieval
     agent <--> retrieval
     consolidate --> kg & vec
-    consolidate --> hf
+    consolidate --> fireworks
 
     connectors --> metrics
     capture --> metrics
@@ -142,7 +146,7 @@ The diagram has five planes that recur through this doc: **voice I/O** (daemon),
 | Orchestration / glue | **TypeScript / Node** | One language for agent core, gateway, connectors, and dashboard backend; great async + streaming (SSE) story; LangGraph.js + MCP SDK are first-class. |
 | Dashboard UI | **Next.js + Tremor / Recharts** | App Router + server components for a local web app; Tremor gives batteries-included KPI cards/charts, Recharts for custom. Single pane of glass + settings + audit log. |
 | Local model serving | **Python MLX sidecar (`mlx-lm`)** | MLX is the fastest path to Apple-Silicon inference (unified memory, 4-bit); runs as a separate Python process exposing an OpenAI-compatible HTTP API. Isolated from the Node core so a model crash never takes down the brain. |
-| Heavy inference | **HF Inference Providers (serverless router)** | Serverless, OpenAI-compatible router (`router.huggingface.co/v1`) to partner-hosted big models for reasoning + nightly consolidation; pay-per-token, zero idle cost, nothing to provision. Cost is not a constraint; latency-tolerant work only. |
+| Heavy inference | **Fireworks AI + Anthropic Claude (serverless, OpenAI-compatible)** | One shared client (`services/core/src/inference/providers/openAiCompatProvider.ts`) calls Fireworks (`api.fireworks.ai/inference/v1`) for nightly consolidation and Anthropic (`api.anthropic.com/v1`) for reasoning + agent planning; per-task-class selection lives in `config/models.yaml` (`routing.cloudTaskProviders`). Pay-per-token, zero idle cost, nothing to provision; latency-tolerant work only. |
 | Chat / embed / rerank models | **Qwen3 (~4B chat, 4-bit) · Qwen3-Embedding-0.6B · Qwen3-Reranker-0.6B** | Same model family = consistent tokenizer/behavior; 0.6B embed+rerank are tiny enough to stay resident for sub-second retrieval; chat model swappable via registry. |
 | Temporal knowledge graph | **Graphiti + FalkorDB (or Neo4j)** | Graphiti gives bi-temporal facts (valid-time + ingestion-time) and conflict resolution out of the box — the hard part of memory. FalkorDB is a light local Redis-module graph; Neo4j if richer Cypher is needed. |
 | Vector store | **LanceDB (Chroma fallback)** | Embedded, file-based, zero-server, fast ANN on disk — fits local-first. Chroma as a drop-in alternative. |
@@ -252,7 +256,7 @@ mechanism that lets fresh facts supersede stale ones instead of competing with t
 
 Target: **MacBook Air M3, 16GB unified memory, fanless** (macOS Tahoe 26.5).
 Fanless means sustained heavy compute throttles — so local work is *bursty* and
-*on-demand*, and anything sustained goes to HF.
+*on-demand*, and anything sustained goes to the cloud lane (Fireworks, Anthropic).
 
 ### RAM budget (while voice loop is active)
 
@@ -274,13 +278,13 @@ Fanless means sustained heavy compute throttles — so local work is *bursty* an
 - **Active:** full voice loop within budget.
 - **~10 min idle:** chat model unloads; RAM returns to the OS.
 
-### Local vs HF
+### Local vs cloud
 
-| Runs **local** | Runs on **HF endpoints** |
+| Runs **local** | Runs on **cloud providers** |
 |---|---|
-| Wake word, VAD, STT, TTS | Heavy reasoning / long-context synthesis |
-| Chat model (latency-critical turns) | Nightly consolidation (sleep-time) batch |
-| Embeddings + reranking (retrieval) | Big agent plans that exceed local budget |
+| Wake word, VAD, STT, TTS | Heavy reasoning / long-context synthesis (Anthropic) |
+| Chat model (latency-critical turns) | Nightly consolidation (sleep-time) batch (Fireworks) |
+| Embeddings + reranking (retrieval) | Big agent plans that exceed local budget (Anthropic) |
 | All storage (KG, vectors, metrics, audit) | (no personal-data storage, ever) |
 
 ---
@@ -322,12 +326,12 @@ flowchart LR
         P["Python MLX Sidecar<br/>OpenAI-compatible :PORT"]
         DB[("Local DBs<br/>FalkorDB · LanceDB<br/>SQLite · DuckDB")]
     end
-    HF[(HF Inference<br/>Endpoints · remote)]
+    CLOUD[(Cloud providers<br/>Fireworks · Anthropic · remote)]
 
     D <-->|HTTP/SSE| N
     W <-->|HTTP/SSE| N
     N <-->|HTTP, OpenAI API| P
-    N <-->|HTTPS, OpenAI API| HF
+    N <-->|HTTPS, OpenAI API| CLOUD
     N <-->|local socket / file| DB
     P <-->|loads weights| DB
 ```
@@ -335,13 +339,13 @@ flowchart LR
 - **Voice daemon** (launchd, auto-restart, menu-bar UI): owns the mic; the only
   always-on heavy-ish process, kept light because the LLM is unloaded most of the time.
 - **Node core + inference gateway**: the brain. Talks to the daemon and dashboard
-  over **HTTP + SSE** (token/audio streaming), to the MLX sidecar and HF over the
-  **OpenAI-compatible HTTP API**, and to local DBs directly.
+  over **HTTP + SSE** (token/audio streaming), to the MLX sidecar and the cloud
+  providers over the **OpenAI-compatible HTTP API**, and to local DBs directly.
 - **Next.js dashboard**: a local web app the user opens in a browser; SSE for live
   metrics and agent-run/approval updates.
 - **Python MLX sidecar**: isolated model process (a crash can't kill the brain);
-  same API contract as HF so the registry swaps them transparently.
-- **HF endpoints**: the only remote piece; reachable but never required.
+  same API contract as the cloud providers so the registry swaps them transparently.
+- **Cloud providers**: the only remote piece; reachable but never required.
 
 IPC summary: daemon↔core and dashboard↔core = **HTTP/SSE**; core↔models =
 **OpenAI HTTP**; core↔DBs = **in-process / local socket**.
@@ -368,8 +372,8 @@ Six phases, mirroring `../features.md`. Each phase ships something usable.
 These docs go deep on concerns that span every component. Read them alongside this one.
 
 - **[`model-serving.md`](./model-serving.md)** — Qwen chat/embedding/reranker
-  choices, MLX vs vLLM vs HF endpoints, quantization, the on-demand lifecycle, and
-  hardware deep-dive behind §5 and §6.
+  choices, MLX vs vLLM vs serverless cloud providers, quantization, the on-demand
+  lifecycle, and hardware deep-dive behind §5 and §6.
 - **[`privacy-and-security.md`](./privacy-and-security.md)** — local-first stance,
   secret storage, capture/retention/deletion policy, the approval gate + audit log,
   sandboxing, prompt-injection / confused-deputy threat model behind §4 and §7.
@@ -377,8 +381,8 @@ These docs go deep on concerns that span every component. Read them alongside th
   lifecycle/refresh and secret management for every data source (Apple Health,
   Whoop, Google Calendar, GitHub, Gmail) feeding §3's connectors.
 - **[`deployment.md`](./deployment.md)** — running the launchd daemon + local web
-  app + Python sidecar + local DBs, wiring the optional HF fallback, and backups —
-  the operational side of §7.
+  app + Python sidecar + local DBs, wiring the optional cloud-provider fallback, and
+  backups — the operational side of §7.
 
 ---
 

@@ -7,7 +7,7 @@ serves an **OpenAI-compatible** chat + embeddings API on Apple Silicon, plus
 unified RAM when the model goes idle.
 
 The TS `mlxProvider` / `supervisor` talks to this over
-`http://127.0.0.1:<port>/...` exactly as it talks to a Hugging Face endpoint —
+`http://127.0.0.1:<port>/...` exactly as it talks to a cloud provider —
 routing local↔remote is a URL swap, not a code fork.
 
 ---
@@ -69,7 +69,7 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
   into memory. **Lazy, idempotent, and concurrency-safe**: concurrent callers
   for the same model share ONE in-flight load task (never two copies of the
   weights). Returns the status object. On failure returns **503** with state
-  `"error"` so the core can fall back to HF.
+  `"error"` so the core can fall back to the cloud provider.
 
 - **`POST /unload`** → drops the chat model + tokenizer, runs `gc.collect()`,
   and calls `mlx.core.clear_cache()` (when available) to release Metal buffers.

@@ -30,21 +30,22 @@ packages/              # shared packages (added as needed)
 
 MacBook Air M3, 16GB, fanless. The local model is **on-demand**: loaded on demand,
 auto-unloaded after ~10 min idle. Heavy reasoning + nightly consolidation route to
-Hugging Face Inference Providers (serverless router). See [`architecture/model-serving.md`](./architecture/model-serving.md).
+serverless cloud providers — Fireworks AI for consolidation, Anthropic Claude for
+reasoning and agent runs. See [`architecture/model-serving.md`](./architecture/model-serving.md).
 
 ## Prerequisites
 
 - **Node ≥ 20** (you have v25 ✓) — uses npm workspaces.
 - **Python ≥ 3.11** for the MLX sidecar (your system `python3` is 3.9 — install a newer one,
   e.g. `brew install python@3.12` or use `uv`). See [`sidecar/mlx/README.md`](./sidecar/mlx/README.md).
-- A Hugging Face account + a fine-grained token with **"Make calls to Inference Providers"**
-  for heavy tasks — serverless, no endpoint to provision (optional until you exercise the
-  cloud path). Copy `.env.example` → `.env` and fill in.
+- A Fireworks AI API key (heavy/consolidation lane) and an Anthropic API key
+  (reasoning/agent lane) — both serverless, no endpoint to provision (optional until you
+  exercise the cloud path). Copy `.env.example` → `.env` and fill in.
 
 ## Quick start (after scaffolding)
 
 ```bash
-cp .env.example .env          # then fill HF_ENDPOINT_URL / HF_TOKEN when ready
+cp .env.example .env          # then fill FIREWORKS_API_KEY / ANTHROPIC_API_KEY when ready
 npm install                   # install workspace deps
 
 # terminal 1 — start the MLX model server (loads model on demand)

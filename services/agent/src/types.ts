@@ -50,7 +50,12 @@ export interface ToolCall {
     by?: string;
     at?: string;
   };
-  modelTier: "local" | "hf";
+  /**
+   * Provider-agnostic serving tier (13.1 WR-06): "cloud" covers any remote
+   * provider — the leaf never names concrete providers. Legacy checkpoints
+   * containing the deleted "hf" tier are normalized to "cloud" on load.
+   */
+  modelTier: "local" | "cloud";
   startedAt: string;
   finishedAt?: string;
 }
@@ -83,7 +88,14 @@ export interface AgentState {
   stepCount: number;
   validationRetries: number;
   reflections: string[];
-  routeTier: "local" | "hf";
+  /**
+   * Which serving tier this run's LLM calls route to (provider-agnostic —
+   * see ToolCall.modelTier). Stamped at run start from the injected
+   * AgentRunnerOptions.routeTier so checkpoints record the REAL tier
+   * (agentPreferCloud routes every call to a cloud provider); legacy "hf"
+   * checkpoint rows are normalized to "cloud" on load (13.1 WR-06).
+   */
+  routeTier: "local" | "cloud";
   status: RunStatus;
   /**
    * Per-run taint accumulated from tool outputs that contained injection
@@ -274,7 +286,7 @@ export interface ScheduledJob {
   name: string;
   description: string;
   handler: (ctx: TriggerContext) => Promise<JobResult>;
-  needsModel: "none" | "local" | "hf";
+  needsModel: "none" | "local" | "cloud";
   maxDurationSec: number;
   singleton: boolean;
 }

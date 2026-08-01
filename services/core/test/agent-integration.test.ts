@@ -891,10 +891,74 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
 
     expect(run.status).toMatch(/done|running|awaiting-approval/);
     expect(runSyncSpy).toHaveBeenCalledOnce();
+    // WR-08: every sync failing must surface as a FAILED job, not "done" —
+    // the JobResult status lives in run.result.
+    expect((run.result as { status: string }).status).toBe("failed");
     const summary = JSON.stringify(run);
     expect(summary).toContain("gmail: error");
     // No token material anywhere in the run summary/output.
     expect(summary).not.toMatch(/test_access_token|test_refresh_token|accessToken|refreshToken/i);
+  });
+
+  it("sync-connectors: mixed outcomes (one ok, one error) → partial (WR-08)", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const connectorA = { id: "gcal", auth: "oauth", schedule: "0 * * * *", concurrency: 1, sync: vi.fn() };
+    const connectorB = { id: "gmail", auth: "oauth", schedule: "*/30 * * * *", concurrency: 1, sync: vi.fn() };
+
+    const runSyncSpy = vi.fn().mockImplementation(async (connector: { id: string }) => ({
+      id: `run-${connector.id}`,
+      source: connector.id,
+      stream: `${connector.id}.sync`,
+      trigger: "schedule",
+      startedAt: new Date().toISOString(),
+      status: connector.id === "gmail" ? "error" : "ok",
+      pointsWritten: 0,
+      pagesFetched: 0,
+      cursorBefore: null,
+      cursorAfter: null,
+    }));
+
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([connectorA, connectorB]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([connectorA, connectorB]),
+        listRuns: vi.fn().mockReturnValue([]),
+        runSync: runSyncSpy,
+      } as never,
+      email: { search: vi.fn(), getThread: vi.fn() } as never,
+    };
+
+    const fakeMemory = { consolidation: { run: vi.fn() }, capture: {} as never };
+
+    const { syncConnectorsTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(),
+      capturePaths: {},
+    });
+
+    const run = await agentSystem.triggers.fireTrigger(syncConnectorsTriggerId, "manual");
+
+    expect((run.result as { status: string }).status).toBe("partial");
+    const summary = JSON.stringify(run);
+    expect(summary).toContain("gcal: ok");
+    expect(summary).toContain("gmail: error");
   });
 
   it("sync-connectors: skips already-running source", async () => {
@@ -983,12 +1047,16 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
       capture: { captureMarkdown: vi.fn(), captureDocument: vi.fn(), captureEmail: vi.fn() } as never,
     };
 
+    // WR-08: email ingest only runs when gmail is actually connected.
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gmail", makeTokens());
+
     const { syncCapturesTriggerId } = registerProactiveTriggers({
       agentSystem,
       integrations: fakeIntegrations as never,
       memory: fakeMemory,
       http: new FakeHttp(),
-      tokenStore: new MemoryTokenStore(),
+      tokenStore,
       capturePaths: { vaultDir }, // filesDir intentionally unset
     });
 
@@ -1041,12 +1109,17 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
       capture: { captureMarkdown: vi.fn(), captureDocument: vi.fn(), captureEmail: vi.fn() } as never,
     };
 
+    // Gmail IS connected here — the search rejection is a REAL failure, so
+    // the job must report partial with an "email: failed" note (WR-08).
+    const tokenStore = new MemoryTokenStore();
+    tokenStore.seed("gmail", makeTokens());
+
     const { syncCapturesTriggerId } = registerProactiveTriggers({
       agentSystem,
       integrations: fakeIntegrations as never,
       memory: fakeMemory,
       http: new FakeHttp(),
-      tokenStore: new MemoryTokenStore(),
+      tokenStore,
       capturePaths: { vaultDir },
     });
 
@@ -1060,7 +1133,62 @@ describe("agent-integration: proactive triggers call memory.consolidation.run", 
       expect((run.result as { status: string }).status).toBe("partial");
       const summary = JSON.stringify(run);
       expect(summary).toContain("obsidian:");
-      expect(summary).toContain("email: skipped");
+      expect(summary).toContain("email: failed");
+    } finally {
+      rmSync(vaultDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sync-captures: gmail NOT connected → expected skip, job reports done, search never called (WR-08)", async () => {
+    tmpDir = makeTempDir();
+
+    const tools = makeToolRegistry([]);
+    const clock = new FixedClock(Date.now());
+    const queue = new ApprovalQueue();
+    const agentSystem = createAgentSystem({
+      llm: new FakeLlm(),
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: queue.sink,
+    });
+
+    const vaultDir = mkdtempSync(join(tmpdir(), "jarvis-sync-captures-vault3-"));
+
+    const searchSpy = vi.fn();
+    const fakeIntegrations = {
+      briefing: { assembleBriefing: vi.fn() },
+      metrics: {} as never,
+      connectors: { list: vi.fn().mockReturnValue([]) } as never,
+      scheduler: {
+        getDueConnectors: vi.fn().mockReturnValue([]),
+        listRuns: vi.fn().mockReturnValue([]),
+        runSync: vi.fn(),
+      } as never,
+      email: { search: searchSpy, getThread: vi.fn() } as never,
+    };
+
+    const fakeMemory = {
+      consolidation: { run: vi.fn() },
+      capture: { captureMarkdown: vi.fn(), captureDocument: vi.fn(), captureEmail: vi.fn() } as never,
+    };
+
+    const { syncCapturesTriggerId } = registerProactiveTriggers({
+      agentSystem,
+      integrations: fakeIntegrations as never,
+      memory: fakeMemory,
+      http: new FakeHttp(),
+      tokenStore: new MemoryTokenStore(), // no gmail tokens = not connected
+      capturePaths: { vaultDir },
+    });
+
+    try {
+      const run = await agentSystem.triggers.fireTrigger(syncCapturesTriggerId, "manual");
+
+      // An unconfigured source is an EXPECTED state — not "partial" forever.
+      expect((run.result as { status: string }).status).toBe("done");
+      expect(searchSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(run)).toContain("email: skipped (gmail not connected)");
     } finally {
       rmSync(vaultDir, { recursive: true, force: true });
     }

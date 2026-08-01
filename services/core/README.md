@@ -2,7 +2,7 @@
 
 The Jarvis core service. Phase 1 implements two features:
 
-- **Feature 1 — Local Qwen inference core**: model registry, deterministic local-vs-cloud routing, the load/unload state machine, MLX sidecar + HF endpoint providers, RAM-headroom guard, telemetry, and a unified SSE stream.
+- **Feature 1 — Local Qwen inference core**: model registry, deterministic local-vs-cloud routing, the load/unload state machine, MLX sidecar + one shared OpenAI-compatible cloud provider client (Fireworks, Anthropic), RAM-headroom guard, telemetry, and a unified SSE stream.
 - **Feature 2 — Conversational chat core**: persona, deterministic context budgeting + history truncation, fixed-order prompt assembly with lost-in-the-middle edge placement, an in-memory conversation store, and the turn pipeline.
 
 TypeScript, ESM, Node ≥ 20. HTTP via [Hono](https://hono.dev). Config via `yaml` + `zod`.
@@ -31,8 +31,10 @@ npm run chat           # = tsx src/cli/chat.ts   (or `npm run chat` from root)
 | --- | --- | --- |
 | `CORE_PORT` | `8080` | Core HTTP port |
 | `MLX_SIDECAR_URL` | `http://127.0.0.1:8088` | Local MLX OpenAI-compatible sidecar |
-| `HF_ENDPOINT_URL` | _(unset)_ | HF Inference Providers router (`https://router.huggingface.co/v1/chat/completions`), OpenAI-compatible |
-| `HF_TOKEN` | _(unset)_ | HF token with "Make calls to Inference Providers" permission (Bearer) |
+| `FIREWORKS_API_KEY` | _(unset)_ | Fireworks AI key (Bearer) for the consolidation/heavy lane |
+| `FIREWORKS_ENDPOINT_URL` | `https://api.fireworks.ai/inference/v1` | optional base-URL override |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Anthropic key (Bearer) for the reasoning + agent lanes |
+| `ANTHROPIC_ENDPOINT_URL` | `https://api.anthropic.com/v1` | optional base-URL override |
 | `JARVIS_MODELS_CONFIG` | `../../config/models.yaml` | Override path to the registry/routing config |
 
 ## HTTP contract
@@ -52,19 +54,26 @@ npm run chat           # = tsx src/cli/chat.ts   (or `npm run chat` from root)
   `POST /v1/chat/completions` (supports `stream:true`), `POST /v1/embeddings`, plus
   lifecycle `POST /load`, `POST /unload`, `GET /health`. The `ModelManager` uses
   `/load`,`/unload`,`/health` to drive the state machine; cold start may take a few seconds.
-- **HF endpoint** (`HF_ENDPOINT_URL`): OpenAI/TGI-compatible `POST /v1/chat/completions`
-  with `Authorization: Bearer ${HF_TOKEN}`.
+- **Cloud providers** (Fireworks, Anthropic): both OpenAI-compatible `POST …/chat/completions`
+  with `Authorization: Bearer ${FIREWORKS_API_KEY|ANTHROPIC_API_KEY}`, served by the single
+  `providers/openAiCompatProvider.ts` client. `max_tokens` is always sent (Anthropic's
+  compat layer requires it).
 
 ## Routing rules (deterministic, feature 1)
 
 1. `forceTarget` set → honor it (`forced`).
-2. `estPromptTokens > localCtxSafe` (24k) → HF (`token-overflow`). _Hard ceiling._
-3. `consolidation | reasoning` → HF (`task-cloud`).
-4. `voice | chat` → local (`task-local`).
-5. `agent` → local; escalate to HF on token cap (12k) / latency budget (`token-overflow`).
+2. `estPromptTokens > localCtxSafe` (14k, `localCtxSafe`) → the task hint's cloud provider, else
+   `defaultCloudProvider` (`token-overflow`). _Hard ceiling._
+3. `consolidation | reasoning` → `cloudTaskProviders[hint]` (`task-cloud`).
+4. `agent` → `cloudTaskProviders.agent` when `agentPreferCloud`; otherwise local, escalating on
+   the 12k token cap / latency budget (`token-overflow`).
+5. `voice | chat` → local (`task-local`).
 6. `embedding | rerank` → local (`task-local`).
-- Pre-flight RAM guard: a local pick with headroom < `ramFloorGB` downgrades to HF (`local-unavailable-fallback`).
-- Fallbacks: local load failure → HF (`local-unavailable-fallback`); local runtime error before first token → retry once on HF (`oom-fallback`).
+- Pre-flight RAM guard: a local pick with headroom < `ramFloorGB` downgrades to the hint's cloud
+  provider (`local-unavailable-fallback`).
+- Fallbacks: local load/runtime failure before first token → retry once on the hint's cloud
+  provider; cloud failure before first token → retry once locally (`fallbackActive=true`,
+  visible in `GET /telemetry`).
 
 ## What is REAL vs stubbed in Phase 1
 
@@ -77,8 +86,9 @@ npm run chat           # = tsx src/cli/chat.ts   (or `npm run chat` from root)
 - Hono SSE server (`server.ts`) and the REPL CLI (`cli/chat.ts`).
 
 **Unavailable by design (the model itself):** if the MLX sidecar isn't running, `/load`
-fails and the request falls back to HF; if HF isn't configured either, the stream emits a
-clear `error` event. The "waking up…" status is surfaced during cold start.
+fails and the request falls back to the configured cloud provider; if that provider isn't
+configured either, the stream emits a clear `error` event. The "waking up…" status is
+surfaced during cold start.
 
 ## Cross-phase seams (`TODO(phaseN: feature X)`)
 

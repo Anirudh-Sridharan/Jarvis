@@ -41,6 +41,13 @@ export interface AgentRunnerOptions {
   clock: Clock;
   /** Feature 20: optional profile-context provider (resolved once per run). */
   userContext?: UserContextProvider;
+  /**
+   * Serving tier the injected LlmClient routes to ("local" | "cloud"),
+   * stamped into AgentState.routeTier so checkpoints record the real tier
+   * (13.1 WR-06). Core wires this from routing config (agentPreferCloud);
+   * defaults to "local".
+   */
+  routeTier?: "local" | "cloud";
 }
 
 const USER_CONTEXT_MAX_CHARS = 1_200;
@@ -127,7 +134,7 @@ export class AgentRunner {
         stepCount: 0,
         validationRetries: 0,
         reflections: [],
-        routeTier: "local",
+        routeTier: this.opts.routeTier ?? "local",
         status: "planning",
       };
 

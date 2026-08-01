@@ -174,6 +174,10 @@ export function getAgentSystem(
       userContext: memory
         ? (goal: string) => memory.profile.getProfileContext(goal)
         : undefined,
+      // 13.1 WR-06: stamp the REAL serving tier into AgentState.routeTier —
+      // agentPreferCloud routes every agent LLM call to a cloud provider, so
+      // checkpoints must not record "local" for cloud-served runs.
+      routeTier: gateway.router.agentPrefersCloud() ? "cloud" : "local",
     });
     approvalQueueInstance = queue;
 

@@ -85,6 +85,39 @@ describe("TelemetrySink", () => {
 
     expect(sink.summary(24).avgTtftMs).toBe(400);
   });
+
+  it("records ok=false turns and counts them in summary.errorTurns (WR-04)", () => {
+    const { sink } = makeSink();
+    sink.recordTurn({ modelId: "m", target: "fireworks", ttftMs: -1, tokens: 0, durationMs: 40, fallbackActive: false, ok: false });
+    sink.recordTurn({ modelId: "m", target: "local", ttftMs: 300, tokens: 100, durationMs: 2000, fallbackActive: false });
+
+    const s = sink.summary(24);
+    expect(s.turns).toBe(2);
+    expect(s.errorTurns).toBe(1);
+
+    const failed = sink.recent(10).find((r) => r.target === "fireworks");
+    expect(failed?.ok).toBe(false);
+    const succeeded = sink.recent(10).find((r) => r.target === "local");
+    expect(succeeded?.ok).toBe(true);
+  });
+
+  it("migrates a pre-13.1 table (no ok column) in place and treats legacy NULL ok as ok (WR-04)", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`CREATE TABLE telemetry_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,
+      target TEXT NOT NULL, model_id TEXT NOT NULL, reason TEXT, est_prompt_tokens INTEGER,
+      ttft_ms INTEGER, tokens INTEGER, duration_ms INTEGER, fallback INTEGER)`);
+    db.prepare(
+      `INSERT INTO telemetry_turns (ts, kind, target, model_id, ttft_ms, tokens, duration_ms, fallback)
+       VALUES (?, 'turn', 'local', 'm', 100, 10, 1000, 0)`,
+    ).run(new Date().toISOString());
+
+    const sink = new TelemetrySink(db); // constructor performs the ALTER TABLE migration
+    const s = sink.summary(24);
+    expect(s.turns).toBe(1);
+    expect(s.errorTurns).toBe(0);
+    expect(sink.recent(10)[0]!.ok).toBeUndefined();
+  });
 });
 
 describe("telemetry forwarding", () => {
