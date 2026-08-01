@@ -12,7 +12,7 @@ is replaced with a stub exposing a sentinel pipeline, ``tts.synthesize_streaming
 ``deepgram_tts.synthesize_streaming_aura`` is replaced with a scriptable
 async-generator stub that records the kwargs it received.
 
-Eight cases are asserted:
+Nine cases are asserted:
     1. Default engine — Kokoro serves, Aura stub never called, headers pinned.
     2. Per-request Aura — ``engine: "aura"`` serves via Aura even with the env
        default at kokoro; default voice is DEEPGRAM_TTS_MODEL, an Aura-shaped
@@ -34,6 +34,10 @@ Eight cases are asserted:
        to Deepgram (Aura serves with DEEPGRAM_TTS_MODEL, no Kokoro
        fallback); an ``aura-*`` voice IS forwarded; the same Kokoro-shaped
        voice still applies on the kokoro engine.
+    9. Cancel-registry lifecycle (WR-06) — a response whose generator is
+       never iterated registers nothing (no _tts_cancel leak; /tts/cancel
+       for that id honestly reports false), while a consumed request
+       registers on first iteration and pops on completion.
 
 Prints ``TTS_SELFTEST_OK`` and exits 0 on success; prints a failure message to
 stderr and exits non-zero otherwise.
@@ -381,6 +385,55 @@ def test_case8_engine_scoped_voice(client: TestClient) -> None:
     assert not _AuraCalls.calls, "Aura must not be attempted on the kokoro engine"
 
 
+# ---------------------------------------------------------------------------
+# Case 9: cancel-registry lifecycle (WR-06) — registration now lives INSIDE
+# the response generator, next to echo_gate.register_start, so a generator
+# that never starts (client disconnected before streaming; Starlette can
+# cancel the stream task before the first __anext__, and aclose() on an
+# unstarted async generator runs none of its body) leaks no _tts_cancel
+# entry and a later /tts/cancel for that id honestly reports false.
+# ---------------------------------------------------------------------------
+
+
+async def _case9_async() -> None:
+    # (a) Never-iterated response: nothing registered, cancel says false.
+    request_id = "leak-rid-9"
+    req = voice_server.TTSRequest(text="hello", request_id=request_id, engine="aura")
+    response = await voice_server.tts_synthesize(req)
+    assert request_id not in voice_server._tts_cancel, (
+        "route-level registration leaked a _tts_cancel entry before the "
+        "generator ever started (WR-06)"
+    )
+    cancel_result = await voice_server.tts_cancel(
+        voice_server.TTSCancelRequest(request_id=request_id)
+    )
+    assert cancel_result == {"cancelled": False}, cancel_result
+    # aclose() on the un-started generator runs none of its body — still clean.
+    await response.body_iterator.aclose()
+    assert request_id not in voice_server._tts_cancel
+
+    # (b) A consumed request registers on first iteration and pops on completion.
+    req2 = voice_server.TTSRequest(text="hello", request_id="leak-rid-9b", engine="aura")
+    response2 = await voice_server.tts_synthesize(req2)
+    body_iter = response2.body_iterator.__aiter__()
+    await body_iter.__anext__()
+    assert "leak-rid-9b" in voice_server._tts_cancel, (
+        "a started generator must register its cancel event"
+    )
+    async for _ in body_iter:
+        pass
+    assert "leak-rid-9b" not in voice_server._tts_cancel, (
+        "a finished generator must pop its registry entry"
+    )
+
+
+def test_case9_registry_lifecycle() -> None:
+    voice_server.TTS_ENGINE = "kokoro"
+    voice_server.DEEPGRAM_API_KEY = "case9-key-not-a-real-secret"
+    _reset()
+    asyncio.run(_case9_async())
+
+
 def main() -> None:
     orig_tts_mgr = voice_server.tts_mgr
     orig_engine = voice_server.TTS_ENGINE
@@ -400,6 +453,7 @@ def main() -> None:
             test_case6_cancellation_parity()
             test_case7_key_hygiene(client)
             test_case8_engine_scoped_voice(client)
+            test_case9_registry_lifecycle()
     finally:
         voice_server.tts_mgr = orig_tts_mgr
         voice_server.TTS_ENGINE = orig_engine

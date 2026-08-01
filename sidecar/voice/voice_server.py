@@ -864,7 +864,8 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
 
     request_id = req.request_id or str(uuid.uuid4())
     cancel_event = asyncio.Event()
-    _tts_cancel[request_id] = cancel_event
+    # NB: the cancel registry entry is registered inside _generate() below,
+    # NOT here — see the WR-06 comment there.
 
     # Resolve the engine BEFORE resolving the voice — an Aura voice id must
     # never enter the Kokoro-only _resolved_voices cache below.
@@ -900,7 +901,8 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
         try:
             kokoro_voice = _voice_for(req.voice or TTS_VOICE)
         except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
-            _tts_cancel.pop(request_id, None)
+            # Nothing to unregister: the cancel registry entry is only
+            # created once the generator below actually starts (WR-06).
             raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
         aura_voice = None
 
@@ -909,9 +911,21 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
 
         loop = asyncio.get_running_loop()
 
+        # Cancel registry: registered HERE, inside the generator, so
+        # registration and the finally-cleanup below share one lifecycle
+        # (WR-06). A response whose generator is never iterated (client
+        # vanished before streaming; aclose() on an unstarted async
+        # generator runs none of its body) registers nothing — the old
+        # route-level registration leaked the entry forever in that case,
+        # and a later /tts/cancel for the stale id lied {"cancelled": true}.
+        # (/tts/cancel racing the first chunk is unaffected: the TS client
+        # can only learn request_id from the response headers, by which
+        # time the generator has started.)
+        _tts_cancel[request_id] = cancel_event
         # Echo gate: this request's text is about to come out of the
         # speakers — register the synthesis window so /stt/stream can drop
-        # transcripts of the echo (see echo_gate.py).
+        # transcripts of the echo (see echo_gate.py). Same
+        # inside-the-generator lifecycle as the cancel registry above.
         echo_gate.register_start(request_id, req.text)
 
         async def _kokoro_chunks(voice: Any) -> AsyncGenerator[bytes, None]:
