@@ -14,7 +14,10 @@ import {
   runBrowserUseTask,
   BROWSER_USE_MAX_STEPS,
 } from "../src/eval/browserUseClient.js";
-import { parseEvalArgs, DEFAULT_OUT_PATH } from "../src/cli/evalBrowserUse.js";
+// Import ONLY the side-effect-free args module — never ../src/cli/evalBrowserUse.js,
+// whose first statement (`import "../loadEnv.js"`) would load the developer's real
+// .env into this test process (repo invariant: tests never read a dev .env).
+import { parseEvalArgs, DEFAULT_OUT_PATH } from "../src/cli/evalBrowserUseArgs.js";
 
 const ORIGINAL_KEY = process.env["BROWSER_USE_API_KEY"];
 
@@ -482,9 +485,10 @@ describe("makeBrowserUseClient", () => {
   });
 });
 
-// ── evalBrowserUse.ts CLI arg parsing (Task 2) ──────────────────────────────
-// Only parseEvalArgs is exercised here — the CLI's main body (dry-run/live
-// run) is guarded behind an entrypoint check and is never invoked on import.
+// ── evalBrowserUseArgs.ts CLI arg parsing (Task 2) ──────────────────────────
+// Only the side-effect-free args module is exercised here — the CLI
+// entrypoint (evalBrowserUse.ts) is never imported, so its loadEnv side
+// effect can never leak a developer's .env into the test process (WR-03).
 
 describe("parseEvalArgs", () => {
   it("defaults to all three task ids, no dry-run, no help, the default --out path", () => {

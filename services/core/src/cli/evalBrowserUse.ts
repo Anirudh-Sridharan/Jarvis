@@ -13,6 +13,8 @@
  * value — --dry-run shows header NAMES only.
  */
 import "../loadEnv.js"; // MUST be first: populates process.env from .env
+// ^ This side effect is why tests import evalBrowserUseArgs.ts, never this
+//   module — importing this file loads the developer's real .env (WR-03).
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -25,63 +27,11 @@ import {
   runBrowserUseTask,
   type BrowserUseTaskRecord,
 } from "../eval/browserUseClient.js";
+import { DEFAULT_OUT_PATH, VALID_TASK_IDS, parseEvalArgs, type EvalArgs } from "./evalBrowserUseArgs.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // services/core/src/cli -> src -> core -> services -> <repo root>
 const REPO_ROOT = resolve(HERE, "..", "..", "..", "..");
-
-export const DEFAULT_OUT_PATH =
-  ".planning/phases/13.3-agent-web-tools-firecrawl-extraction-browser-use-eval/13.3-eval-browseruse.json";
-
-const VALID_TASK_IDS = BROWSING_EVAL_TASKS.map((t) => t.id);
-
-export interface EvalArgs {
-  help: boolean;
-  dryRun: boolean;
-  out: string;
-  taskIds: string[];
-}
-
-/** Pure argv parser — no I/O, no process.exit, so it is unit-testable in isolation. */
-export function parseEvalArgs(argv: string[]): EvalArgs {
-  const args: EvalArgs = {
-    help: false,
-    dryRun: false,
-    out: DEFAULT_OUT_PATH,
-    taskIds: VALID_TASK_IDS,
-  };
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--help":
-      case "-h":
-        args.help = true;
-        break;
-      case "--dry-run":
-        args.dryRun = true;
-        break;
-      case "--out": {
-        const value = argv[++i];
-        if (!value) throw new Error("--out requires a path argument");
-        args.out = value;
-        break;
-      }
-      case "--task": {
-        const value = argv[++i];
-        if (!value || !VALID_TASK_IDS.includes(value)) {
-          throw new Error(`--task expects one of: ${VALID_TASK_IDS.join(", ")} — got "${value ?? ""}"`);
-        }
-        args.taskIds = [value];
-        break;
-      }
-      default:
-        throw new Error(`Unknown argument: "${arg}". Run with --help for usage.`);
-    }
-  }
-
-  return args;
-}
 
 function usage(): void {
   console.log(
