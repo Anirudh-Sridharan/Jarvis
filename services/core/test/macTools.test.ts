@@ -8,10 +8,22 @@
  * crash path.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makeMacTools, MAC_TEXT_CAP } from "../src/agent/tools/macTools.js";
+import { buildToolRegistry } from "../src/agent/tools/index.js";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
-import { getToolMeta } from "@jarvis/agent";
+import { getToolMeta, createAgentSystem } from "@jarvis/agent";
+import { FakeLlm, FixedClock, ManualApprovalSink, makeToolRegistry } from "@jarvis/agent/testing";
+import { createIntegrations } from "@jarvis/integrations";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  FixedClock as IntegrationsFixedClock,
+  FakeLlm as IntegrationsFakeLlm,
+} from "@jarvis/integrations/testing";
 
 // ── Fake ──────────────────────────────────────────────────────────────────────
 
@@ -295,5 +307,154 @@ describe("degrade, never crash", () => {
     const stdout = String(result["stdout"]);
     expect(stdout.length).toBeLessThanOrEqual(MAC_TEXT_CAP + 50);
     expect(stdout).toContain("[truncated");
+  });
+});
+
+// ── Registry wiring ───────────────────────────────────────────────────────────
+
+function makeIntegrations() {
+  const dir = mkdtempSync(join(tmpdir(), "jarvis-mac-tools-test-"));
+  return createIntegrations({
+    http: new FakeHttp(),
+    clock: new IntegrationsFixedClock(),
+    tokenStore: new MemoryTokenStore(),
+    llm: new IntegrationsFakeLlm(),
+    dataDir: dir,
+  });
+}
+
+describe("registry wiring", () => {
+  it("buildToolRegistry includes the six mac tools only when a runner is provided", () => {
+    const integrations = makeIntegrations();
+
+    const without = buildToolRegistry(integrations, null);
+    for (const name of NAMES) {
+      expect(without.has(name)).toBe(false);
+    }
+
+    const fake = new FakeMacRunner();
+    const withMac = buildToolRegistry(integrations, null, fake.runner);
+    for (const name of NAMES) {
+      expect(withMac.has(name)).toBe(true);
+    }
+    // Existing tools still present.
+    expect(withMac.has("web_search")).toBe(true);
+    expect(withMac.has("email_send")).toBe(true);
+  });
+});
+
+// ── Approval ordering (15-SC2) ──────────────────────────────────────────────────
+
+function makeTempDir(): string {
+  return mkdtempSync(join(tmpdir(), "jarvis-mac-tools-approval-test-"));
+}
+
+/** FakeLlm scripted to call one tool once, then emit __done__. */
+function scriptedLlm(toolName: string, args: Record<string, unknown>): FakeLlm {
+  return new FakeLlm().setScript([
+    JSON.stringify({ tool: toolName, args }),
+    JSON.stringify({ tool: "__done__", args: { result: "completed" } }),
+  ]);
+}
+
+describe("approval ordering — no native command runs before a human approves (15-SC2)", () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("mac_open pauses for approval; zero calls before approve, exactly one /usr/bin/open call after", async () => {
+    tmpDir = makeTempDir();
+
+    const fake = new FakeMacRunner();
+    const tools = makeToolRegistry(makeMacTools(fake.runner));
+    const llm = scriptedLlm("mac_open", { app: "TextEdit" });
+    const clock = new FixedClock(Date.now());
+    const manualSink = new ManualApprovalSink();
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: manualSink.sink,
+    });
+
+    const runPromise = agentSystem.agent.run("open TextEdit", { source: "manual" });
+
+    // Wait for the approval request to arrive.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(manualSink.requests.length).toBeGreaterThanOrEqual(1);
+    // No native command has run yet — the run is awaiting approval.
+    expect(fake.calls.length).toBe(0);
+
+    const requestId = manualSink.requests[0]!.id;
+    manualSink.approve(requestId, "test-user");
+
+    await runPromise;
+
+    expect(fake.calls.length).toBe(1);
+    expect(fake.calls[0]!.cmd).toBe("/usr/bin/open");
+  });
+
+  it("rejecting mac_open leaves the runner untouched", async () => {
+    tmpDir = makeTempDir();
+
+    const fake = new FakeMacRunner();
+    const tools = makeToolRegistry(makeMacTools(fake.runner));
+    const llm = new FakeLlm().setScript([
+      JSON.stringify({ tool: "mac_open", args: { app: "TextEdit" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "aborted" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "aborted" } }),
+      JSON.stringify({ tool: "__done__", args: { result: "aborted" } }),
+    ]);
+    const clock = new FixedClock(Date.now());
+    const manualSink = new ManualApprovalSink();
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: manualSink.sink,
+    });
+
+    const runPromise = agentSystem.agent.run("open TextEdit", { source: "manual" });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(manualSink.requests.length).toBeGreaterThanOrEqual(1);
+
+    const requestId = manualSink.requests[0]!.id;
+    manualSink.reject(requestId, "test-user");
+
+    await runPromise;
+
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("a mac_list_apps (readOnly) goal completes with zero approval requests", async () => {
+    tmpDir = makeTempDir();
+
+    const fake = new FakeMacRunner();
+    fake.result = { stdout: "[]", stderr: "", exitCode: 0, timedOut: false };
+    const tools = makeToolRegistry(makeMacTools(fake.runner));
+    const llm = scriptedLlm("mac_list_apps", {});
+    const clock = new FixedClock(Date.now());
+    const manualSink = new ManualApprovalSink();
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: manualSink.sink,
+    });
+
+    const result = await agentSystem.agent.run("list running apps", { source: "manual" });
+
+    expect(result.run.status).toBe("done");
+    expect(manualSink.requests.length).toBe(0);
+    expect(fake.calls.length).toBeGreaterThanOrEqual(1);
   });
 });

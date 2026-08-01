@@ -24,6 +24,7 @@ import { PlaywrightMcpProcess } from "../mcp/playwrightMcp.js";
 import { startIngestBridge } from "../memory/ingestBridge.js";
 import { GatewayLlm } from "../memory/gatewayLlm.js";
 import { registerProactiveTriggers } from "./proactiveBootstrap.js";
+import { execFileMacRunner } from "../mac/commandRunner.js";
 
 import type { CalendarMirror } from "@jarvis/integrations";
 
@@ -61,7 +62,13 @@ export function bootstrapLiveAgent(gateway: InferenceGateway): AgentSystemBag | 
     // the agent first uses a browser tool. JARVIS_BROWSER_MCP=0 disables.
     const browser =
       process.env["JARVIS_BROWSER_MCP"] === "0" ? null : new PlaywrightMcpProcess();
-    const bag = getAgentSystem(gateway, system, memory, browser);
+    // Mac control tools (Tier 1, phase 15): unlike the Playwright MCP
+    // subprocess, there is no subprocess lifecycle to manage here — every
+    // Tier 1 call is a stateless one-shot execFile invocation
+    // (15-RESEARCH.md Open Question 2). JARVIS_MAC_TOOLS=0 disables, mirroring
+    // the JARVIS_BROWSER_MCP=0 kill switch above.
+    const macRun = process.env["JARVIS_MAC_TOOLS"] === "0" ? null : execFileMacRunner;
+    const bag = getAgentSystem(gateway, system, memory, browser, macRun);
     if (!bag) return null; // getAgentSystem already logged; stay memoized-null
     if (memory) {
       // External data → memory capture (feature 9→3 bridge): periodic, idempotent.
