@@ -130,7 +130,10 @@ const WebFetchSchema = z.object({
 export const webFetchTool: Tool = {
   name: "web_fetch",
   description:
-    "Fetch the contents of a web page. Returns the response text (up to 50 KB).",
+    "Fetch the raw response text of a URL (up to 50 KB) — no JavaScript " +
+    "rendering, no boilerplate removal. Prefer web_extract for reading the " +
+    "content of a page; use web_fetch for raw bodies such as JSON or plain " +
+    "text, or when web_extract is unavailable.",
   schema: WebFetchSchema,
   readOnly: true,
 
