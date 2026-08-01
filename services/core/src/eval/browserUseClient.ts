@@ -116,6 +116,27 @@ function baseRecord(evalTaskId: string): Pick<BrowserUseTaskRecord, "path" | "ev
   return { path: "browser-use", evalTaskId };
 }
 
+/** Header NAMES sent on task creation — single source of truth shared with
+ *  the CLI's --dry-run preview (WR-04). Names only, never values. */
+export const CREATE_TASK_HEADER_NAMES = ["X-Browser-Use-API-Key", "Content-Type"] as const;
+
+/** The exact create-task request body — the single source of truth used by
+ *  both createTask() and the CLI's --dry-run preview, so the preview can
+ *  never silently drift from what a live run sends (WR-04). Uses the
+ *  degrading hostnameOf(), not a bare `new URL()`, so a malformed task URL
+ *  previews the same way it would be sent. */
+export function buildCreateTaskBody(task: BrowsingEvalTask): {
+  task: string;
+  maxSteps: number;
+  allowedDomains: string[];
+} {
+  return {
+    task: task.prompt,
+    maxSteps: BROWSER_USE_MAX_STEPS,
+    allowedDomains: [hostnameOf(task.url)],
+  };
+}
+
 /**
  * Build a Browser Use Cloud v2 client. `fetchFn`/`sleep`/`now` are all
  * injectable so the polling state machine, terminal-status handling and
@@ -138,14 +159,10 @@ export function makeBrowserUseClient(deps: BrowserUseClientDeps = {}): {
         method: "POST",
         signal: controller.signal,
         headers: {
-          "X-Browser-Use-API-Key": apiKey,
-          "Content-Type": "application/json",
+          [CREATE_TASK_HEADER_NAMES[0]]: apiKey,
+          [CREATE_TASK_HEADER_NAMES[1]]: "application/json",
         },
-        body: JSON.stringify({
-          task: task.prompt,
-          maxSteps: BROWSER_USE_MAX_STEPS,
-          allowedDomains: [hostnameOf(task.url)],
-        }),
+        body: JSON.stringify(buildCreateTaskBody(task)),
       });
 
       if (!response.ok) {

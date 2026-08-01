@@ -23,7 +23,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BROWSING_EVAL_TASKS, type BrowsingEvalTask } from "../eval/browsingTasks.js";
 import {
   BROWSER_USE_API_BASE,
-  BROWSER_USE_MAX_STEPS,
+  CREATE_TASK_HEADER_NAMES,
+  buildCreateTaskBody,
   runBrowserUseTask,
   type BrowserUseTaskRecord,
 } from "../eval/browserUseClient.js";
@@ -48,7 +49,10 @@ function usage(): void {
   );
 }
 
-/** Header NAMES only — never a value, live key or otherwise. */
+/** Header NAMES only — never a value, live key or otherwise. Body and header
+ *  names come from the client's own buildCreateTaskBody()/
+ *  CREATE_TASK_HEADER_NAMES so the preview can never drift from what a live
+ *  createTask() actually sends (WR-04). */
 function requestPreview(task: BrowsingEvalTask): {
   method: string;
   url: string;
@@ -58,12 +62,8 @@ function requestPreview(task: BrowsingEvalTask): {
   return {
     method: "POST",
     url: `${BROWSER_USE_API_BASE}/tasks`,
-    headerNames: ["X-Browser-Use-API-Key", "Content-Type"],
-    body: {
-      task: task.prompt,
-      maxSteps: BROWSER_USE_MAX_STEPS,
-      allowedDomains: [new URL(task.url).hostname],
-    },
+    headerNames: [...CREATE_TASK_HEADER_NAMES],
+    body: buildCreateTaskBody(task),
   };
 }
 

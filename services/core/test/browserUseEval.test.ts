@@ -12,7 +12,9 @@ import { BROWSING_EVAL_TASKS, gradeAnswer } from "../src/eval/browsingTasks.js";
 import {
   makeBrowserUseClient,
   runBrowserUseTask,
+  buildCreateTaskBody,
   BROWSER_USE_MAX_STEPS,
+  CREATE_TASK_HEADER_NAMES,
 } from "../src/eval/browserUseClient.js";
 // Import ONLY the side-effect-free args module — never ../src/cli/evalBrowserUse.js,
 // whose first statement (`import "../loadEnv.js"`) would load the developer's real
@@ -164,6 +166,24 @@ describe("runBrowserUseTask — create", () => {
     expect(body["allowedDomains"]).toEqual([new URL(TASK_E1.url).hostname]);
     expect(Object.prototype.hasOwnProperty.call(body, "secrets")).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(body, "structuredOutput")).toBe(false);
+  });
+
+  it("sends exactly buildCreateTaskBody() and exactly the CREATE_TASK_HEADER_NAMES — the shared source the dry-run preview also uses (WR-04)", async () => {
+    const calls: RequestLog[] = [];
+    const fetchFn = fakeFetchRouter(
+      (url, init) => {
+        calls.push({ url, init });
+        return createResponse();
+      },
+      () => pollResponse({ status: "finished", output: "x", isSuccess: false, cost: 0, steps: [] }),
+    );
+
+    await runBrowserUseTask(TASK_E2, { fetchFn, sleep: async () => {} });
+
+    const sentBody = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+    expect(sentBody).toEqual({ ...buildCreateTaskBody(TASK_E2) });
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    expect(Object.keys(headers).sort()).toEqual([...CREATE_TASK_HEADER_NAMES].sort());
   });
 });
 
