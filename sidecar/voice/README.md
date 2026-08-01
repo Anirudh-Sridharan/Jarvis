@@ -81,6 +81,32 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
 | `WAKE_WORD_MODEL` | `hey_jarvis` | openWakeWord model name or file path. |
 | `WAKE_THRESHOLD` | `0.35` | openWakeWord detection confidence threshold (lower = more sensitive). |
 | `WAKE_DEBOUNCE_SECS` | `1.5` | Seconds to suppress duplicate wake fires. |
+| `DEEPGRAM_API_KEY` | unset | Enables Deepgram streaming STT and Aura-2 TTS. Read from the repo-root `.env` by `load_env.sh` (see below) and never logged, printed, or returned by any endpoint. Unset = both engines stay on their local default. |
+| `DEEPGRAM_MODEL` | `nova-3` | Deepgram streaming-STT model. |
+| `DEEPGRAM_STT_ENABLED` | `1` | Set to `0` to force faster-whisper even with a key present, without removing the key. |
+| `DEEPGRAM_CONNECT_TIMEOUT_MS` | `2000` | Deepgram STT WS connect timeout before falling back to faster-whisper. |
+| `DEEPGRAM_FINALIZE_TIMEOUT_MS` | `600` | How long to wait for Deepgram's `Finalize` response before giving up on that segment's text. |
+| `TTS_ENGINE` | `kokoro` | `aura` selects Deepgram Aura-2 streaming TTS instead of Kokoro. **`kokoro` is the committed default — it changes only by explicit user decision, never automatically.** |
+| `DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Aura-2 voice model id (used only when the Aura engine is selected). |
+
+### STT engine design
+
+Silero VAD always owns `speech_start`/`speech_end`/`silence_ms` — the segment
+boundary never changes regardless of which engine transcribes the text.  When
+`DEEPGRAM_API_KEY` is configured, Deepgram's streaming `/v1/listen` supplies
+the transcript, finalized by a `Finalize` message sent on Silero's own
+`speech_end` cue.  A missing key, a failed connect, or a mid-session socket
+death all fall back to faster-whisper for the rest of that session — never an
+`error` frame, never an abnormal close.  The active engine and the reason for
+any fallback are always visible on `GET /health`'s `stt_engine` key.
+
+### `load_env.sh` — allowlisted `.env` loading
+
+`run.sh` sources `load_env.sh` before starting the sidecar, which loads *only*
+`DEEPGRAM_*`/`TTS_ENGINE` keys from the repo-root `.env` (an explicit
+allowlist — every other secret in `.env`, e.g. `FIREWORKS_API_KEY`, is never
+read into this process).  A variable already set in the shell environment is
+left untouched; values are never echoed or logged.
 
 ---
 
@@ -98,9 +124,24 @@ The TypeScript `voiceClient` calls exactly these endpoints.
     "tts":  "unloaded | loading | ready | error",
     "vad":  "unloaded | loading | ready | error",
     "wake": "unloaded | loading | ready | error | disabled"
+  },
+  "stt_engine": {
+    "configured": "deepgram | faster-whisper",
+    "active": "deepgram | faster-whisper | null",
+    "reason": "<short, key-free degradation reason> | null"
+  },
+  "tts_engine": {
+    "configured": "aura | kokoro",
+    "active": "aura | kokoro | null",
+    "reason": "<short, key-free degradation reason> | null"
   }
 }
 ```
+
+`stt_engine` and `tts_engine` are **additive top-level keys** — `components`
+deliberately still holds only the four original component states, because the
+overall `state` computation is derived from `components.values()` alone; an
+engine name inside `components` would permanently pin `state` to `"degraded"`.
 
 ### `WS /stt/stream` — streaming STT
 
@@ -132,9 +173,19 @@ streaming partials on Apple Silicon, use Parakeet-TDT/MLX (see `stt.py` →
   "text": "The text to synthesize.",
   "request_id": "<optional uuid>",
   "voice": "bm_fable",
-  "speed": 1.0
+  "speed": 1.0,
+  "engine": "kokoro | aura"
 }
 ```
+
+`engine` is optional and defaults to the `TTS_ENGINE` env value — the live
+voice conversation client never sends it, so which engine actually serves a
+turn is governed entirely by the sidecar's own environment. Aura-2 output is
+`linear16` at 24 kHz — **identical** to Kokoro's format — so the response
+headers and the client's playback pipeline never need to change based on
+engine. An Aura failure (no key, failed connect, or a zero-byte stream)
+falls back to Kokoro **within the same request**, so the caller always gets
+audio, never a 4xx/5xx or silence.
 
 **Response:** chunked binary stream of raw **PCM-16 LE mono 24 kHz** audio.
 
@@ -145,7 +196,8 @@ X-TTS-Request-Id: <uuid>
 ```
 
 **Cancellation:** call `POST /tts/cancel { "request_id": "…" }` while the
-response is streaming, or close the HTTP connection.
+response is streaming, or close the HTTP connection. Cancellation works
+identically for both engines.
 
 ### `POST /tts/cancel`
 
@@ -185,6 +237,24 @@ to `VOICE_ORCHESTRATOR_URL` (default `http://127.0.0.1:8080/voice/wake`).
 ```
 Unloads the specified components to reclaim RAM. Omit `components` to unload
 all.  VAD is an alias for STT (they share the same manager).
+
+---
+
+## A/B and latency tooling
+
+Two standalone CLI scripts run against a live sidecar (`npm run sidecar:voice`
+or `./run.sh`) to produce objective numbers for the Deepgram/Aura evaluation:
+
+- `./.venv/bin/python stt_latency_probe.py` — streams a cached, byte-identical
+  fixture PCM through the real WS `/stt/stream` contract at real-time pace and
+  prints `speech_end_to_final_ms` per repetition, labelled with whichever STT
+  engine `GET /health` reports as active.
+- `./.venv/bin/python tts_ab_eval.py` — renders a fixed, non-random sentence
+  set through Kokoro and both British Aura-2 voices via `POST /tts`, printing
+  a `ttfb_ms`/`rtf` table and writing listenable WAV files per candidate.
+
+Both scripts only ever *measure and report* — the default voice/engine
+changes only by an explicit user decision, never automatically.
 
 ---
 
@@ -260,11 +330,19 @@ UI) receive only the text events and the PCM bytes from `/tts`.
 
 | File | Purpose |
 |------|---------|
-| `voice_server.py` | FastAPI app: `/health`, `/stt/stream` (WS), `/tts`, `/tts/cancel`, `/wake/*`, `/unload`, `/warmup` (pre-loads + JIT-warms STT/TTS); `ModelManager` classes for STT/TTS/VAD/Wake with lazy load; weighted voice-blend resolution. |
+| `voice_server.py` | FastAPI app: `/health`, `/stt/stream` (WS), `/tts`, `/tts/cancel`, `/wake/*`, `/unload`, `/warmup` (pre-loads + JIT-warms STT/TTS); `ModelManager` classes for STT/TTS/VAD/Wake with lazy load; weighted voice-blend resolution; Deepgram STT/Aura-TTS engine selection + fallback. |
 | `wakeword.py` | openWakeWord listener loop → POST WakeEvent to orchestrator. |
-| `stt.py` | faster-whisper + Silero VAD streaming wrapper; Parakeet-MLX alternative stub. |
+| `stt.py` | faster-whisper + Silero VAD streaming wrapper; Parakeet-MLX alternative stub; VAD-only mode for the Deepgram STT path. |
 | `tts.py` | Kokoro TTS streaming wrapper; MLX variant note; WAV header utility. |
+| `deepgram_stt.py` | Deepgram streaming-STT WS client (`DeepgramSttSession`) — connect/send_audio/drain_partials/finalize_segment/close. |
+| `deepgram_tts.py` | Deepgram Aura-2 streaming-TTS WS client (`synthesize_streaming_aura`) — Kokoro-compatible PCM16 LE 24 kHz output. |
+| `stt_latency_probe.py` | CLI: objective `speech_end→final` STT latency measurement over the real WS contract. |
+| `tts_ab_eval.py` | CLI: Kokoro vs Aura-2 TTFB/RTF A/B, writes listenable WAV files. |
+| `load_env.sh` | Allowlisted, non-overriding loader of `DEEPGRAM_*`/`TTS_ENGINE` from the repo-root `.env`; sourced by `run.sh`. |
+| `selftest.py` | Hermetic assert script: STT/TTS manager shape, VAD-only mode, engine-status helpers — no network, no models. |
+| `stt_stream_selftest.py` | Hermetic `TestClient` WS selftest for `/stt/stream`'s Deepgram branch and its fallback paths. |
+| `tts_selftest.py` | Hermetic `TestClient` selftest for `/tts`'s Aura/Kokoro engine branch, fallback, headers, and cancellation. |
 | `pipeline_pipecat.py` | OPTIONAL Pipecat all-in-one pipeline (VAD→STT→LLM→TTS); importable, lazy imports, documented. |
 | `requirements.txt` | All Python dependencies with comments on MLX alternatives. |
-| `run.sh` | Venv bootstrap (Python 3.11+), dep install, uvicorn launch. |
+| `run.sh` | Venv bootstrap (Python 3.11+), allowlisted `.env` load, dep install, uvicorn launch. |
 | `README.md` | This file. |
