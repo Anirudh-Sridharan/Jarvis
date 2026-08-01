@@ -19,6 +19,7 @@
     "chat": "npm --workspace @jarvis/core run chat",
     "connect": "npm --workspace @jarvis/core run connect --",
     "voice": "npm --workspace @jarvis/core run voice",
+    "eval:browser-use": "npm --workspace @jarvis/core run eval:browser-use --",
     "sidecar": "bash sidecar/mlx/run.sh",
     "sidecar:voice": "bash sidecar/voice/run.sh"
   }

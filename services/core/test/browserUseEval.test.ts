@@ -14,6 +14,7 @@ import {
   runBrowserUseTask,
   BROWSER_USE_MAX_STEPS,
 } from "../src/eval/browserUseClient.js";
+import { parseEvalArgs, DEFAULT_OUT_PATH } from "../src/cli/evalBrowserUse.js";
 
 const ORIGINAL_KEY = process.env["BROWSER_USE_API_KEY"];
 
@@ -392,5 +393,46 @@ describe("makeBrowserUseClient", () => {
     expect(typeof client.createTask).toBe("function");
     expect(typeof client.getTask).toBe("function");
     expect(typeof client.runTask).toBe("function");
+  });
+});
+
+// ── evalBrowserUse.ts CLI arg parsing (Task 2) ──────────────────────────────
+// Only parseEvalArgs is exercised here — the CLI's main body (dry-run/live
+// run) is guarded behind an entrypoint check and is never invoked on import.
+
+describe("parseEvalArgs", () => {
+  it("defaults to all three task ids, no dry-run, no help, the default --out path", () => {
+    const args = parseEvalArgs([]);
+    expect(args.taskIds).toEqual(BROWSING_EVAL_TASKS.map((t) => t.id));
+    expect(args.dryRun).toBe(false);
+    expect(args.help).toBe(false);
+    expect(args.out).toBe(DEFAULT_OUT_PATH);
+  });
+
+  it("--task e2-multi-step-nav selects exactly that one task", () => {
+    const args = parseEvalArgs(["--task", "e2-multi-step-nav"]);
+    expect(args.taskIds).toEqual(["e2-multi-step-nav"]);
+  });
+
+  it("rejects an unknown --task id with a message naming the valid ids", () => {
+    expect(() => parseEvalArgs(["--task", "does-not-exist"])).toThrow(/e1-js-extract/);
+    expect(() => parseEvalArgs(["--task", "does-not-exist"])).toThrow(/e2-multi-step-nav/);
+    expect(() => parseEvalArgs(["--task", "does-not-exist"])).toThrow(/e3-interaction/);
+  });
+
+  it("--dry-run sets the flag", () => {
+    expect(parseEvalArgs(["--dry-run"]).dryRun).toBe(true);
+  });
+
+  it("--out overrides the default output path", () => {
+    expect(parseEvalArgs(["--out", "/tmp/custom-eval.json"]).out).toBe("/tmp/custom-eval.json");
+  });
+
+  it("--help sets the flag", () => {
+    expect(parseEvalArgs(["--help"]).help).toBe(true);
+  });
+
+  it("rejects an unknown flag", () => {
+    expect(() => parseEvalArgs(["--bogus"])).toThrow(/Unknown argument/);
   });
 });
