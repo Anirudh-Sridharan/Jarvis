@@ -2,8 +2,8 @@
  * Side-effect module: load the repo-root `.env` into process.env on import.
  *
  * Import this FIRST in any executable entrypoint (server, CLI) so config.ts —
- * which reads process.env directly — sees HF_ENDPOINT_URL/HF_TOKEN/etc. without
- * the caller having to `source .env` manually.
+ * which reads process.env directly — sees FIREWORKS_API_KEY/ANTHROPIC_API_KEY/etc.
+ * without the caller having to `source .env` manually.
  *
  * Uses Node's built-in `process.loadEnvFile` (no dependency). It does NOT
  * override variables already present in the environment, so explicit shell

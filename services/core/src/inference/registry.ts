@@ -25,8 +25,16 @@ export class Registry {
 
   /** Provider that backs a given routing target. */
   private static providerForTarget(target: Target): RegistryEntry["provider"][] {
-    // 'local' is served by mlx (or lmstudio in dev); 'hf' by the hf provider.
-    return target === "local" ? ["mlx", "lmstudio"] : ["hf"];
+    // 'local' is served by mlx (or lmstudio in dev); each cloud target is
+    // served by its own same-named provider (fireworks/anthropic).
+    switch (target) {
+      case "local":
+        return ["mlx", "lmstudio"];
+      case "fireworks":
+        return ["fireworks"];
+      case "anthropic":
+        return ["anthropic"];
+    }
   }
 
   /**
