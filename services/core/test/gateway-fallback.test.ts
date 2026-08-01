@@ -22,9 +22,10 @@
  * patch — the old file's `(gw as any).hf` monkey-patch no longer exists).
  */
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { InferenceGateway } from "../src/inference/gateway.js";
 import { GatewayLlm } from "../src/memory/gatewayLlm.js";
+import { setTelemetrySink, type TurnMetrics } from "../src/inference/telemetry.js";
 import type { AppConfig } from "../src/config.js";
 import type { CloudTarget, InferenceStreamChunk, TaskHint } from "../src/inference/types.js";
 
@@ -231,6 +232,53 @@ describe("cloud-pinned consolidation (CR-01)", () => {
     expect(gw.modelManager.isFallbackActive()).toBe(false);
     expect(calls.anthropic).toBe(0);
     expect(calls.mlx).toBe(0);
+  });
+});
+
+// ── WR-04: every error exit records a turn — a dead provider must show up ──
+// as a queryable failure rate in /telemetry, not be indistinguishable from
+// no traffic.
+describe("failed turns are recorded in telemetry (WR-04)", () => {
+  afterEach(() => setTelemetrySink(null));
+
+  function captureTurns(): TurnMetrics[] {
+    const turns: TurnMetrics[] = [];
+    setTelemetrySink({
+      recordRouting() {},
+      recordTurn(m) {
+        turns.push(m);
+      },
+    });
+    return turns;
+  }
+
+  it("a dead cloud lane whose local fallback also fails records ONE turn with ok=false naming the cloud target", async () => {
+    const turns = captureTurns();
+    const { gw } = buildGateway({ cloudFails: true, localFails: true, cloudTarget: "anthropic" });
+    await collect(gw.chat(requestFor("agent")));
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.ok).toBe(false);
+    expect(turns[0]!.target).toBe("anthropic");
+  });
+
+  it("a cloud-pinned consolidation failure records ONE turn with ok=false against fireworks", async () => {
+    const turns = captureTurns();
+    const { gw } = buildGateway({ cloudFails: true, cloudTarget: "fireworks" });
+    await collect(gw.chat(requestFor("consolidation")));
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.ok).toBe(false);
+    expect(turns[0]!.target).toBe("fireworks");
+  });
+
+  it("a successful turn still records ok=true", async () => {
+    const turns = captureTurns();
+    const { gw } = buildGateway({ cloudFails: false, cloudTarget: "fireworks" });
+    await collect(gw.chat(requestFor("consolidation")));
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.ok).toBe(true);
   });
 });
 

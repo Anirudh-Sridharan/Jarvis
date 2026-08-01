@@ -262,6 +262,9 @@ export class InferenceGateway {
             yield { type: "done" };
             return;
           } catch (cloudErr) {
+            // WR-04: record the failed turn — a dead provider must be
+            // queryable in /telemetry, not indistinguishable from no traffic.
+            timer.finish({ modelId: cloudEntry.id, target: cloudTarget, fallbackActive: true, ok: false });
             yield {
               type: "error",
               message: `Cloud fallback (${cloudTarget}) failed: ${errMsg(cloudErr)}`,
@@ -298,6 +301,8 @@ export class InferenceGateway {
         const pinReason = promptExceedsLocal
           ? `the prompt (~${decision.estPromptTokens} tokens) exceeds the local context ceiling`
           : `${req.taskHint} is cloud-pinned (local fallback would persist degraded output)`;
+        // WR-04: record the failed turn against the dead cloud lane.
+        timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive(), ok: false });
         yield {
           type: "error",
           message: `${target} failed and ${pinReason}: ${errMsg(err)}`,
@@ -332,6 +337,9 @@ export class InferenceGateway {
             yield { type: "done" };
             return;
           } catch (localErr) {
+            // WR-04: record the double failure against the originally-routed
+            // cloud lane (the lane whose death matters operationally).
+            timer.finish({ modelId, target, fallbackActive: true, ok: false });
             yield {
               type: "error",
               message: `${target} failed (${errMsg(err)}); local fallback also failed: ${errMsg(localErr)}`,
@@ -340,6 +348,8 @@ export class InferenceGateway {
           }
         }
       }
+      // WR-04: generic error exit — still a failed turn worth counting.
+      timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive(), ok: false });
       yield { type: "error", message: errMsg(err) };
     } finally {
       if (localRequestOpen) this.modelManager.endRequest();

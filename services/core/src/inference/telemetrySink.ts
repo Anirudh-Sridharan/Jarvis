@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS telemetry_turns (
   ttft_ms INTEGER,                 -- turn only
   tokens INTEGER,                  -- turn only
   duration_ms INTEGER,             -- turn only
-  fallback INTEGER                 -- turn only (0/1)
+  fallback INTEGER,                -- turn only (0/1)
+  ok INTEGER                       -- turn only (0/1; NULL = legacy row, treated as ok) [WR-04]
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry_turns(ts);
 `;
@@ -43,6 +44,8 @@ export interface TelemetryTurnRow {
   tokens?: number;
   durationMs?: number;
   fallback?: boolean;
+  /** false = turn ended on an error exit; undefined = legacy row / routing row (WR-04). */
+  ok?: boolean;
 }
 
 export interface TelemetrySummary {
@@ -52,6 +55,8 @@ export interface TelemetrySummary {
   avgTokensPerSec: number | null;
   byTarget: Record<string, number>;
   fallbackTurns: number;
+  /** Turns that ended on an error exit — a dead provider shows up here instead of as silence (WR-04). */
+  errorTurns: number;
 }
 
 export class TelemetrySink {
@@ -59,6 +64,12 @@ export class TelemetrySink {
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(SCHEMA);
+    // Migration: `ok` column added in 13.1 (WR-04) — CREATE TABLE IF NOT
+    // EXISTS does not extend a pre-existing table, so add it in place.
+    const cols = db.prepare(`PRAGMA table_info(telemetry_turns)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === "ok")) {
+      db.exec(`ALTER TABLE telemetry_turns ADD COLUMN ok INTEGER`);
+    }
     // Retention: telemetry is operational data, not memory — keep 30 days so
     // the table (and the 15s dashboard poll's scans) never grow unbounded.
     const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
@@ -84,6 +95,7 @@ export class TelemetrySink {
   }
 
   recordTurn(m: TurnMetrics): void {
+    const ok = m.ok !== false;
     const row: TelemetryTurnRow = {
       ts: new Date().toISOString(),
       kind: "turn",
@@ -93,13 +105,23 @@ export class TelemetrySink {
       tokens: m.tokens,
       durationMs: m.durationMs,
       fallback: m.fallbackActive,
+      ok,
     };
     this.db
       .prepare(
-        `INSERT INTO telemetry_turns (ts, kind, target, model_id, ttft_ms, tokens, duration_ms, fallback)
-         VALUES (?, 'turn', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO telemetry_turns (ts, kind, target, model_id, ttft_ms, tokens, duration_ms, fallback, ok)
+         VALUES (?, 'turn', ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.ts, row.target, row.modelId, m.ttftMs, m.tokens, m.durationMs, m.fallbackActive ? 1 : 0);
+      .run(
+        row.ts,
+        row.target,
+        row.modelId,
+        m.ttftMs,
+        m.tokens,
+        m.durationMs,
+        m.fallbackActive ? 1 : 0,
+        ok ? 1 : 0,
+      );
     this.push(row);
   }
 
@@ -127,6 +149,7 @@ export class TelemetrySink {
     let tpsSum = 0;
     let tpsCount = 0;
     let fallbackTurns = 0;
+    let errorTurns = 0;
 
     for (const r of rows) {
       const target = r["target"] as string;
@@ -143,6 +166,8 @@ export class TelemetrySink {
         tpsCount++;
       }
       if (r["fallback"] === 1) fallbackTurns++;
+      // NULL ok = legacy/pre-WR-04 row — treated as ok.
+      if (r["ok"] === 0) errorTurns++;
     }
 
     return {
@@ -152,6 +177,7 @@ export class TelemetrySink {
       avgTokensPerSec: tpsCount > 0 ? Math.round((tpsSum / tpsCount) * 10) / 10 : null,
       byTarget,
       fallbackTurns,
+      errorTurns,
     };
   }
 
@@ -173,6 +199,7 @@ function dbRowToTurnRow(r: Record<string, unknown>): TelemetryTurnRow {
     tokens: (r["tokens"] as number | null) ?? undefined,
     durationMs: (r["duration_ms"] as number | null) ?? undefined,
     fallback: r["fallback"] == null ? undefined : r["fallback"] === 1,
+    ok: r["ok"] == null ? undefined : r["ok"] === 1,
   };
 }
 

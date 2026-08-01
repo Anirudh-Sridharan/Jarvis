@@ -39,12 +39,19 @@ export interface TurnMetrics {
   tokens: number;
   durationMs: number;
   fallbackActive: boolean;
+  /**
+   * false = the turn ended on an ERROR exit (dead provider, failed fallback).
+   * Absent/true = completed normally. Recorded so a dead provider produces a
+   * queryable failure rate instead of being indistinguishable from no
+   * traffic (WR-04).
+   */
+  ok?: boolean;
 }
 
 export function logTurn(m: TurnMetrics): void {
   const tps = m.durationMs > 0 ? (m.tokens / (m.durationMs / 1000)).toFixed(1) : "0";
   console.error(
-    `[telemetry ${ts()}] turn target=${m.target} model=${m.modelId} ttft=${m.ttftMs}ms tokens=${m.tokens} tps=${tps} fallback=${m.fallbackActive}`,
+    `[telemetry ${ts()}] turn target=${m.target} model=${m.modelId} ttft=${m.ttftMs}ms tokens=${m.tokens} tps=${tps} fallback=${m.fallbackActive} ok=${m.ok !== false}`,
   );
   try {
     activeSink?.recordTurn(m);
@@ -64,7 +71,13 @@ export class TurnTimer {
     this.tokens++;
   }
 
-  finish(meta: { modelId: string; target: string; fallbackActive: boolean }): void {
+  finish(meta: {
+    modelId: string;
+    target: string;
+    fallbackActive: boolean;
+    /** Pass false on error exits so failed turns are recorded (WR-04). */
+    ok?: boolean;
+  }): void {
     const now = Date.now();
     logTurn({
       modelId: meta.modelId,
@@ -73,6 +86,7 @@ export class TurnTimer {
       tokens: this.tokens,
       durationMs: now - this.start,
       fallbackActive: meta.fallbackActive,
+      ok: meta.ok ?? true,
     });
   }
 }
