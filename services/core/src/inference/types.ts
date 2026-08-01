@@ -5,7 +5,10 @@
  * yet — when one is extracted (TODO(phase2+)), these schemas move there.
  */
 
-export type Target = "local" | "hf";
+export type Target = "local" | "fireworks" | "anthropic";
+
+/** A remote provider target — every non-local target is reachable over the OpenAI-compatible HTTP contract. */
+export type CloudTarget = Exclude<Target, "local">;
 
 export type TaskHint =
   | "voice"
@@ -25,7 +28,7 @@ export type ModelState =
   | "generating"
   | "error";
 
-export type Provider = "mlx" | "hf" | "lmstudio";
+export type Provider = "mlx" | "fireworks" | "anthropic" | "lmstudio";
 
 export type Quant = "4bit" | "8bit" | "fp16";
 
@@ -51,11 +54,11 @@ export interface RegistryEntry {
   id: string; // e.g. "qwen-local-chat"
   kind: ModelKind;
   provider: Provider;
-  modelRef: string; // mlx repo id or HF endpoint model name
+  modelRef: string; // mlx repo id or cloud provider model ref
   quant?: Quant;
   ctxWindow: number;
   approxRamGB?: number; // local memory budget hint
-  endpointUrl?: string; // hf only
+  endpointUrl?: string; // cloud providers only (fireworks/anthropic); optional base-URL override
   default?: boolean; // default for its kind
 }
 

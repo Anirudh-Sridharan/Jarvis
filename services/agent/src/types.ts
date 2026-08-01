@@ -274,7 +274,7 @@ export interface ScheduledJob {
   name: string;
   description: string;
   handler: (ctx: TriggerContext) => Promise<JobResult>;
-  needsModel: "none" | "local" | "hf";
+  needsModel: "none" | "local" | "cloud";
   maxDurationSec: number;
   singleton: boolean;
 }

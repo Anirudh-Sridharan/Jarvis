@@ -94,7 +94,7 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
   triggers.registerJob({
     name: "nightly-consolidation",
     description: "Compact and deduplicate memory store nightly.",
-    needsModel: "hf",
+    needsModel: "cloud",
     maxDurationSec: 300,
     singleton: true,
 
@@ -123,7 +123,7 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
   triggers.registerJob({
     name: "morning-briefing",
     description: "Assemble the daily morning briefing.",
-    needsModel: "hf",
+    needsModel: "cloud",
     maxDurationSec: 120,
     singleton: true,
 
