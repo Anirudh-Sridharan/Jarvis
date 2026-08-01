@@ -24,6 +24,22 @@ const REAL_CLOCK: Clock = {
   isoNow: () => new Date().toISOString(),
 };
 
+/**
+ * Normalize a deserialized state (13.1 WR-06): checkpoint rows written before
+ * the provider revamp recorded the deleted "hf" tier — map it to the
+ * provider-agnostic "cloud" so old rows keep loading against the new union.
+ */
+function normalizeState(state: AgentState): AgentState {
+  if ((state.routeTier as string) === "hf") {
+    state.routeTier = "cloud";
+  }
+  const pending = state.pendingToolCall as { modelTier?: string } | undefined;
+  if (pending?.modelTier === "hf") {
+    pending.modelTier = "cloud";
+  }
+  return state;
+}
+
 // ── Schema ────────────────────────────────────────────────────────────────────
 
 const DDL = `
@@ -72,7 +88,7 @@ export class Checkpointer {
       | { seq: number; state: string }
       | undefined;
     if (!row) return undefined;
-    return { seq: row.seq, state: JSON.parse(row.state) as AgentState };
+    return { seq: row.seq, state: normalizeState(JSON.parse(row.state) as AgentState) };
   }
 
   /** List all checkpoints for a run, ascending. */
@@ -89,7 +105,7 @@ export class Checkpointer {
     }>;
     return rows.map((r) => ({
       seq: r.seq,
-      state: JSON.parse(r.state) as AgentState,
+      state: normalizeState(JSON.parse(r.state) as AgentState),
       savedAt: r.saved_at,
     }));
   }

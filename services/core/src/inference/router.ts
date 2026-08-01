@@ -74,6 +74,16 @@ export class Router {
     }
   }
 
+  /**
+   * Whether the `agent` task class is cloud-preferred by config (D-04).
+   * Exposed so core can stamp the @jarvis/agent leaf's provider-agnostic
+   * routeTier ("local" | "cloud") from real routing config instead of
+   * hardcoding "local" (13.1 WR-06).
+   */
+  agentPrefersCloud(): boolean {
+    return this.cfg.agentPreferCloud;
+  }
+
   resolve(req: JarvisInferenceRequest): RoutingDecision {
     const estPromptTokens = estimateRequestTokens(req.messages, req.tools);
 

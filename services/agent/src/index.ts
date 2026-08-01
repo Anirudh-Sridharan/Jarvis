@@ -145,6 +145,12 @@ export interface AgentSystemConfig {
   parseCronNext?: (expr: string, tz: string, after?: number) => number | null;
   /** Feature 20: optional profile-context provider for agent runs. */
   userContext?: import("./types.js").UserContextProvider;
+  /**
+   * Serving tier the injected LlmClient routes to ("local" | "cloud") —
+   * stamped into AgentState.routeTier so checkpoints record the real tier
+   * (13.1 WR-06). Core wires this from routing config; defaults to "local".
+   */
+  routeTier?: "local" | "cloud";
 }
 
 export interface AgentSystem {
@@ -185,6 +191,7 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
     auditLog,
     clock,
     userContext: config.userContext,
+    routeTier: config.routeTier,
   });
 
   // Register default skills
@@ -209,6 +216,7 @@ export function createAgentSystem(config: AgentSystemConfig): AgentSystem {
     eventBus: config.eventBus,
     parseCronNext: config.parseCronNext,
     userContext: config.userContext,
+    routeTier: config.routeTier,
   });
 
   return { agent, approvals: approvalService, skills, triggers, audit: auditLog };

@@ -110,6 +110,8 @@ export interface SchedulerOptions {
   eventBus?: EventBus;
   /** Feature 20: optional profile-context provider for agent-goal triggers. */
   userContext?: UserContextProvider;
+  /** Serving tier for the LlmClient — threaded to the AgentRunner (13.1 WR-06). */
+  routeTier?: "local" | "cloud";
 }
 
 export interface EventBus {
@@ -152,6 +154,7 @@ export class Scheduler {
       auditLog: this.auditLog,
       clock: opts.clock,
       userContext: opts.userContext,
+      routeTier: opts.routeTier,
     });
   }
 

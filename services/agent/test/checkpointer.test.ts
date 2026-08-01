@@ -137,7 +137,7 @@ describe("Checkpointer", () => {
       stepCount: 3,
       validationRetries: 1,
       reflections: ["tried again"],
-      routeTier: "hf",
+      routeTier: "cloud",
       status: "running",
     };
 
@@ -146,7 +146,28 @@ describe("Checkpointer", () => {
 
     expect(loaded?.state.observations[0]?.result).toEqual({ data: [1, 2, 3] });
     expect(loaded?.state.reflections).toContain("tried again");
-    expect(loaded?.state.routeTier).toBe("hf");
+    expect(loaded?.state.routeTier).toBe("cloud");
+  });
+
+  it('normalizes the deleted legacy "hf" tier to "cloud" on load and list (13.1 WR-06)', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "cp-test-"));
+    const cp = new Checkpointer(tmpDir);
+
+    // Simulate a pre-13.1 checkpoint row: save() serializes whatever it is
+    // given, so a legacy-shaped state persists the literal "hf" strings.
+    const legacy = {
+      ...makeState("legacy goal", 0),
+      routeTier: "hf",
+      pendingToolCall: { id: "tc-1", toolName: "search", modelTier: "hf" },
+    } as unknown as AgentState;
+    cp.save("run-legacy", 0, legacy);
+
+    const loaded = cp.load("run-legacy");
+    expect(loaded?.state.routeTier).toBe("cloud");
+    expect(loaded?.state.pendingToolCall?.modelTier).toBe("cloud");
+
+    const listed = cp.list("run-legacy");
+    expect(listed[0]?.state.routeTier).toBe("cloud");
   });
 
   describe("sweepOrphaned", () => {

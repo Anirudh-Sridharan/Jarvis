@@ -69,6 +69,30 @@ describe("AgentRunner checkpoint/resume", () => {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('stamps the injected routeTier into new run state so checkpoints record the real serving tier (13.1 WR-06)', async () => {
+    tmpDir = makeTempDir();
+
+    const llm = new FakeLlm().setScript([
+      '{"tool": "search", "args": {"query": "one"}}',
+      '{"tool": "__done__", "args": {"result": "done"}}',
+    ]);
+    const tools = makeToolRegistry([new FakeSearchTool()]);
+    const clock = new FixedClock(Date.now());
+    const { sink } = makeAutoApproveSink();
+    const runner = new AgentRunner({
+      llm,
+      tools,
+      checkpointer: new Checkpointer(tmpDir),
+      approvalService: new ApprovalService(sink, clock),
+      auditLog: new AuditLog(tmpDir, clock),
+      clock,
+      routeTier: "cloud",
+    });
+
+    const result = await runner.run("search something", { runId: "run-tier" });
+    expect(result.state.routeTier).toBe("cloud");
+  });
+
   it("post-step checkpoint advances currentStep past the completed step", async () => {
     tmpDir = makeTempDir();
 
