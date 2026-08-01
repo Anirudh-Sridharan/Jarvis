@@ -39,7 +39,9 @@ import { z } from "zod";
 import type { Tool } from "@jarvis/agent";
 import { registerToolMeta } from "@jarvis/agent";
 import type { MacCommandRunner } from "../../mac/commandRunner.js";
+import { ScriptRunner } from "../../mac/scriptRunner.js";
 import { ScreenshotRunner, imageToScreenPoint } from "../../mac/screenshotRunner.js";
+import { AxActionRunner } from "../../mac/axActions.js";
 import type { InferenceGateway } from "../../inference/gateway.js";
 import type { ChatMessage, ContentPart } from "../../inference/types.js";
 
@@ -78,6 +80,24 @@ const ScreenshotSchema = z.object({
     .max(500)
     .optional()
     .describe("What you're trying to find or do on screen — helps the vision model focus"),
+});
+
+const ClickSchema = z.object({
+  x: z.number().int().finite().min(0),
+  y: z.number().int().finite().min(0),
+  element: z
+    .string()
+    .min(1)
+    .describe("What you are clicking, in the words of the latest computer_screenshot"),
+});
+
+const TypeSchema = z.object({
+  text: z.string().min(1),
+  element: z
+    .string()
+    .min(1)
+    .describe("What you are typing into, in the words of the latest computer_screenshot"),
+  submit: z.boolean().optional().describe("Press Enter after typing"),
 });
 
 // ── Vision call plumbing ──────────────────────────────────────────────────────
@@ -131,6 +151,8 @@ function parseVisionReply(
  */
 export function makeComputerUseTools(run: MacCommandRunner, gateway: Pick<InferenceGateway, "chat">): Tool[] {
   const screenshotRunner = new ScreenshotRunner({ run });
+  const script = new ScriptRunner(run);
+  const axActions = new AxActionRunner(script);
 
   const tools: Tool[] = [
     {
@@ -221,9 +243,40 @@ export function makeComputerUseTools(run: MacCommandRunner, gateway: Pick<Infere
         };
       },
     },
+    {
+      name: "computer_click",
+      description:
+        "Click at an exact screen coordinate returned by the latest computer_screenshot (requires " +
+        "approval). Makes NO inference call — the coordinates a human sees in the approval prompt " +
+        "are exactly the coordinates that get clicked.",
+      schema: ClickSchema,
+      readOnly: false,
+      returnsExternalContent: true,
+      run: async (rawArgs: unknown) => {
+        const { x, y } = ClickSchema.parse(rawArgs);
+        return axActions.clickAt({ x, y });
+      },
+    },
+    {
+      name: "computer_type",
+      description:
+        "Type text into whatever currently has focus after a computer_click (requires approval). " +
+        "Click the target field first. Jarvis never types credentials — typing into a secure/" +
+        "password field, or a field whose role cannot be determined, is refused before any " +
+        "keystroke is synthesized.",
+      schema: TypeSchema,
+      readOnly: false,
+      returnsExternalContent: true,
+      run: async (rawArgs: unknown) => {
+        const { text, submit } = TypeSchema.parse(rawArgs);
+        return axActions.typeAtFocus(text, submit);
+      },
+    },
   ];
 
   registerToolMeta("computer_screenshot", { sideEffects: "read_only", reversible: true });
+  registerToolMeta("computer_click", { sideEffects: "mac_action", reversible: false });
+  registerToolMeta("computer_type", { sideEffects: "mac_action", reversible: false });
 
   return tools;
 }

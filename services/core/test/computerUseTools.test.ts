@@ -14,6 +14,7 @@ import { makeComputerUseTools, COMPUTER_MAX_ELEMENTS } from "../src/agent/tools/
 import { imageToScreenPoint } from "../src/mac/screenshotRunner.js";
 import type { ChatMessage, JarvisInferenceRequest, InferenceStreamChunk } from "../src/inference/types.js";
 import type { InferenceGateway } from "../src/inference/gateway.js";
+import { getToolMeta } from "@jarvis/agent";
 
 const SCREENCAPTURE = "/usr/sbin/screencapture";
 
@@ -289,5 +290,97 @@ describe("computer_screenshot — degrade, never crash", () => {
       expect(String(result["error"])).toMatch(/parseable JSON/i);
       expect(result["raw"]).toBeDefined();
     });
+  });
+});
+
+// ── computer_click / computer_type — gated, deterministic, zero inference ──────
+
+describe("computer_click / computer_type — gated, zero inference", () => {
+  it("makeComputerUseTools returns exactly 3 tools", () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const tools = makeComputerUseTools(fake.runner, gateway);
+    expect(tools.map((t) => t.name).sort()).toEqual(
+      ["computer_click", "computer_screenshot", "computer_type"].sort(),
+    );
+  });
+
+  it("registers risk metadata: computer_click/computer_type are mac_action, computer_screenshot is read_only", () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    makeComputerUseTools(fake.runner, gateway);
+    expect(getToolMeta("computer_click")?.sideEffects).toBe("mac_action");
+    expect(getToolMeta("computer_type")?.sideEffects).toBe("mac_action");
+    expect(getToolMeta("computer_screenshot")?.sideEffects).toBe("read_only");
+  });
+
+  it("gated: computer_click issues 0 gateway calls and exactly one clickAt runner interaction", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [{ stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false }];
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_click");
+
+    const result = (await tool.run({ x: 100, y: 200, element: "Save button" })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(true);
+    expect(gateway.calls.length).toBe(0);
+    expect(fake.calls.length).toBe(1);
+    expect(fake.calls[0]!.cmd).toBe("/usr/bin/osascript");
+  });
+
+  it("gated: computer_type issues 0 gateway calls", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [
+      { stdout: JSON.stringify({ focusedRole: "AXTextField" }), stderr: "", exitCode: 0, timedOut: false },
+      { stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false },
+    ];
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_type");
+
+    const result = (await tool.run({ text: "hello", element: "search box" })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(true);
+    expect(gateway.calls.length).toBe(0);
+  });
+
+  it("computer_click rejects a negative coordinate with 0 runner calls", async () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_click");
+    await expect(tool.run({ x: -5, y: 10, element: "x" })).rejects.toThrow();
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("computer_click rejects a non-integer coordinate with 0 runner calls", async () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_click");
+    await expect(tool.run({ x: 1.5, y: 10, element: "x" })).rejects.toThrow();
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("computer_type refuses a focused secure field — the secret text never reaches recorded argv", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [
+      { stdout: JSON.stringify({ focusedRole: "AXSecureTextField" }), stderr: "", exitCode: 0, timedOut: false },
+    ];
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_type");
+
+    const result = (await tool.run({
+      text: "super-secret-password",
+      element: "password field",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/secure field/i);
+    expect(JSON.stringify(fake.calls)).not.toContain("super-secret-password");
+  });
+
+  it("computer_type's description states credentials are never typed", () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_type");
+    expect(tool.description).toMatch(/never types? credentials/i);
   });
 });
