@@ -39,6 +39,13 @@
  *     mac_open              readOnly:false  → GATED (mac_action)
  *     mac_run_script        readOnly:false  → GATED (mac_action)
  *     mac_run_shortcut      readOnly:false  → GATED (mac_action)
+ *
+ *   Mac control (Tier 2 — Accessibility, phase 15 — optional, same injected
+ *   MacCommandRunner):
+ *     mac_ui_snapshot       readOnly:true
+ *     mac_ui_click          readOnly:false  → GATED (mac_action)
+ *     mac_ui_type           readOnly:false  → GATED (mac_action)
+ *     mac_ui_press_key      readOnly:false  → GATED (mac_action)
  */
 
 import type { ToolRegistry } from "@jarvis/agent";
@@ -64,6 +71,7 @@ import {
 import { makeBrowserTools } from "./browserTools.js";
 import type { McpToolClient } from "../../mcp/playwrightMcp.js";
 import { makeMacTools } from "./macTools.js";
+import { makeMacUiTools } from "./macUiTools.js";
 import type { MacCommandRunner } from "../../mac/commandRunner.js";
 
 export function buildToolRegistry(
@@ -95,6 +103,8 @@ export function buildToolRegistry(
     ...(browser ? makeBrowserTools(browser) : []),
     // Mac control (Tier 1) — only when a command runner is wired
     ...(macRun ? makeMacTools(macRun) : []),
+    // Mac control (Tier 2 — Accessibility) — only when a command runner is wired
+    ...(macRun ? makeMacUiTools(macRun) : []),
   ];
 
   const registry: ToolRegistry = new Map(tools.map((t) => [t.name, t]));
