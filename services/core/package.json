@@ -15,6 +15,7 @@
     "chat": "tsx src/cli/chat.ts",
     "connect": "tsx src/cli/connect.ts",
     "voice": "tsx src/cli/voice.ts",
+    "eval:browser-use": "tsx src/cli/evalBrowserUse.ts",
     "test": "vitest run"
   },
   "dependencies": {
