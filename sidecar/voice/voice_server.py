@@ -694,6 +694,14 @@ async def stt_stream(ws: WebSocket) -> None:
             )
             for event in events:
                 await _send(event)
+                # Silero's speech_start opens the Deepgram text segment: the
+                # session discards anything Deepgram transcribed OUTSIDE a
+                # Silero segment (speaker echo, noise, late tails of already-
+                # finalized segments) instead of banking it into this one
+                # (live defect: duplicated/garbled finals — see
+                # .planning/debug/deepgram-stt-live-defects.md).
+                if use_deepgram and event.get("type") == "speech_start":
+                    session.begin_segment()
                 # speech_end is sent BEFORE the Finalize flush is awaited —
                 # this ordering is load-bearing (the orchestrator commits
                 # finals only after it has seen the segment's speech_end).

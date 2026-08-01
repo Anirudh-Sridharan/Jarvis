@@ -47,6 +47,22 @@ SAMPLE_RATE = 16000
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
 DEFAULT_FINALIZE_TIMEOUT_S = 0.6
 
+# Silero's speech_start fires MIN_SPEECH_FRAMES (3 x 32 ms ≈ 96 ms) after real
+# speech onset, and Deepgram word timings are endpointing-quantized — so a
+# result whose audio window ends up to this margin BEFORE the Silero segment
+# start is still treated as belonging to the segment. Anything older is a
+# stale leftover of a previous segment (or inter-segment junk) and is dropped.
+SEGMENT_START_MARGIN_S = 0.5
+
+# A segment's stream-time end includes Silero's ~480 ms silence hangover, and
+# Deepgram's last word ends before that silence — so decoded coverage within
+# this slack of the segment end means "Deepgram has decoded the whole
+# segment". Used by finalize_segment's bounded coverage wait (live defect:
+# Deepgram decodes bursted audio at ~real-time, so after a stall its decode
+# position lags the local Silero clock and a blind Finalize flush truncates
+# the transcript — see .planning/debug/deepgram-stt-live-defects.md).
+FINALIZE_COVERAGE_SLACK_S = 1.0
+
 # Exception descriptions are truncated to this many characters before being
 # logged/stored in last_error — Deepgram/websockets exception text is
 # external-ish (can echo request details) and must stay bounded (T-13.2-01).
@@ -84,13 +100,22 @@ def build_listen_url(model: str = DEFAULT_MODEL, sample_rate: int = SAMPLE_RATE)
 
 
 class DgResult(NamedTuple):
-    """One parsed Deepgram ``Results`` message."""
+    """One parsed Deepgram ``Results`` message.
+
+    ``start``/``duration`` are the message's audio window in STREAM seconds
+    (time since the first byte sent on the connection) — Deepgram reports
+    them on every Results message. They are what lets the session reject
+    results that belong to an already-finalized segment (default 0.0 when a
+    message lacks them, which disables the staleness check for that result).
+    """
 
     transcript: str
     confidence: float
     is_final: bool
     speech_final: bool
     from_finalize: bool
+    start: float = 0.0
+    duration: float = 0.0
 
 
 def parse_results(msg: dict) -> Optional[DgResult]:
@@ -123,12 +148,20 @@ def parse_results(msg: dict) -> Optional[DgResult]:
         if confidence is None:
             confidence = 0.0
 
+        def _as_float(value: Any) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
         return DgResult(
             transcript=str(transcript),
             confidence=float(confidence),
             is_final=bool(msg.get("is_final", False)),
             speech_final=bool(msg.get("speech_final", False)),
             from_finalize=bool(msg.get("from_finalize", False)),
+            start=_as_float(msg.get("start", 0.0)),
+            duration=_as_float(msg.get("duration", 0.0)),
         )
     except Exception:  # noqa: BLE001 — external JSON must never raise into the caller
         return None
@@ -160,7 +193,9 @@ class SegmentAccumulator:
             return None
 
         composed = self._compose(result.transcript)
-        if composed == self._last_partial_text:
+        if composed == self._last_partial_text or composed == "":
+            # Empty-composed interims (e.g. the first interim of a segment
+            # before any words locked in) must not emit a blank partial frame.
             return None
         self._last_partial_text = composed
         return {"type": "partial", "text": composed, "stability": 0.5}
@@ -236,6 +271,19 @@ class DeepgramSttSession:
         self._partial_queue: "asyncio.Queue[dict]" = asyncio.Queue()
         self._finalize_event = asyncio.Event()
 
+        # Segment lifecycle (live defect fix — see
+        # .planning/debug/deepgram-stt-live-defects.md). The accumulator is
+        # only allowed to bank results while a Silero segment is OPEN
+        # (begin_segment .. finalize_segment) and only for results whose
+        # audio window overlaps that segment. Everything else — junk Deepgram
+        # transcribed between Silero segments (speaker echo, noise) and late
+        # tails of already-finalized segments still decoding after a burst —
+        # is dropped instead of leaking into the NEXT segment's final.
+        self._bytes_sent: int = 0
+        self._segment_open: bool = False
+        self._segment_start_s: float = 0.0
+        self._covered_end_s: float = 0.0
+
     @property
     def alive(self) -> bool:
         return self._alive
@@ -243,6 +291,37 @@ class DeepgramSttSession:
     @property
     def last_error(self) -> Optional[str]:
         return self._last_error
+
+    def _stream_pos_s(self) -> float:
+        """Seconds of audio sent on this connection — Deepgram's stream clock.
+
+        Aligned with the ``start``/``duration`` fields Deepgram reports on
+        every Results message, because every byte Deepgram hears went through
+        ``send_audio``.
+        """
+        return self._bytes_sent / (2.0 * self._sample_rate)
+
+    def begin_segment(self) -> None:
+        """Open a new Silero segment (called on Silero's ``speech_start``).
+
+        Discards anything banked between segments — by construction that text
+        is either a late-decoded tail of an already-finalized segment or
+        audio Silero never classified as speech (speaker echo, noise). Safe
+        because Silero's local speech_start always precedes Deepgram's first
+        result for the same audio (network + decode latency), so no
+        current-segment text can have been banked yet.
+        """
+        self._accumulator.reset()
+        self.drain_partials()  # stale queued partials must not follow a final
+        self._segment_open = True
+        self._segment_start_s = max(0.0, self._stream_pos_s() - SEGMENT_START_MARGIN_S)
+        self._covered_end_s = 0.0
+
+    def _is_stale(self, result: DgResult) -> bool:
+        """True when ``result``'s audio window ended before this segment began."""
+        if result.start <= 0.0 and result.duration <= 0.0:
+            return False  # no timing info — trust it rather than drop text
+        return (result.start + result.duration) < self._segment_start_s
 
     async def connect(self) -> bool:
         """Open the Deepgram WebSocket and start the receive loop.
@@ -299,12 +378,33 @@ class DeepgramSttSession:
                 if result is None:
                     continue
 
+                # Every finalized result wakes a pending finalize_segment
+                # wait — it re-checks decoded coverage and keeps waiting (up
+                # to its bounded budget) when Deepgram's decode position is
+                # still behind the segment end (post-stall burst catch-up).
+                if result.is_final:
+                    self._finalize_event.set()
+
+                if not self._segment_open:
+                    # No Silero segment open: this is inter-segment junk
+                    # (speaker echo / noise Silero never segmented) or the
+                    # late tail of an already-finalized segment. Banking it
+                    # would prepend it to the NEXT segment's final.
+                    continue
+                if self._is_stale(result):
+                    # Segment is open, but this result's audio window ended
+                    # before the segment began — a previous segment's
+                    # late-decoded text arriving during the current one.
+                    continue
+
                 partial = self._accumulator.feed(result)
                 if partial is not None:
                     self._partial_queue.put_nowait(partial)
 
-                if result.from_finalize or result.speech_final:
-                    self._finalize_event.set()
+                if result.is_final:
+                    self._covered_end_s = max(
+                        self._covered_end_s, result.start + result.duration
+                    )
         except Exception as exc:  # noqa: BLE001 — connection drop must not raise
             self._last_error = _truncate_error(exc)
             log.debug("Deepgram STT receive loop ended: %s", self._last_error)
@@ -317,6 +417,7 @@ class DeepgramSttSession:
             return False
         try:
             await self._ws.send(pcm)
+            self._bytes_sent += len(pcm)
             return True
         except Exception as exc:  # noqa: BLE001
             self._alive = False
@@ -336,32 +437,55 @@ class DeepgramSttSession:
     async def finalize_segment(self) -> Optional[dict]:
         """Force-flush the current segment and return the ``final`` frame.
 
-        Sends the documented ``{"type": "Finalize"}`` control message, waits
-        up to ``finalize_timeout_s`` for Deepgram's flush acknowledgement,
-        then returns ``accumulator.take_final()`` regardless of whether the
-        wait timed out — a timeout means "use whatever was already
-        finalized", not "lose the turn". Never raises.
+        Sends the documented ``{"type": "Finalize"}`` control message, then
+        waits — bounded by ``finalize_timeout_s`` — until the finalized
+        results banked for this segment COVER the segment's audio (within
+        ``FINALIZE_COVERAGE_SLACK_S`` of the stream position at speech_end).
+        A plain "wait for the first flush ack" is not enough: Deepgram
+        decodes at ~real-time, so after a stall-induced burst its flush
+        response covers only a PREFIX of the segment and the rest arrives in
+        later Results (live defect: truncated finals). Each incoming
+        finalized result re-checks coverage; on timeout the segment returns
+        whatever was banked — "use what we have", never "lose the turn".
+        Closes the segment either way (late results are dropped by the
+        receive loop, not banked into the next segment). Never raises.
         """
         if not self._alive or self._ws is None:
+            self._segment_open = False
             return self._accumulator.take_final()
 
+        segment_end_s = self._stream_pos_s()
         self._finalize_event.clear()
         started = time.monotonic()
+        deadline = started + self._finalize_timeout_s
         flushed = False
         try:
             await self._ws.send(json.dumps({"type": "Finalize"}))
-            try:
-                await asyncio.wait_for(self._finalize_event.wait(), timeout=self._finalize_timeout_s)
-                flushed = True
-            except asyncio.TimeoutError:
-                flushed = False
+            while True:
+                if self._covered_end_s >= segment_end_s - FINALIZE_COVERAGE_SLACK_S:
+                    flushed = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(self._finalize_event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                self._finalize_event.clear()
         except Exception as exc:  # noqa: BLE001 — send failure: use whatever is banked
             self._alive = False
             self._last_error = _truncate_error(exc)
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        log.debug("Deepgram STT finalize: flushed=%s elapsed_ms=%d", flushed, elapsed_ms)
-        return self._accumulator.take_final()
+        log.debug(
+            "Deepgram STT finalize: flushed=%s elapsed_ms=%d covered=%.2fs segment_end=%.2fs",
+            flushed, elapsed_ms, self._covered_end_s, segment_end_s,
+        )
+        self._segment_open = False
+        final_frame = self._accumulator.take_final()
+        self.drain_partials()  # partials for a finalized segment must not follow its final
+        return final_frame
 
     async def close(self) -> None:
         """Best-effort close: CloseStream control message, socket close, task cancel."""
@@ -381,3 +505,4 @@ class DeepgramSttSession:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         self._alive = False
+        self._segment_open = False
