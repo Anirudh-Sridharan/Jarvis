@@ -4,7 +4,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { makeWebExtractTool, MAX_EXTRACT_BYTES } from "../src/agent/tools/webExtractTool.js";
+import {
+  makeWebExtractTool,
+  MAX_EXTRACT_BYTES,
+  MAX_EXTRACT_READ_BYTES,
+} from "../src/agent/tools/webExtractTool.js";
 import { webFetchTool } from "../src/agent/tools/webResearchTools.js";
 import { buildToolRegistry } from "../src/agent/tools/index.js";
 import { getToolMeta } from "@jarvis/agent";
@@ -242,6 +246,72 @@ describe("web_extract (Firecrawl)", () => {
     expect(result.truncated).toBe(true);
     expect(result.markdown.length).toBeLessThanOrEqual(MAX_EXTRACT_BYTES + 50);
     expect(result.markdown).toContain("[truncated");
+  });
+
+  it("stops reading a chunk-streamed body at the MAX_EXTRACT_READ_BYTES wire cap and degrades to ok:false", async () => {
+    // A body far past the wire cap: the reader loop must stop pulling chunks at
+    // the cap (never buffering the rest), leaving a mid-JSON prefix that fails
+    // parse — the structured ok:false degrade path, not a throw or a hang.
+    const bigEnvelope = JSON.stringify({
+      success: true,
+      data: { markdown: "y".repeat(MAX_EXTRACT_READ_BYTES * 2) },
+    });
+    let chunksServed = 0;
+    const chunkSize = 64 * 1024;
+    const bytes = new TextEncoder().encode(bigEnvelope);
+    let offset = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= bytes.length) {
+          controller.close();
+          return;
+        }
+        chunksServed++;
+        controller.enqueue(bytes.slice(offset, offset + chunkSize));
+        offset += chunkSize;
+      },
+    });
+    const tool = makeWebExtractTool(
+      fakeFetch(() => new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } })),
+    );
+
+    const result = (await tool.run({ url: "https://example.com" })) as { ok: boolean };
+
+    expect(result.ok).toBe(false);
+    // The cap stops the read: only ~MAX_EXTRACT_READ_BYTES/chunkSize chunks are
+    // ever pulled off the wire, not the whole 512 KB+ body.
+    expect(chunksServed * chunkSize).toBeLessThan(bytes.length);
+    expect(chunksServed).toBeLessThanOrEqual(Math.ceil(MAX_EXTRACT_READ_BYTES / chunkSize) + 1);
+  });
+
+  it("still parses a chunk-streamed body under the wire cap (streaming reader is not lossy)", async () => {
+    const markdown = "# Streamed\n" + "z".repeat(10_000);
+    const bytes = new TextEncoder().encode(JSON.stringify({ success: true, data: { markdown } }));
+    const chunkSize = 1024;
+    let offset = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= bytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.slice(offset, offset + chunkSize));
+        offset += chunkSize;
+      },
+    });
+    const tool = makeWebExtractTool(
+      fakeFetch(() => new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } })),
+    );
+
+    const result = (await tool.run({ url: "https://example.com" })) as {
+      ok: boolean;
+      markdown: string;
+      truncated: boolean;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.markdown).toBe(markdown);
+    expect(result.truncated).toBe(false);
   });
 
   it("rejects non-http(s) URLs before ever calling fetch", async () => {

@@ -24,6 +24,13 @@ import { registerToolMeta } from "@jarvis/agent";
  * MAX_FETCH_BYTES (full-page prose, not an accessibility tree). */
 export const MAX_EXTRACT_BYTES = 50_000;
 
+/** Hard cap on bytes pulled off the wire — stop streaming past this, never
+ * buffer an arbitrarily large (or slow-loris) body before slicing. Mirrors
+ * webResearchTools.ts's MAX_READ_BYTES; comfortably above the expected
+ * Firecrawl JSON envelope (~50 KB markdown + metadata). A response capped
+ * mid-JSON fails the parse and degrades to a structured ok:false. */
+export const MAX_EXTRACT_READ_BYTES = 256 * 1024;
+
 const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
 
 /** AbortController backstop for a hung connection. Must stay strictly above
@@ -69,11 +76,35 @@ interface FirecrawlScrapeBody {
   };
 }
 
+/** Stream-read the body up to MAX_EXTRACT_READ_BYTES, then stop — same reader
+ * loop as webResearchTools.ts's web_fetch. The AbortController bounds *time*;
+ * this bounds *bytes* (plenty of bytes fit in 40 s). */
+async function readBodyCapped(response: Response): Promise<string> {
+  const body = response.body;
+  if (!body) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytesRead = 0;
+  const reader = body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytesRead += value.byteLength;
+    text += decoder.decode(value, { stream: true });
+    if (bytesRead >= MAX_EXTRACT_READ_BYTES) {
+      await reader.cancel().catch(() => {});
+      break;
+    }
+  }
+  text += decoder.decode();
+  return text;
+}
+
 /** Read + JSON-parse a response body defensively — a non-JSON body (or one
  * that fails to read at all) must never throw a SyntaxError into the loop. */
 async function readJsonSafe(response: Response): Promise<FirecrawlScrapeBody | null> {
   try {
-    const text = await response.text();
+    const text = await readBodyCapped(response);
     return JSON.parse(text) as FirecrawlScrapeBody;
   } catch {
     return null;
