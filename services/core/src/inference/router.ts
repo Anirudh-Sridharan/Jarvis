@@ -152,8 +152,17 @@ export class Router {
     estPromptTokens: number,
   ): RoutingDecision {
     // pre-flight RAM guard: a local pick with no headroom is downgraded to
-    // the hint's configured cloud provider
-    if (target === "local" && this.ram.headroomGB() < this.cfg.ramFloorGB) {
+    // the hint's configured cloud provider. FORCED picks are exempt (WR-02):
+    // rule 1 is "forceTarget set -> honor it", and forceTarget:"local" is
+    // plausibly a privacy/cost decision ("do not send this to the cloud") —
+    // silently rerouting it to a cloud provider breaks that contract. A
+    // forced-local pick under pressure fails loudly at load time instead
+    // (the gateway's fallback paths carry the same exemption).
+    if (
+      reason !== "forced" &&
+      target === "local" &&
+      this.ram.headroomGB() < this.cfg.ramFloorGB
+    ) {
       target = this.cloudTargetFor(hint);
       reason = "local-unavailable-fallback";
     }

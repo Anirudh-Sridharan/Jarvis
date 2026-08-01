@@ -163,6 +163,16 @@ export class InferenceGateway {
         this.modelManager.setFallbackActive(false);
         yield { type: "status", state: "ready" };
       } catch (err) {
+        // WR-02: an explicit local pin is a privacy/cost contract — never
+        // silently ship a forceTarget:"local" request to a cloud provider.
+        // Fail loudly instead.
+        if (req.forceTarget === "local") {
+          yield {
+            type: "error",
+            message: `Local model failed to load and forceTarget="local" forbids cloud fallback: ${errMsg(err)}`,
+          };
+          return;
+        }
         // Load failure -> fall back to the task hint's configured cloud
         // provider for this request (local-unavailable-fallback).
         const cloudTarget = this.router.cloudTargetFor(req.taskHint);
@@ -209,8 +219,16 @@ export class InferenceGateway {
     } catch (err) {
       // Runtime failure on the LOCAL path BEFORE any token -> retry once on
       // the task hint's configured cloud provider (oom-fallback). After
-      // tokens have flown we cannot cleanly restart.
-      if (target === "local" && !firstTokenSeen && !signal?.aborted) {
+      // tokens have flown we cannot cleanly restart. forceTarget:"local"
+      // requests are exempt (WR-02): an explicit local pin must never be
+      // silently shipped to a cloud provider — they fall through to the
+      // structured error below instead.
+      if (
+        target === "local" &&
+        !firstTokenSeen &&
+        !signal?.aborted &&
+        req.forceTarget !== "local"
+      ) {
         const cloudTarget = this.router.cloudTargetFor(req.taskHint);
         const cloudEntry = this.tryDefault(cloudTarget);
         if (cloudEntry) {

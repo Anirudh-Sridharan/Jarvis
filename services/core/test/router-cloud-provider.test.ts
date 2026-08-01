@@ -207,6 +207,14 @@ describe("Router.resolve — task-class routing matrix", () => {
     expect(decision.reason).toBe("forced");
   });
 
+  it('forceTarget="local" under RAM pressure is NOT downgraded to cloud — the privacy pin holds (WR-02)', () => {
+    const lowRam: RamProbe = { headroomGB: () => 0.5, totalGB: () => 16 };
+    const router = new Router(makeRegistry(), lowRam, makeRoutingConfig({ ramFloorGB: 2 }));
+    const decision = router.resolve(request("chat", "do not send this to the cloud", "local"));
+    expect(decision.target).toBe("local");
+    expect(decision.reason).toBe("forced");
+  });
+
   it("SC1 heart — a config rebalance (consolidation -> anthropic) flips the resolved target with ZERO code change", () => {
     const rebalanced = makeRoutingConfig({
       cloudTaskProviders: { consolidation: "anthropic", reasoning: "anthropic", agent: "anthropic" },

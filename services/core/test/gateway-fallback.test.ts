@@ -92,7 +92,10 @@ interface CallCounters {
 
 interface BuildGatewayOpts {
   cloudFails: boolean;
+  /** Model LOAD failure — modelManager.ensureReady throws (lifecycle gate). */
   localFails?: boolean;
+  /** RUNTIME failure — load succeeds but streamChat throws before any token (oom-fallback path). */
+  localRuntimeFails?: boolean;
   cloudTarget: CloudTarget;
 }
 
@@ -132,7 +135,7 @@ function buildGateway(opts: BuildGatewayOpts): { gw: InferenceGateway; calls: Ca
   (gw as any).mlx = {
     streamChat: async function* (): AsyncGenerator<string> {
       calls.mlx++;
-      if (opts.localFails) throw new Error("sidecar down");
+      if (opts.localFails || opts.localRuntimeFails) throw new Error("sidecar down");
       yield* speaking();
     },
   };
@@ -228,6 +231,44 @@ describe("cloud-pinned consolidation (CR-01)", () => {
     expect(gw.modelManager.isFallbackActive()).toBe(false);
     expect(calls.anthropic).toBe(0);
     expect(calls.mlx).toBe(0);
+  });
+});
+
+// ── WR-02: forceTarget:"local" is a privacy/cost pin — the request must ──
+// NEVER be silently shipped to a cloud provider, whatever fails.
+describe('forceTarget="local" privacy pin (WR-02)', () => {
+  const forcedLocalReq = {
+    messages: [{ role: "user" as const, content: "keep this on-device" }],
+    taskHint: "chat" as const,
+    forceTarget: "local" as const,
+  };
+
+  it("a local LOAD failure yields a structured error — no cloud provider is ever called", async () => {
+    const { gw, calls } = buildGateway({ cloudFails: false, localFails: true, cloudTarget: "fireworks" });
+    const chunks = await collect(gw.chat(forcedLocalReq));
+
+    const error = chunks.find((c) => c.type === "error") as { message: string } | undefined;
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('forceTarget="local"');
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
+    expect(calls.fireworks).toBe(0);
+    expect(calls.anthropic).toBe(0);
+  });
+
+  it("a local RUNTIME failure before any token yields a structured error — no cloud provider is ever called", async () => {
+    const { gw, calls } = buildGateway({
+      cloudFails: false,
+      localRuntimeFails: true,
+      cloudTarget: "fireworks",
+    });
+    const chunks = await collect(gw.chat(forcedLocalReq));
+
+    const error = chunks.find((c) => c.type === "error") as { message: string } | undefined;
+    expect(error).toBeDefined();
+    expect(error!.message).toContain("sidecar down");
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
+    expect(calls.fireworks).toBe(0);
+    expect(calls.anthropic).toBe(0);
   });
 });
 
