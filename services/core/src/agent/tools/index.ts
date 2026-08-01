@@ -31,6 +31,14 @@
  *     browser_click         readOnly:false  → GATED (browser_action)
  *     browser_type          readOnly:false  → GATED (browser_action)
  *     browser_press_key     readOnly:false  → GATED (browser_action)
+ *
+ *   Mac control (Tier 1, phase 15 — optional, injected MacCommandRunner):
+ *     mac_list_apps         readOnly:true
+ *     mac_frontmost_app     readOnly:true
+ *     mac_list_shortcuts    readOnly:true
+ *     mac_open              readOnly:false  → GATED (mac_action)
+ *     mac_run_script        readOnly:false  → GATED (mac_action)
+ *     mac_run_shortcut      readOnly:false  → GATED (mac_action)
  */
 
 import type { ToolRegistry } from "@jarvis/agent";
@@ -55,11 +63,15 @@ import {
 } from "./emailTools.js";
 import { makeBrowserTools } from "./browserTools.js";
 import type { McpToolClient } from "../../mcp/playwrightMcp.js";
+import { makeMacTools } from "./macTools.js";
+import type { MacCommandRunner } from "../../mac/commandRunner.js";
 
 export function buildToolRegistry(
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email">,
   /** Feature 18 browser slice: when provided, the six browser tools are added. */
   browser?: McpToolClient | null,
+  /** Phase 15 Tier 1: when provided, the six Mac-control tools are added. */
+  macRun?: MacCommandRunner | null,
 ): ToolRegistry {
   const tools = [
     // Calendar
@@ -81,6 +93,8 @@ export function buildToolRegistry(
     makeEmailDraftTool(integrations),
     // Browser (Playwright MCP) — only when a client is wired
     ...(browser ? makeBrowserTools(browser) : []),
+    // Mac control (Tier 1) — only when a command runner is wired
+    ...(macRun ? makeMacTools(macRun) : []),
   ];
 
   const registry: ToolRegistry = new Map(tools.map((t) => [t.name, t]));
