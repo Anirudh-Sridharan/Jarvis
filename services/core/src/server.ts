@@ -470,8 +470,13 @@ if (!process.env["VITEST"]) {
   serve({ fetch: app.fetch, hostname: "127.0.0.1", port }, (info) => {
     console.error(`[core] Jarvis core listening on http://127.0.0.1:${info.port}`);
     console.error(`[core] MLX sidecar: ${config.env.mlxSidecarUrl}`);
+    const { cloudTaskProviders } = config.routing;
+    const keyStatus = (set: boolean): string => (set ? "set" : "missing");
     console.error(
-      `[core] HF endpoint: ${config.env.hfEndpointUrl ?? "(not configured)"}`,
+      `[core] Cloud lane: consolidation->${cloudTaskProviders.consolidation}, ` +
+        `reasoning->${cloudTaskProviders.reasoning}, agent->${cloudTaskProviders.agent} ` +
+        `(fireworks key: ${keyStatus(Boolean(config.env.fireworksApiKey))}, ` +
+        `anthropic key: ${keyStatus(Boolean(config.env.anthropicApiKey))})`,
     );
   });
 

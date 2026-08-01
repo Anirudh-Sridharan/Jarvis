@@ -3,14 +3,23 @@
  *
  * Rule order (must not change — see feature 1 spec "Local vs cloud routing"):
  *   1. forceTarget set            -> honor it (reason: forced)
- *   5. estPromptTokens > localCtxSafe -> hf (token-overflow)   [hard ceiling]
- *   2. consolidation | reasoning  -> hf (task-cloud)
+ *   5. estPromptTokens > localCtxSafe -> cloud (token-overflow)   [hard ceiling]
+ *   2. consolidation | reasoning  -> cloud (task-cloud)
  *   3. voice | chat               -> local (task-local)
- *   4. agent                      -> local, escalate to hf on token/latency budget
+ *   4. agent                      -> cloud by default (agentPreferCloud, D-04),
+ *                                    or local-first with escalation on
+ *                                    token/latency budget when agentPreferCloud
+ *                                    is false
  *   6. embedding | rerank         -> local (task-local)
  *
+ * Which CLOUD PROVIDER serves a cloud-bound task hint is config-driven —
+ * see cloudTargetFor() below, the single place that answers "which cloud
+ * provider serves this task hint" (routing.cloudTaskProviders /
+ * routing.defaultCloudProvider). The gateway calls it too, so the map is
+ * never duplicated.
+ *
  * Pre-flight RAM guard in decide(): a local pick with no headroom is downgraded
- * to HF (local-unavailable-fallback).
+ * to the hint's configured cloud provider (local-unavailable-fallback).
  */
 import type { RoutingConfig } from "../config.js";
 import type { RamProbe } from "./ram.js";
@@ -18,6 +27,7 @@ import type { Registry } from "./registry.js";
 import { estimateRequestTokens } from "./tokens.js";
 import { logRouting } from "./telemetry.js";
 import type {
+  CloudTarget,
   JarvisInferenceRequest,
   ModelKind,
   RoutingDecision,
@@ -45,6 +55,25 @@ export class Router {
     private readonly cfg: RoutingConfig,
   ) {}
 
+  /**
+   * Which cloud provider serves a given task hint (D-04). Single source of
+   * truth for cloud selection — the gateway reuses this instead of
+   * duplicating the map. A switch (not an index expression) keeps
+   * noUncheckedIndexedAccess satisfied.
+   */
+  cloudTargetFor(hint: TaskHint): CloudTarget {
+    switch (hint) {
+      case "consolidation":
+        return this.cfg.cloudTaskProviders.consolidation;
+      case "reasoning":
+        return this.cfg.cloudTaskProviders.reasoning;
+      case "agent":
+        return this.cfg.cloudTaskProviders.agent;
+      default:
+        return this.cfg.defaultCloudProvider;
+    }
+  }
+
   resolve(req: JarvisInferenceRequest): RoutingDecision {
     const estPromptTokens = estimateRequestTokens(req.messages, req.tools);
 
@@ -55,27 +84,46 @@ export class Router {
 
     // 5. hard context ceiling — overrides task preference
     if (estPromptTokens > this.cfg.localCtxSafe) {
-      return this.decide("hf", req.taskHint, "token-overflow", estPromptTokens);
+      return this.decide(
+        this.cloudTargetFor(req.taskHint),
+        req.taskHint,
+        "token-overflow",
+        estPromptTokens,
+      );
     }
 
     switch (req.taskHint) {
       // 2. heavy / long agentic work -> cloud (don't throttle the fanless Air)
       case "consolidation":
       case "reasoning":
-        return this.decide("hf", req.taskHint, "task-cloud", estPromptTokens);
+        return this.decide(
+          this.cloudTargetFor(req.taskHint),
+          req.taskHint,
+          "task-cloud",
+          estPromptTokens,
+        );
 
       // 3. latency-critical short turns -> local
       case "voice":
       case "chat":
         return this.decide("local", req.taskHint, "task-local", estPromptTokens);
 
-      // 4. agent: local by default, escalate on token/latency budget
+      // 4. agent: cloud by default (agentPreferCloud, D-04); when disabled,
+      // local-first with escalation on token/latency budget.
       case "agent": {
+        if (this.cfg.agentPreferCloud) {
+          return this.decide(
+            this.cloudTargetFor("agent"),
+            "agent",
+            "task-cloud",
+            estPromptTokens,
+          );
+        }
         const overBudget =
           estPromptTokens > this.cfg.agentLocalTokenCap ||
           this.expectLoopOverLatencyBudget(req);
         return overBudget
-          ? this.decide("hf", "agent", "token-overflow", estPromptTokens)
+          ? this.decide(this.cloudTargetFor("agent"), "agent", "token-overflow", estPromptTokens)
           : this.decide("local", "agent", "task-local", estPromptTokens);
       }
 
@@ -103,9 +151,10 @@ export class Router {
     reason: RoutingReason,
     estPromptTokens: number,
   ): RoutingDecision {
-    // pre-flight RAM guard: a local pick with no headroom is downgraded to HF
+    // pre-flight RAM guard: a local pick with no headroom is downgraded to
+    // the hint's configured cloud provider
     if (target === "local" && this.ram.headroomGB() < this.cfg.ramFloorGB) {
-      target = "hf";
+      target = this.cloudTargetFor(hint);
       reason = "local-unavailable-fallback";
     }
     const modelId = this.registry.defaultFor(kindFor(hint), target).id;

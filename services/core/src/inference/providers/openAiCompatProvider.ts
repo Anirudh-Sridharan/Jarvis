@@ -81,7 +81,7 @@ export class OpenAiCompatProvider implements ChatProvider {
         model: opts.modelRef,
         messages: opts.messages,
         ...(opts.tools ? { tools: opts.tools } : {}),
-        // ALWAYS present (unlike HfProvider's conditional spread): Anthropic's
+        // ALWAYS present (unlike a conditional spread): Anthropic's
         // OpenAI-compat layer rejects requests with no max_tokens (Pitfall 1).
         max_tokens: opts.maxTokens ?? this.opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
         stream: true,
