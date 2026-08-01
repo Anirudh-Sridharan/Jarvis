@@ -168,6 +168,10 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
       try {
         const due = integrations.scheduler.getDueConnectors(integrations.connectors.list());
         const results: string[] = [];
+        // WR-08: track outcomes STRUCTURALLY (SyncRun.status), not by
+        // substring-matching human-readable messages — a connector failing on
+        // every cron run must not be recorded as a successful job.
+        const runStatuses: string[] = [];
         for (const connector of due) {
           // Belt-and-suspenders pre-flight (Pitfall 3): skip if a run for this
           // source is already in flight — covers the cross-process race with a
@@ -179,10 +183,14 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
             continue;
           }
           const run = await integrations.scheduler.runSync(connector, http, tokenStore, "schedule");
+          runStatuses.push(run.status);
           results.push(`${connector.id}: ${run.status}`);
         }
+        const failed = runStatuses.filter((s) => s === "error").length;
+        const status =
+          failed === 0 ? "done" : failed === runStatuses.length ? "failed" : "partial";
         return {
-          status: "done",
+          status,
           summary: results.join("; ") || "nothing due",
           episodicUpdate: { lastDecision: `sync-connectors:${new Date().toISOString()}` },
         };
@@ -207,6 +215,11 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
 
     async handler(_ctx) {
       const notes: string[] = [];
+      // WR-08: outcome booleans set in each catch — never substring-match the
+      // human-readable notes. An EXPECTED unconfigured source (no vault/files
+      // path, gmail not connected) is a skip, not a failure: a machine with no
+      // Gmail consent must report "done", not "partial" forever.
+      let anyFailed = false;
       const { vaultDir, filesDir } = capturePaths;
 
       if (vaultDir) {
@@ -214,6 +227,7 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
           const r = await runVaultIngest({ memory, vaultDir });
           notes.push(`obsidian: +${r.captured} (${r.errors} errors)`);
         } catch (err) {
+          anyFailed = true;
           notes.push(`obsidian: failed (${errMsg(err)})`);
         }
       }
@@ -222,20 +236,29 @@ export function registerProactiveTriggers(deps: ProactiveBootstrapDeps): {
           const r = await runFilesIngest({ memory, dir: filesDir });
           notes.push(`files: +${r.chunks} chunks`);
         } catch (err) {
+          anyFailed = true;
           notes.push(`files: failed (${errMsg(err)})`);
         }
       }
-      // runEmailIngest does NOT catch email.search() failures internally (unlike
-      // vault/files, which degrade on a missing/unreadable directory) — this
-      // try/catch is load-bearing (Pitfall 4).
-      try {
-        const r = await runEmailIngest({ memory, email: integrations.email });
-        notes.push(`email: +${r.chunks} chunks`);
-      } catch (err) {
-        notes.push(`email: skipped (${errMsg(err)})`);
+      // Pre-flight: is Gmail even connected? (structural check against the
+      // token store, mirroring how the sync path decides). Not connected =
+      // expected skip; connected-but-throwing = real failure.
+      const gmailConnected = Boolean(await tokenStore.get("gmail").catch(() => null));
+      if (gmailConnected) {
+        // runEmailIngest does NOT catch email.search() failures internally
+        // (unlike vault/files, which degrade on a missing/unreadable
+        // directory) — this try/catch is load-bearing (Pitfall 4).
+        try {
+          const r = await runEmailIngest({ memory, email: integrations.email });
+          notes.push(`email: +${r.chunks} chunks`);
+        } catch (err) {
+          anyFailed = true;
+          notes.push(`email: failed (${errMsg(err)})`);
+        }
+      } else {
+        notes.push("email: skipped (gmail not connected)");
       }
 
-      const anyFailed = notes.some((n) => n.includes("failed") || n.includes("skipped"));
       return {
         status: anyFailed ? "partial" : "done",
         summary: notes.join("; ") || "no sources configured",
