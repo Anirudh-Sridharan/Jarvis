@@ -41,6 +41,14 @@ Nine cases are asserted:
        "Alex") is suppressed via the word-confidence tier, (d) after the
        window expires the same echo-similar text passes unaffected, and
        (e) the faster-whisper fallback path is gated identically.
+       Vacuity guard (WR-02): each suppression sub-case ((a), (c), (e))
+       drives a SECOND, gate-passing marker segment on the same connection
+       and asserts the exact full-session frame sequence — a leaked
+       suppressed final would arrive before the marker segment's
+       speech_start, so deleting the _echo_suppressed wire-up in
+       voice_server.stt_stream turns these cases RED (proven by neutering
+       the gate during the fix: red with `return False` at the top of
+       _echo_suppressed, green restored).
     9. Echo gate, pure decision table — the live + isolated-sidecar-collected
        sample set: echo/hallucination candidates suppress, genuine
        interruptions (including token-overlapping ones) pass, and the
@@ -125,6 +133,23 @@ class _WorkingWhisper:
         return [_FakeSegment(self._text, -0.1)], None
 
 
+class _SequencedWhisper:
+    """Scripted per-segment texts, consumed one per transcribe call.
+
+    run_vad_and_transcribe calls whisper exactly once per completed VAD
+    segment, so a two-segment drive gets texts[0] then texts[1] — this is
+    what lets case 8(e) follow a suppressed echo segment with a
+    gate-passing marker segment on the same connection (WR-02).
+    """
+
+    def __init__(self, texts: List[str]) -> None:
+        self._texts = list(texts)
+
+    def transcribe(self, _audio: Any, **_kwargs: Any) -> tuple:
+        text = self._texts.pop(0) if self._texts else "sequenced whisper exhausted"
+        return [_FakeSegment(text, -0.1)], None
+
+
 class _StubSttMgr:
     """Replaces ``voice_server.stt_mgr`` — no real models, no lock."""
 
@@ -158,6 +183,13 @@ class _FakeDgSession:
     finalize_text: Optional[str] = "deepgram final text"
     finalize_confidence = 0.91
     finalize_word_confs: Optional[List[float]] = None  # echo-gate tier-3 side-channel
+    # Per-segment finalize scripts, consumed in order (WR-02): lets one
+    # connection carry a suppressed segment followed by a distinct marker
+    # segment WITHOUT racing a class-attribute reset against the server's
+    # in-flight finalize. Each entry: {"text": str | None,
+    # "word_confs": Optional[List[float]], "confidence": float}. When
+    # None/exhausted, the single-shot finalize_text/... attributes apply.
+    finalize_scripts: Optional[List[Dict[str, Any]]] = None
 
     instances: List["_FakeDgSession"] = []
 
@@ -176,6 +208,7 @@ class _FakeDgSession:
         self.finalize_timeout_s = finalize_timeout_s
         self._send_count = 0
         self._last_error: Optional[str] = None
+        self._segment_word_confs: Optional[List[float]] = None
         self.received_audio = bytearray()
         self.finalize_calls = 0
         self.begin_segment_calls = 0
@@ -208,13 +241,27 @@ class _FakeDgSession:
 
     @property
     def last_word_confs(self) -> List[float]:
-        return list(_FakeDgSession.finalize_word_confs or [])
+        # The server reads this immediately after finalize_segment — reflect
+        # the just-finalized segment's word confidences.
+        return list(self._segment_word_confs or [])
 
     def drain_partials(self) -> List[dict]:
         return []
 
     async def finalize_segment(self) -> Optional[dict]:
         self.finalize_calls += 1
+        if _FakeDgSession.finalize_scripts:
+            script = _FakeDgSession.finalize_scripts.pop(0)
+            self._segment_word_confs = script.get("word_confs")
+            text = script.get("text")
+            if text is None:
+                return None
+            return {
+                "type": "final",
+                "text": text,
+                "confidence": script.get("confidence", _FakeDgSession.finalize_confidence),
+            }
+        self._segment_word_confs = _FakeDgSession.finalize_word_confs
         if _FakeDgSession.finalize_text is None:
             return None
         return {
@@ -234,6 +281,7 @@ def _reset_fake_dg_session(**overrides: Any) -> None:
     _FakeDgSession.finalize_text = "deepgram final text"
     _FakeDgSession.finalize_confidence = 0.91
     _FakeDgSession.finalize_word_confs = None
+    _FakeDgSession.finalize_scripts = None
     _FakeDgSession.instances = []
     for key, value in overrides.items():
         setattr(_FakeDgSession, key, value)
@@ -577,6 +625,15 @@ _REPLY_TEXT = (
     "to go through them now?"
 )
 
+# WR-02 vacuity guard: a transcript that provably PASSES the gate against
+# _REPLY_TEXT (verified: no token fuzzy-matches >= 0.78, char-window score
+# below the lowconf floor even at mean word conf 0.75). Driven as a second
+# segment after each suppressed segment: the very next frame after the
+# suppressed segment's speech_end MUST be this marker segment's speech_start
+# — a leaked (unsuppressed) final would arrive first and break the exact
+# frame-sequence assertion.
+MARKER_TEXT = "The quick brown fox jumps over the lazy dog"
+
 
 def test_case8_echo_gate_wire(client: TestClient) -> None:
     from echo_gate import EchoGate
@@ -601,10 +658,27 @@ def test_case8_echo_gate_wire(client: TestClient) -> None:
         gate.note_audio_bytes("tts-echo-1", 480000)  # 10.0 s @ 48 000 B/s
 
         # (a) Echo-similar hallucinated final (8091 repro, Nova-3 conf 0.98)
-        # during the active window → SUPPRESSED: only speech_start/speech_end.
-        _reset_fake_dg_session(finalize_text="Good evening, Annie Rudd. Here is")
-        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
-        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+        # during the active window → SUPPRESSED. A second, gate-passing
+        # MARKER segment rides the same connection: the exact full-session
+        # frame sequence proves the suppressed final was never queued on the
+        # wire (a leaked final would land between the first speech_end and
+        # the marker's speech_start) — WR-02.
+        _reset_fake_dg_session(
+            finalize_scripts=[
+                {"text": "Good evening, Annie Rudd. Here is"},
+                {"text": MARKER_TEXT, "word_confs": [0.99, 0.99, 0.99]},
+            ]
+        )
+        frames = _drive_ws(
+            client,
+            [_full_segment_bytes(), _full_segment_bytes()],
+            expected_frame_count=5,
+        )
+        assert [f["type"] for f in frames] == [
+            "speech_start", "speech_end",           # echo segment: final suppressed
+            "speech_start", "speech_end", "final",  # marker segment: final passes
+        ], frames
+        assert frames[4]["text"] == MARKER_TEXT, frames[4]
 
         # (b) Dissimilar (genuine interruption) final during the SAME window
         # → PASSES. Barge-in must stay reachable through the gate.
@@ -617,13 +691,24 @@ def test_case8_echo_gate_wire(client: TestClient) -> None:
 
         # (c) LIVE-evidence hallucination "Thea, Annie Rhodes." — too
         # dissimilar for the char tier (measured 0.44) but all-hallucinated
-        # word confidences trip the tier-3 word-confidence gate.
+        # word confidences trip the tier-3 word-confidence gate. Same
+        # marker-segment vacuity guard as (a).
         _reset_fake_dg_session(
-            finalize_text="Thea, Annie Rhodes.",
-            finalize_word_confs=[0.70, 0.74, 0.83],
+            finalize_scripts=[
+                {"text": "Thea, Annie Rhodes.", "word_confs": [0.70, 0.74, 0.83]},
+                {"text": MARKER_TEXT, "word_confs": [0.99, 0.99, 0.99]},
+            ]
         )
-        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
-        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+        frames = _drive_ws(
+            client,
+            [_full_segment_bytes(), _full_segment_bytes()],
+            expected_frame_count=5,
+        )
+        assert [f["type"] for f in frames] == [
+            "speech_start", "speech_end",
+            "speech_start", "speech_end", "final",
+        ], frames
+        assert frames[4]["text"] == MARKER_TEXT, frames[4]
 
         # (d) Window expiry: end the request, advance past playback estimate
         # (first_audio 1000 + 10 s audio) + decay 3 s → the SAME echo text
@@ -636,14 +721,24 @@ def test_case8_echo_gate_wire(client: TestClient) -> None:
         assert frames[2]["text"] == "Good evening, Annie Rudd. Here is"
 
         # (e) faster-whisper fallback path (no key) is gated by the same
-        # chokepoint: faithful echo text during a fresh active window.
+        # chokepoint: faithful echo text during a fresh active window,
+        # followed by the gate-passing marker segment (same vacuity guard
+        # as (a) — the whisper stub scripts one text per VAD segment).
         gate.register_start("tts-echo-2", _REPLY_TEXT)
         voice_server.DEEPGRAM_API_KEY = None
         voice_server.stt_mgr = _StubSttMgr(
-            _WorkingWhisper("your calendar is clear this afternoon")
+            _SequencedWhisper(["your calendar is clear this afternoon", MARKER_TEXT])
         )
-        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
-        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+        frames = _drive_ws(
+            client,
+            [_full_segment_bytes(), _full_segment_bytes()],
+            expected_frame_count=5,
+        )
+        assert [f["type"] for f in frames] == [
+            "speech_start", "speech_end",
+            "speech_start", "speech_end", "final",
+        ], frames
+        assert frames[4]["text"] == MARKER_TEXT, frames[4]
     finally:
         voice_server.echo_gate = orig_gate
 
