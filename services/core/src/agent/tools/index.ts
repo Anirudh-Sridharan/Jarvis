@@ -15,6 +15,7 @@
  *
  *   Web Research:
  *     web_search            readOnly:true   (live Brave Search API — BRAVE_API_KEY)
+ *     web_extract           readOnly:true   (Firecrawl /v2/scrape — FIRECRAWL_API_KEY)
  *     web_fetch             readOnly:true   (real fetch)
  *
  *   Email (live Gmail REST via @jarvis/integrations):
@@ -45,6 +46,7 @@ import {
   makeTodoCompleteTool,
 } from "./todoTools.js";
 import { makeWebSearchTool, webFetchTool } from "./webResearchTools.js";
+import { makeWebExtractTool } from "./webExtractTool.js";
 import {
   makeEmailSearchTool,
   makeEmailGetTool,
@@ -69,6 +71,7 @@ export function buildToolRegistry(
     makeTodoListTool(integrations),
     makeTodoCompleteTool(integrations),
     // Web research
+    makeWebExtractTool(),
     makeWebSearchTool(),
     webFetchTool,
     // Email (live Gmail)

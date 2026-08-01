@@ -5,7 +5,30 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { makeWebExtractTool, MAX_EXTRACT_BYTES } from "../src/agent/tools/webExtractTool.js";
+import { webFetchTool } from "../src/agent/tools/webResearchTools.js";
+import { buildToolRegistry } from "../src/agent/tools/index.js";
 import { getToolMeta } from "@jarvis/agent";
+import { createIntegrations } from "@jarvis/integrations";
+import {
+  FakeHttp,
+  MemoryTokenStore,
+  FixedClock as IntegrationsFixedClock,
+  FakeLlm as IntegrationsFakeLlm,
+} from "@jarvis/integrations/testing";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+function makeIntegrations() {
+  const dir = mkdtempSync(join(tmpdir(), "jarvis-web-extract-test-"));
+  return createIntegrations({
+    http: new FakeHttp(),
+    clock: new IntegrationsFixedClock(),
+    tokenStore: new MemoryTokenStore(),
+    llm: new IntegrationsFakeLlm(),
+    dataDir: dir,
+  });
+}
 
 const ORIGINAL_KEY = process.env["FIRECRAWL_API_KEY"];
 
@@ -277,5 +300,29 @@ describe("web_extract (Firecrawl)", () => {
       const result = await tool.run({ url: "https://example.com" });
       expect(JSON.stringify(result)).not.toContain("fc-SENTINEL-must-not-leak");
     }
+  });
+});
+
+// ── Registry wiring ───────────────────────────────────────────────────────────
+
+describe("registry wiring", () => {
+  it("buildToolRegistry includes web_extract alongside the existing tools (additive, not a replacement)", () => {
+    const integrations = makeIntegrations();
+    const registry = buildToolRegistry(integrations);
+
+    expect(registry.has("web_extract")).toBe(true);
+    expect(registry.has("web_search")).toBe(true);
+    expect(registry.has("web_fetch")).toBe(true);
+    expect(registry.has("todo_list")).toBe(true);
+  });
+});
+
+// ── Planner steering (D-02) ──────────────────────────────────────────────────
+
+describe("planner steering", () => {
+  it("web_extract and web_fetch descriptions cross-reference each other", () => {
+    const extractTool = makeWebExtractTool();
+    expect(extractTool.description).toContain("web_fetch");
+    expect(webFetchTool.description).toContain("web_extract");
   });
 });
