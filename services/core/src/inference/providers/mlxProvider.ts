@@ -12,6 +12,7 @@
  * surface as clear errors so the gateway can fall back to HF.
  */
 import { parseOpenAiSse } from "./sse.js";
+import { requestHasImagePart } from "../types.js";
 import type {
   ChatProvider,
   DispatchOptions,
@@ -78,6 +79,18 @@ export class MlxProvider implements ChatProvider {
 
   /** POST /v1/chat/completions with stream:true; yields content deltas. */
   async *streamChat(opts: DispatchOptions): AsyncGenerator<string, void, unknown> {
+    // Phase 15 Tier 3 plumbing (15-RESEARCH.md Open Question 1): the MLX
+    // sidecar's local Qwen chat model has no vision support. Refuse an
+    // image-bearing request BEFORE the fetch rather than let it silently
+    // reach a model that cannot interpret the image — the gateway's
+    // cloudPinned predicate keeps this request off the local path in the
+    // first place, but this guard is the graceful-degrade half in case that
+    // ever changes.
+    if (requestHasImagePart(opts.messages)) {
+      throw new Error(
+        'MLX local model has no vision support — image content must route to a cloud provider (taskHint "reasoning" or "agent").',
+      );
+    }
     const res = await fetch(this.url("/v1/chat/completions"), {
       method: "POST",
       headers: { "content-type": "application/json" },

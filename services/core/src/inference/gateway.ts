@@ -28,6 +28,7 @@ import { Registry } from "./registry.js";
 import { Router } from "./router.js";
 import { ModelManager } from "./modelManager.js";
 import { TurnTimer } from "./telemetry.js";
+import { requestHasImagePart } from "./types.js";
 import type {
   ChatProvider,
   InferenceStreamChunk,
@@ -296,11 +297,17 @@ export class InferenceGateway {
       // the agent latency-budget escalation reuses that reason with SMALL
       // prompts, and those retain a viable local fallback.
       const promptExceedsLocal = decision.estPromptTokens > this.cfg.routing.localCtxSafe;
-      const cloudPinned = req.taskHint === "consolidation" || promptExceedsLocal;
+      // 15-RESEARCH.md Open Question 1: an image-bearing request must never
+      // silently fall back to the vision-less local model — pin it to cloud
+      // exactly like consolidation output and an oversized prompt.
+      const carriesImage = requestHasImagePart(req.messages);
+      const cloudPinned = req.taskHint === "consolidation" || promptExceedsLocal || carriesImage;
       if (target !== "local" && !firstTokenSeen && !signal?.aborted && cloudPinned) {
         const pinReason = promptExceedsLocal
           ? `the prompt (~${decision.estPromptTokens} tokens) exceeds the local context ceiling`
-          : `${req.taskHint} is cloud-pinned (local fallback would persist degraded output)`;
+          : carriesImage
+            ? `the request carries image content and the local model has no vision support`
+            : `${req.taskHint} is cloud-pinned (local fallback would persist degraded output)`;
         // WR-04: record the failed turn against the dead cloud lane.
         timer.finish({ modelId, target, fallbackActive: this.modelManager.isFallbackActive(), ok: false });
         yield {
