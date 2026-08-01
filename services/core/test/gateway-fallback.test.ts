@@ -24,6 +24,7 @@
 
 import { describe, it, expect } from "vitest";
 import { InferenceGateway } from "../src/inference/gateway.js";
+import { GatewayLlm } from "../src/memory/gatewayLlm.js";
 import type { AppConfig } from "../src/config.js";
 import type { CloudTarget, InferenceStreamChunk, TaskHint } from "../src/inference/types.js";
 
@@ -150,7 +151,6 @@ function requestFor(hint: TaskHint) {
 }
 
 describe.each([
-  { hint: "consolidation" as const, cloudTarget: "fireworks" as const, other: "anthropic" as const },
   { hint: "agent" as const, cloudTarget: "anthropic" as const, other: "fireworks" as const },
   { hint: "reasoning" as const, cloudTarget: "anthropic" as const, other: "fireworks" as const },
 ])("gateway $cloudTarget fallback for taskHint=$hint", ({ hint, cloudTarget, other }) => {
@@ -192,5 +192,41 @@ describe.each([
 
     expect(calls[cloudTarget]).toBeGreaterThan(0);
     expect(calls[other]).toBe(0);
+  });
+});
+
+// ── CR-01: consolidation is cloud-PINNED — a dead cloud lane must fail loudly, ──
+// never silently persist local-4B output into the permanent memory graph.
+describe("cloud-pinned consolidation (CR-01)", () => {
+  it("a dead fireworks lane yields ONE structured error and NEVER retries on the local model", async () => {
+    const { gw, calls } = buildGateway({ cloudFails: true, cloudTarget: "fireworks" });
+    const chunks = await collect(gw.chat(requestFor("consolidation")));
+
+    const errors = chunks.filter((c) => c.type === "error") as { message: string }[];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toContain("fireworks");
+    expect(errors[0]!.message).toContain("402");
+    expect(errors[0]!.message).toContain("cloud-pinned");
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    expect(calls.mlx).toBe(0);
+  });
+
+  it("GatewayLlm.complete REJECTS on a dead fireworks lane instead of returning local output (no degraded facts persisted)", async () => {
+    const { gw, calls } = buildGateway({ cloudFails: true, cloudTarget: "fireworks" });
+    const llm = new GatewayLlm(gw);
+
+    await expect(llm.complete({ prompt: "extract facts" })).rejects.toThrow(/fireworks.*402/s);
+    expect(calls.mlx).toBe(0);
+  });
+
+  it("a healthy fireworks lane completes normally with no fallback", async () => {
+    const { gw, calls } = buildGateway({ cloudFails: false, cloudTarget: "fireworks" });
+    const chunks = await collect(gw.chat(requestFor("consolidation")));
+
+    expect(chunks.at(-1)).toEqual({ type: "done" });
+    expect(gw.modelManager.isFallbackActive()).toBe(false);
+    expect(calls.anthropic).toBe(0);
+    expect(calls.mlx).toBe(0);
   });
 });

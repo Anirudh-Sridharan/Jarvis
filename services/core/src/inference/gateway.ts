@@ -248,6 +248,23 @@ export class InferenceGateway {
       // a dead turn; telemetry records fallbackActive so the quality drop is
       // visible. `!== "local"` (not an explicit cloud-target list) so a
       // future fourth target needs no edit here.
+      //
+      // EXCEPTION — cloud-PINNED requests must fail loudly instead (CR-01):
+      // consolidation output is PERSISTED into the permanent memory graph, so
+      // silently substituting the local 4B's extraction would write degraded
+      // facts as if the heavy lane produced them. Failing with a structured
+      // error hands the failure to the consolidation pipeline's existing
+      // retry/backoff/dead-letter machinery (GatewayLlm throws on error
+      // chunks). Interactive chat/voice/agent turns keep the graceful local
+      // fallback — there a degraded answer really does beat a dead turn.
+      const cloudPinned = req.taskHint === "consolidation";
+      if (target !== "local" && !firstTokenSeen && !signal?.aborted && cloudPinned) {
+        yield {
+          type: "error",
+          message: `${target} failed and ${req.taskHint} is cloud-pinned (local fallback would persist degraded output): ${errMsg(err)}`,
+        };
+        return;
+      }
       if (target !== "local" && !firstTokenSeen && !signal?.aborted) {
         const localEntry = this.tryDefault("local");
         if (localEntry) {
