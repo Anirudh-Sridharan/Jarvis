@@ -128,6 +128,19 @@ DEEPGRAM_FINALIZE_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_FINALIZE_TIMEOUT_MS"
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "kokoro")
 DEEPGRAM_TTS_MODEL = os.environ.get("DEEPGRAM_TTS_MODEL", "aura-2-draco-en")
 
+# Sidecar-side echo gate (round-2 live defect fix — see echo_gate.py's module
+# docstring and .planning/debug/deepgram-stt-live-defects.md). During an
+# active/recently-active TTS synthesis window, partial/final STT frames whose
+# text fuzzy-matches the synthesized text are DROPPED before the WebSocket:
+# Nova-3 re-hears no-AEC speaker echo as different words than were spoken, so
+# the TS client's token-containment echo filter cannot catch them and every
+# reply self-cancels via spurious confirmed barge-in. Dropping a frame is
+# invisible to the TS client (additive-only WS contract change).
+JARVIS_ECHO_GATE = os.environ.get("JARVIS_ECHO_GATE", "1")
+JARVIS_ECHO_SIM_THRESHOLD = float(os.environ.get("JARVIS_ECHO_SIM_THRESHOLD", "0.72"))
+JARVIS_ECHO_CONF_THRESHOLD = float(os.environ.get("JARVIS_ECHO_CONF_THRESHOLD", "0.85"))
+JARVIS_ECHO_DECAY_MS = int(os.environ.get("JARVIS_ECHO_DECAY_MS", "3000"))
+
 ComponentState = Literal["unloaded", "loading", "ready", "error"]
 
 # ---------------------------------------------------------------------------
@@ -368,6 +381,18 @@ class WakeManager:
 stt_mgr = STTManager()
 tts_mgr = TTSManager()
 wake_mgr = WakeManager()
+
+# Shared between /tts (registers synthesis windows) and /stt/stream (gates
+# echo-suspect transcripts). Selftests replace this with a clock-injected
+# instance; live config comes from the JARVIS_ECHO_* env values above.
+from echo_gate import EchoGate  # noqa: E402  (import after config block, stdlib-only module)
+
+echo_gate = EchoGate(
+    enabled=JARVIS_ECHO_GATE != "0",
+    sim_threshold=JARVIS_ECHO_SIM_THRESHOLD,
+    conf_threshold=JARVIS_ECHO_CONF_THRESHOLD,
+    decay_s=JARVIS_ECHO_DECAY_MS / 1000,
+)
 
 # In-flight TTS cancellation registry: request_id → asyncio.Event
 _tts_cancel: Dict[str, asyncio.Event] = {}
@@ -625,6 +650,30 @@ async def stt_stream(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
 
+    def _echo_suppressed(frame: Dict[str, Any], word_confs: Any = None) -> bool:
+        """True when the echo gate says to drop this partial/final frame.
+
+        Only text frames are ever gated — speech_start/speech_end/error pass
+        untouched (Silero remains the sole boundary authority; the gate drops
+        TEXT the mic heard Jarvis say, never VAD state).
+        """
+        if frame.get("type") not in ("partial", "final"):
+            return False
+        mean_conf: Optional[float] = None
+        if word_confs:
+            try:
+                mean_conf = sum(word_confs) / len(word_confs)
+            except (TypeError, ZeroDivisionError):
+                mean_conf = None
+        reason = echo_gate.check(frame.get("text") or "", mean_conf)
+        if reason is None:
+            return False
+        log.info(
+            "Echo gate suppressed %s (%s): %.60r",
+            frame.get("type"), reason, frame.get("text"),
+        )
+        return True
+
     # -----------------------------------------------------------------------
     # STT engine selection — attempted once, at session start, before the mic
     # loop. Silero VAD (below) remains the sole speech_start/speech_end/
@@ -693,7 +742,11 @@ async def stt_stream(ws: WebSocket) -> None:
                 ),
             )
             for event in events:
-                await _send(event)
+                # Echo gate: during an active TTS window, faster-whisper
+                # partials/finals that match the synthesized text are echo —
+                # drop the frame (VAD frames always pass).
+                if not _echo_suppressed(event):
+                    await _send(event)
                 # Silero's speech_start opens the Deepgram text segment: the
                 # session discards anything Deepgram transcribed OUTSIDE a
                 # Silero segment (speaker echo, noise, late tails of already-
@@ -707,12 +760,15 @@ async def stt_stream(ws: WebSocket) -> None:
                 # finals only after it has seen the segment's speech_end).
                 if use_deepgram and event.get("type") == "speech_end":
                     final_frame = await session.finalize_segment()
-                    if final_frame is not None:
+                    if final_frame is not None and not _echo_suppressed(
+                        final_frame, getattr(session, "last_word_confs", None)
+                    ):
                         await _send(final_frame)
 
             if use_deepgram:
                 for partial_frame in session.drain_partials():
-                    await _send(partial_frame)
+                    if not _echo_suppressed(partial_frame):
+                        await _send(partial_frame)
 
     except WebSocketDisconnect:
         log.info("STT WebSocket disconnected (client close / barge-in).")
@@ -825,6 +881,11 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
 
         loop = asyncio.get_running_loop()
 
+        # Echo gate: this request's text is about to come out of the
+        # speakers — register the synthesis window so /stt/stream can drop
+        # transcripts of the echo (see echo_gate.py).
+        echo_gate.register_start(request_id, req.text)
+
         async def _kokoro_chunks(voice: Any) -> AsyncGenerator[bytes, None]:
             async for pcm_chunk in synthesize_streaming(
                 text=req.text,
@@ -837,6 +898,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                 if cancel_event.is_set():
                     log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
                     return
+                echo_gate.note_audio_bytes(request_id, len(pcm_chunk))
                 yield pcm_chunk
 
         try:
@@ -854,6 +916,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                         log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
                         return
                     bytes_yielded += len(pcm_chunk)
+                    echo_gate.note_audio_bytes(request_id, len(pcm_chunk))
                     yield pcm_chunk
 
                 if cancel_event.is_set():
@@ -885,6 +948,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                     yield pcm_chunk
         finally:
             _tts_cancel.pop(request_id, None)
+            echo_gate.register_end(request_id)
 
     return StreamingResponse(
         _generate(),

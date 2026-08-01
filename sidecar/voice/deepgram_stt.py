@@ -107,6 +107,14 @@ class DgResult(NamedTuple):
     them on every Results message. They are what lets the session reject
     results that belong to an already-finalized segment (default 0.0 when a
     message lacks them, which disables the staleness check for that result).
+
+    ``word_confs`` are the per-word confidences of ``alternatives[0].words``
+    (empty when absent). Word-level confidence is the echo gate's tier-3
+    signal (round-2 live defect): hallucinated echo words measure 0.74-0.83
+    while clean genuine speech measures 0.98-1.0 — the AGGREGATE confidence
+    does not carry this signal (measured 0.98 on a hallucinated final). The
+    values never leave the sidecar: they ride a side-channel to the gate and
+    are not part of any WebSocket frame.
     """
 
     transcript: str
@@ -116,6 +124,7 @@ class DgResult(NamedTuple):
     from_finalize: bool
     start: float = 0.0
     duration: float = 0.0
+    word_confs: tuple = ()
 
 
 def parse_results(msg: dict) -> Optional[DgResult]:
@@ -154,6 +163,13 @@ def parse_results(msg: dict) -> Optional[DgResult]:
             except (TypeError, ValueError):
                 return 0.0
 
+        word_confs: List[float] = []
+        words = first.get("words")
+        if isinstance(words, list):
+            for word in words:
+                if isinstance(word, dict) and word.get("confidence") is not None:
+                    word_confs.append(_as_float(word.get("confidence")))
+
         return DgResult(
             transcript=str(transcript),
             confidence=float(confidence),
@@ -162,6 +178,7 @@ def parse_results(msg: dict) -> Optional[DgResult]:
             from_finalize=bool(msg.get("from_finalize", False)),
             start=_as_float(msg.get("start", 0.0)),
             duration=_as_float(msg.get("duration", 0.0)),
+            word_confs=tuple(word_confs),
         )
     except Exception:  # noqa: BLE001 — external JSON must never raise into the caller
         return None
@@ -181,7 +198,12 @@ class SegmentAccumulator:
     def __init__(self) -> None:
         self._finalized_transcripts: List[str] = []
         self._finalized_confidences: List[float] = []
+        self._finalized_word_confs: List[float] = []
         self._last_partial_text: Optional[str] = None
+        # Word confidences of the LAST final produced by take_final — a
+        # side-channel for the echo gate; deliberately NOT a frame key (the
+        # WS frame shape is pinned by selftest.py / voice-live-deps.test.ts).
+        self.last_word_confs: List[float] = []
 
     def feed(self, result: DgResult) -> Optional[dict]:
         """Feed one ``DgResult``. Returns a ``partial`` frame dict or ``None``."""
@@ -190,6 +212,7 @@ class SegmentAccumulator:
             if text:
                 self._finalized_transcripts.append(text)
                 self._finalized_confidences.append(result.confidence)
+                self._finalized_word_confs.extend(result.word_confs)
             return None
 
         composed = self._compose(result.transcript)
@@ -215,12 +238,14 @@ class SegmentAccumulator:
             confidences = self._finalized_confidences
             mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
             frame = {"type": "final", "text": text, "confidence": round(mean_conf, 4)}
+        self.last_word_confs = list(self._finalized_word_confs)
         self.reset()
         return frame
 
     def reset(self) -> None:
         self._finalized_transcripts = []
         self._finalized_confidences = []
+        self._finalized_word_confs = []
         self._last_partial_text = None
 
 
@@ -291,6 +316,15 @@ class DeepgramSttSession:
     @property
     def last_error(self) -> Optional[str]:
         return self._last_error
+
+    @property
+    def last_word_confs(self) -> List[float]:
+        """Word confidences of the last finalized segment (echo-gate tier 3).
+
+        Side-channel only — never part of a WebSocket frame. voice_server
+        reads this immediately after ``finalize_segment`` returns.
+        """
+        return self._accumulator.last_word_confs
 
     def _stream_pos_s(self) -> float:
         """Seconds of audio sent on this connection — Deepgram's stream clock.

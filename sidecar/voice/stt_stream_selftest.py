@@ -13,7 +13,7 @@ is replaced with a stub exposing scripted VAD/whisper objects, and
 implements the exact same public surface (``connect``/``send_audio``/
 ``drain_partials``/``finalize_segment``/``close``/``last_error``).
 
-Seven cases are asserted:
+Nine cases are asserted:
     1. Deepgram happy path — one final per VAD segment, whisper never touched,
        begin_segment called on Silero's speech_start.
     2. No key — faster-whisper path, no error frame, /health explains why.
@@ -23,6 +23,8 @@ Seven cases are asserted:
        the /health JSON.
     6. Frame-shape pin — every frame collected above matches the documented
        key set for its ``type``, and no undocumented frame type was sent.
+       (Runs AFTER case 8 in main() so echo-gated sessions' frames are pinned
+       too — suppression must drop whole frames, never reshape them.)
     7. Real-session Results sequencing (live-defect regression,
        .planning/debug/deepgram-stt-live-defects.md): drives the REAL
        ``DeepgramSttSession`` receive loop with a scripted fake Deepgram WS —
@@ -31,6 +33,18 @@ Seven cases are asserted:
        the next segment's final, (c) a stale result (audio window before the
        open segment) is rejected even while the segment is open, and (d)
        finalize's coverage wait returns the complete banked text.
+    8. Echo gate, wire level (round-2 live-defect regression, same session
+       file): with a TTS synthesis window ACTIVE, (a) an echo-similar
+       Deepgram final is suppressed (frame never sent), (b) a dissimilar
+       final passes during the SAME window, (c) a low-word-confidence
+       hallucination ("Thea, Annie Rhodes." for a reply containing
+       "Alex") is suppressed via the word-confidence tier, (d) after the
+       window expires the same echo-similar text passes unaffected, and
+       (e) the faster-whisper fallback path is gated identically.
+    9. Echo gate, pure decision table — the live + isolated-sidecar-collected
+       sample set: echo/hallucination candidates suppress, genuine
+       interruptions (including token-overlapping ones) pass, and the
+       disable knobs (enabled=False, conf_threshold=0) behave.
 
 Prints ``STT_STREAM_SELFTEST_OK`` and exits 0 on success; prints a failure
 message to stderr and exits non-zero otherwise.
@@ -143,6 +157,7 @@ class _FakeDgSession:
     send_audio_fail_after: Optional[int] = None  # None = never fails
     finalize_text: Optional[str] = "deepgram final text"
     finalize_confidence = 0.91
+    finalize_word_confs: Optional[List[float]] = None  # echo-gate tier-3 side-channel
 
     instances: List["_FakeDgSession"] = []
 
@@ -191,6 +206,10 @@ class _FakeDgSession:
     def begin_segment(self) -> None:
         self.begin_segment_calls += 1
 
+    @property
+    def last_word_confs(self) -> List[float]:
+        return list(_FakeDgSession.finalize_word_confs or [])
+
     def drain_partials(self) -> List[dict]:
         return []
 
@@ -214,6 +233,7 @@ def _reset_fake_dg_session(**overrides: Any) -> None:
     _FakeDgSession.send_audio_fail_after = None
     _FakeDgSession.finalize_text = "deepgram final text"
     _FakeDgSession.finalize_confidence = 0.91
+    _FakeDgSession.finalize_word_confs = None
     _FakeDgSession.instances = []
     for key, value in overrides.items():
         setattr(_FakeDgSession, key, value)
@@ -543,6 +563,164 @@ def test_case7_real_session_sequencing() -> None:
     _asyncio.run(_case7_scenario())
 
 
+# ---------------------------------------------------------------------------
+# Case 8: echo gate, wire level (round-2 live-defect regression). A TTS
+# synthesis window is registered on a clock-injected EchoGate; echo-similar
+# finals must be dropped BEFORE the WebSocket while dissimilar finals pass,
+# and expiry of the window restores pass-through. Sub-case (e) proves the
+# faster-whisper fallback path is gated by the same chokepoint.
+# ---------------------------------------------------------------------------
+
+_REPLY_TEXT = (
+    "Good evening, Alex. Here is what is on your plate today. Your calendar is "
+    "clear this afternoon, and there are two reminders pending. Would you like me "
+    "to go through them now?"
+)
+
+
+def test_case8_echo_gate_wire(client: TestClient) -> None:
+    from echo_gate import EchoGate
+
+    fake_now = [1000.0]
+    orig_gate = voice_server.echo_gate
+    voice_server.echo_gate = EchoGate(
+        enabled=True,
+        sim_threshold=0.72,
+        conf_threshold=0.85,
+        decay_s=3.0,
+        clock=lambda: fake_now[0],
+    )
+    try:
+        gate = voice_server.echo_gate
+        voice_server.DEEPGRAM_API_KEY = "case8-key-not-a-real-secret"
+        voice_server.DEEPGRAM_STT_ENABLED = "1"
+        voice_server.stt_mgr = _StubSttMgr(_NeverCalledWhisper())
+
+        # Reply streaming: window open (no end), 10 s of audio noted.
+        gate.register_start("tts-echo-1", _REPLY_TEXT)
+        gate.note_audio_bytes("tts-echo-1", 480000)  # 10.0 s @ 48 000 B/s
+
+        # (a) Echo-similar hallucinated final (8091 repro, Nova-3 conf 0.98)
+        # during the active window → SUPPRESSED: only speech_start/speech_end.
+        _reset_fake_dg_session(finalize_text="Good evening, Annie Rudd. Here is")
+        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
+        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+
+        # (b) Dissimilar (genuine interruption) final during the SAME window
+        # → PASSES. Barge-in must stay reachable through the gate.
+        _reset_fake_dg_session(
+            finalize_text="Remind me to call the dentist tomorrow afternoon."
+        )
+        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=3)
+        assert [f["type"] for f in frames] == ["speech_start", "speech_end", "final"], frames
+        assert frames[2]["text"] == "Remind me to call the dentist tomorrow afternoon."
+
+        # (c) LIVE-evidence hallucination "Thea, Annie Rhodes." — too
+        # dissimilar for the char tier (measured 0.44) but all-hallucinated
+        # word confidences trip the tier-3 word-confidence gate.
+        _reset_fake_dg_session(
+            finalize_text="Thea, Annie Rhodes.",
+            finalize_word_confs=[0.70, 0.74, 0.83],
+        )
+        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
+        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+
+        # (d) Window expiry: end the request, advance past playback estimate
+        # (first_audio 1000 + 10 s audio) + decay 3 s → the SAME echo text
+        # now passes unaffected (the gate never gates outside playback).
+        gate.register_end("tts-echo-1")
+        fake_now[0] = 1015.0
+        _reset_fake_dg_session(finalize_text="Good evening, Annie Rudd. Here is")
+        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=3)
+        assert [f["type"] for f in frames] == ["speech_start", "speech_end", "final"], frames
+        assert frames[2]["text"] == "Good evening, Annie Rudd. Here is"
+
+        # (e) faster-whisper fallback path (no key) is gated by the same
+        # chokepoint: faithful echo text during a fresh active window.
+        gate.register_start("tts-echo-2", _REPLY_TEXT)
+        voice_server.DEEPGRAM_API_KEY = None
+        voice_server.stt_mgr = _StubSttMgr(
+            _WorkingWhisper("your calendar is clear this afternoon")
+        )
+        frames = _drive_ws(client, [_full_segment_bytes()], expected_frame_count=2)
+        assert [f["type"] for f in frames] == ["speech_start", "speech_end"], frames
+    finally:
+        voice_server.echo_gate = orig_gate
+
+
+# ---------------------------------------------------------------------------
+# Case 9: echo gate, pure decision table — samples collected live (round-2
+# checkpoint) and on the isolated 8091 sidecar. Genuine interruptions MUST
+# pass even during an active window; echo/hallucinations MUST suppress.
+# ---------------------------------------------------------------------------
+
+
+def test_case9_echo_gate_decisions() -> None:
+    from echo_gate import EchoGate
+
+    fake_now = [0.0]
+    gate = EchoGate(
+        enabled=True,
+        sim_threshold=0.72,
+        conf_threshold=0.85,
+        decay_s=3.0,
+        clock=lambda: fake_now[0],
+    )
+
+    # No window at all: nothing is ever suppressed, similarity be damned.
+    assert gate.check(_REPLY_TEXT) is None
+
+    gate.register_start("t1", _REPLY_TEXT)
+    gate.note_audio_bytes("t1", 480000)  # 10 s
+
+    suppress = [
+        # (transcript, mean_word_conf) — echo / hallucinated echo
+        ("Good evening, Annie Rudd. Here is", 0.90),   # 8091 repro (char tier)
+        ("Evening, Anna Rudd.", 0.52),                 # 8091 repro (char tier)
+        ("Here is what", 0.99),                        # 8091 repro (token tier)
+        ("Thea, Annie Rhodes.", 0.76),                 # LIVE (lowconf tier)
+        ("Thea Alec.", 0.80),                        # LIVE (lowconf tier)
+        ("Your calendar is clear this afternoon", None),   # faithful echo
+        ("Would you like me to go through them now?", None),
+        ("two reminders pending", None),
+    ]
+    passes = [
+        # Genuine interruptions — including token-overlapping ones. Clean
+        # word confidences (0.98-1.0 measured) keep tier 3 quiet.
+        ("Stop.", None),
+        ("Stop talking.", 0.99),
+        ("Jarvis, stop.", 0.99),
+        ("Wait, hold on.", 0.99),
+        ("Wait wait wait.", 0.99),        # ratio("wait","what")=0.75 < 0.78 pin
+        ("Pause.", 0.99),
+        ("What time is it?", 0.99),
+        ("No, not the calendar. Check my email instead.", 0.99),
+        ("Remind me to call the dentist tomorrow afternoon about the appointment.", 0.99),
+        ("Skip that. What else is pending?", 0.99),
+    ]
+    for text, conf in suppress:
+        reason = gate.check(text, conf)
+        assert reason is not None, f"echo NOT suppressed: {text!r}"
+    for text, conf in passes:
+        reason = gate.check(text, conf)
+        assert reason is None, f"genuine interruption suppressed ({reason}): {text!r}"
+
+    # conf_threshold=0 disables tier 3: the extreme hallucination then passes
+    # (documented residual risk — tiers 1/2 still cover the rest).
+    gate_no_conf = EchoGate(
+        enabled=True, sim_threshold=0.72, conf_threshold=0.0, decay_s=3.0,
+        clock=lambda: fake_now[0],
+    )
+    gate_no_conf.register_start("t1", _REPLY_TEXT)
+    assert gate_no_conf.check("Thea, Annie Rhodes.", 0.5) is None
+    assert gate_no_conf.check("Good evening, Annie Rudd. Here is", 0.9) is not None
+
+    # enabled=False is a full bypass.
+    gate_off = EchoGate(enabled=False, clock=lambda: fake_now[0])
+    gate_off.register_start("t1", _REPLY_TEXT)
+    assert gate_off.check("Your calendar is clear this afternoon", 0.5) is None
+
+
 def main() -> None:
     orig_stt_mgr = voice_server.stt_mgr
     orig_key = voice_server.DEEPGRAM_API_KEY
@@ -554,8 +732,10 @@ def main() -> None:
             test_case3_connect_failure(client)
             test_case4_mid_session_death(client)
             test_case5_key_hygiene(client)
-            test_case6_frame_shape_pin()
+            test_case8_echo_gate_wire(client)
+            test_case6_frame_shape_pin()  # pin runs LAST: covers case-8 frames too
         test_case7_real_session_sequencing()
+        test_case9_echo_gate_decisions()
     finally:
         voice_server.stt_mgr = orig_stt_mgr
         voice_server.DEEPGRAM_API_KEY = orig_key

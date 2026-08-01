@@ -88,6 +88,10 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
 | `DEEPGRAM_FINALIZE_TIMEOUT_MS` | `600` | How long to wait for Deepgram's `Finalize` response before giving up on that segment's text. |
 | `TTS_ENGINE` | `kokoro` | `aura` selects Deepgram Aura-2 streaming TTS instead of Kokoro. **`kokoro` is the committed default — it changes only by explicit user decision, never automatically.** |
 | `DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Aura-2 voice model id (used only when the Aura engine is selected). |
+| `JARVIS_ECHO_GATE` | `1` | Sidecar-side echo gate: during an active/recent TTS synthesis window, STT partial/final frames whose text fuzzy-matches the synthesized text are dropped (no-AEC speaker echo — Nova-3 re-hears it as *different* words the TS echo filter can't catch). `0` disables. See `echo_gate.py`. |
+| `JARVIS_ECHO_SIM_THRESHOLD` | `0.72` | Char-similarity tier threshold: windowed similarity ≥ this against recently synthesized text (candidates ≥ 8 chars) suppresses. Measured: hallucinated echo ≥ 0.80, genuine interruptions ≤ 0.60. |
+| `JARVIS_ECHO_CONF_THRESHOLD` | `0.85` | Word-confidence tier: moderate similarity (≥ 0.40) **and** mean Deepgram word confidence ≤ this suppresses (hallucinated echo words measure 0.74–0.83; clean genuine speech 0.98–1.0). `0` disables this tier. |
+| `JARVIS_ECHO_DECAY_MS` | `3000` | How long after estimated playback end a synthesis window still gates (covers ffplay buffering + Silero hangover + finalize latency). |
 
 ### STT engine design
 
@@ -336,6 +340,7 @@ UI) receive only the text events and the PCM bytes from `/tts`.
 | `tts.py` | Kokoro TTS streaming wrapper; MLX variant note; WAV header utility. |
 | `deepgram_stt.py` | Deepgram streaming-STT WS client (`DeepgramSttSession`) — connect/send_audio/drain_partials/finalize_segment/close. |
 | `deepgram_tts.py` | Deepgram Aura-2 streaming-TTS WS client (`synthesize_streaming_aura`) — Kokoro-compatible PCM16 LE 24 kHz output. |
+| `echo_gate.py` | Sidecar-side echo gate: tracks `/tts` synthesis windows and drops STT partial/final frames that fuzzy-match recently synthesized text (no-AEC speaker echo that Nova-3 re-hears as different words). Pure logic + injected clock. |
 | `stt_latency_probe.py` | CLI: objective `speech_end→final` STT latency measurement over the real WS contract. |
 | `tts_ab_eval.py` | CLI: Kokoro vs Aura-2 TTFB/RTF A/B, writes listenable WAV files. |
 | `load_env.sh` | Allowlisted, non-overriding loader of `DEEPGRAM_*`/`TTS_ENGINE` from the repo-root `.env`; sourced by `run.sh`. |
