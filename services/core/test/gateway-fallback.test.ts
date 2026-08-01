@@ -230,3 +230,33 @@ describe("cloud-pinned consolidation (CR-01)", () => {
     expect(calls.mlx).toBe(0);
   });
 });
+
+// ── WR-01: a token-overflow-routed prompt physically cannot fit the local ──
+// context — a dead cloud lane must error, not retry on a model that can't
+// serve it (truncated prompt or hard sidecar error).
+describe("cloud-pinned token overflow (WR-01)", () => {
+  // Varied-vocabulary word cycle so BPE cannot compress it below the ceiling
+  // (same technique as router-cloud-provider.test.ts): 9000 words ≈ 15.3k
+  // estimated tokens > localCtxSafe 14000.
+  const WORDS = [
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+    "quebec", "romeo", "sierra", "tango",
+  ];
+  const overflowContent = Array.from({ length: 9_000 }, (_, i) => WORDS[i % WORDS.length]).join(" ");
+
+  it("a chat prompt over localCtxSafe whose cloud lane dies yields ONE structured error and never retries locally", async () => {
+    // chat overflows to defaultCloudProvider = fireworks (see makeConfig).
+    const { gw, calls } = buildGateway({ cloudFails: true, cloudTarget: "fireworks" });
+    const chunks = await collect(
+      gw.chat({ messages: [{ role: "user" as const, content: overflowContent }], taskHint: "chat" }),
+    );
+
+    const errors = chunks.filter((c) => c.type === "error") as { message: string }[];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toContain("fireworks");
+    expect(errors[0]!.message).toContain("exceeds the local context ceiling");
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
+    expect(calls.mlx).toBe(0);
+  });
+});

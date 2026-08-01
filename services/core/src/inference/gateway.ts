@@ -257,11 +257,22 @@ export class InferenceGateway {
       // retry/backoff/dead-letter machinery (GatewayLlm throws on error
       // chunks). Interactive chat/voice/agent turns keep the graceful local
       // fallback — there a degraded answer really does beat a dead turn.
-      const cloudPinned = req.taskHint === "consolidation";
+      //
+      // Also pinned (WR-01): a prompt whose estimate exceeds localCtxSafe
+      // physically cannot fit the local ctxWindow — a local retry could only
+      // hard-error after a wasted model load or silently truncate the prompt.
+      // Deliberately keyed on estPromptTokens (not reason === "token-overflow"):
+      // the agent latency-budget escalation reuses that reason with SMALL
+      // prompts, and those retain a viable local fallback.
+      const promptExceedsLocal = decision.estPromptTokens > this.cfg.routing.localCtxSafe;
+      const cloudPinned = req.taskHint === "consolidation" || promptExceedsLocal;
       if (target !== "local" && !firstTokenSeen && !signal?.aborted && cloudPinned) {
+        const pinReason = promptExceedsLocal
+          ? `the prompt (~${decision.estPromptTokens} tokens) exceeds the local context ceiling`
+          : `${req.taskHint} is cloud-pinned (local fallback would persist degraded output)`;
         yield {
           type: "error",
-          message: `${target} failed and ${req.taskHint} is cloud-pinned (local fallback would persist degraded output): ${errMsg(err)}`,
+          message: `${target} failed and ${pinReason}: ${errMsg(err)}`,
         };
         return;
       }
