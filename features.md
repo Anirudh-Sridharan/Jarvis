@@ -16,7 +16,7 @@ Cross-cutting concerns (model serving, auth/secrets, privacy, deployment) live i
 ### Locked decisions (from interview)
 
 - **Hardware:** MacBook Air M3, 16GB RAM, macOS Tahoe 26.5 (fanless → short bursts local, heavy work to cloud).
-- **Model strategy (hybrid):** small local Qwen (~4B/9B, MLX) for chat + voice, loaded on "Hey Jarvis" and unloaded after ~10 min idle; **Hugging Face Inference Providers (serverless router) for heavy reasoning + nightly consolidation** — cost is not a constraint. Model layer swappable.
+- **Model strategy (hybrid):** small local Qwen (~4B/9B, MLX) for chat + voice, loaded on "Hey Jarvis" and unloaded after ~10 min idle; **serverless cloud providers for heavy reasoning + nightly consolidation — Fireworks AI (open Qwen) for consolidation, Anthropic Claude for reasoning and agent planning, selected per task class in `config/models.yaml`** — cost is not a constraint. Model layer swappable.
 - **Memory:** capture-everything by default (privacy not a concern). Build the memory core from primitives; use free/OSS where solved.
 - **Tooling principle:** prefer free/open-source tools; build from scratch otherwise (or ask). All planned frameworks (Pipecat, LangGraph, Graphiti/mem0, faster-whisper, Kokoro, openWakeWord) are free/OSS.
 - **Interface:** macOS menu-bar voice daemon ("Hey Jarvis") **+** local web dashboard.
@@ -28,7 +28,7 @@ Cross-cutting concerns (model serving, auth/secrets, privacy, deployment) live i
 ## Phase 1 — Foundation (the brain can think & talk by text)
 
 ### 1. Local Qwen Inference Core  · _Deep_
-- Serve the latest Qwen model locally on Apple Silicon (MLX) with an OpenAI-compatible API; serverless Hugging Face Inference Providers (router) fallback for heavier requests.
+- Serve the latest Qwen model locally on Apple Silicon (MLX) with an OpenAI-compatible API; serverless cloud providers (Fireworks AI, Anthropic Claude) for heavier requests.
 - **On-demand lifecycle:** model loads on wake ("Hey Jarvis"), then auto-unloads after ~10 min of inactivity to free memory — not kept warm 24/7. A few-seconds cold-start on first request after wake is acceptable (no always-resident ack model needed); just give clear "waking up…" feedback.
 - Streaming tokens, prompt/prefix caching; model registry so the chat/agent/embedding models can be swapped independently.
 
@@ -140,7 +140,7 @@ Cross-cutting concerns (model serving, auth/secrets, privacy, deployment) live i
 ## Architecture layer (separate docs in `architecture/`)
 
 - **architecture.md** — system overview, component diagram, tech stack, data model, latency budget.
-- **model-serving.md** — Qwen models (chat/embedding/reranker), MLX vs vLLM vs HF endpoints, quantization, hardware.
+- **model-serving.md** — Qwen models (chat/embedding/reranker), MLX vs vLLM vs serverless cloud providers, quantization, hardware.
 - **privacy-and-security.md** — local-first stance, secret storage, capture/retention/deletion, approval/audit, threat model.
 - **auth-and-integrations.md** — OAuth token lifecycle for all data sources, secret management.
 - **deployment.md** — local daemon + dashboard, optional HF cloud fallback, backups.

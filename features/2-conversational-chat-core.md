@@ -21,7 +21,7 @@ sequenceDiagram
     participant FE as Frontend (web/menu-bar)
     participant Orch as Chat Orchestrator
     participant Store as Conversation Store
-    participant Inf as Inference Core (F1, MLX/HF)
+    participant Inf as Inference Core (F1, MLX/cloud)
     participant Ret as Retrieval (F5)
     participant Proc as Procedural Block (F6, RO)
     participant Asm as Prompt Assembler
@@ -177,7 +177,7 @@ interface AssembleArgs {
   history: Message[];                 // newest verbatim turns (post-truncation)
   rollingSummary?: string;            // recap of truncated-out turns
   userMessage: string;
-  contextWindow: number;              // 16k local Qwen; larger for HF cloud
+  contextWindow: number;              // 16k local Qwen; larger for the cloud provider
   mode: 'local' | 'cloud';
   now: Date;
   memoryAvailable?: boolean;          // memory system wired this turn (grounding note on empty recall)
@@ -279,8 +279,9 @@ const PROCEDURAL_CAP = 800;
 const MEMORY_CAP = 2_500;
 
 export function countTokens(s: string): number {
-  // Backed by the active model's tokenizer (MLX Qwen locally; HF tokenizer
-  // when in cloud mode). Approx fallback: chars/4 if tokenizer unavailable.
+  // Backed by the active model's tokenizer (MLX Qwen locally; the cloud
+  // provider's tokenizer when in cloud mode). Approx fallback: chars/4 if
+  // tokenizer unavailable.
   return tokenizer.encode(s).length;
 }
 
@@ -357,7 +358,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
   - **Memory-injected** — subtle chip/expander on the assistant bubble ("Recalled 4 memories") that, when opened, lists the `injected` items with timestamps and scores. Off by default, toggled in settings.
   - **Model-waking** — shown when feature 1 reports `loading`; a "Waking Jarvis…" indicator; input stays enabled so the message queues.
   - **Error** — retrieval timeout (degrades silently with a tiny "no memory this turn" note), generation failure (retry), or backend down (clear message + retry).
-  - **Cloud-mode banner** — when a turn falls back to an HF endpoint (feature 1), a non-blocking "Answered via cloud" badge.
+  - **Cloud-mode banner** — when a turn falls back to a cloud provider (feature 1), a non-blocking "Answered via cloud" badge.
 
 - **Key controls:**
   - **Send** (Enter) / multiline (Shift+Enter).
@@ -394,7 +395,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
 | **Calendar question, empty window** | Calendar-intent message; mirror returns no events in the agenda window | Agenda block still emitted with an explicit "No events in this window" line — silence invites the model to invent events. Mirror unavailable/throws → block omitted, turn proceeds (memory-only). |
 | **Contradictory memories** | Conflicting facts surfaced for the same entity | Pass both through; rely on feature 5's temporal scoring to favor the most recent/valid; persona flags uncertainty ("Last I noted X, though that may have changed") rather than asserting blindly. |
 | **Very long conversation** | History exceeds the verbatim budget repeatedly | Rolling summarization keeps the live window bounded indefinitely; full transcript stays in the local store and stays searchable via memory after it leaves the window. |
-| **Cloud fallback mid-conversation** | Feature 1 routes a turn to an HF endpoint | Re-budget against that model's larger `contextWindow`, keep the same assembly order, show the cloud badge, set per-turn `mode='cloud'`. Subsequent turns may revert to local. |
+| **Cloud fallback mid-conversation** | Feature 1 routes a turn to a cloud provider | Re-budget against that model's larger `contextWindow`, keep the same assembly order, show the cloud badge, set per-turn `mode='cloud'`. Subsequent turns may revert to local. |
 | **Retrieval timeout / memory down** | Feature 5 exceeds the sub-second budget or is offline | Proceed with zero memories so chat flow is never blocked; surface a quiet "no memory this turn" note. |
 | **Streaming abort** | User hits stop, or socket/connection drops mid-stream | Abort the `/chat/completions` stream; persist the partial assistant message; still enqueue it for capture (partial context > none). Emit `turn:end`. |
 | **Generation failure** | Feature 1 errors after assembly (OOM, crash) | Surface a retry; the assembled prompt is cached so retry skips re-retrieval/re-assembly. If local repeatedly fails, offer cloud fallback. |
@@ -405,7 +406,7 @@ The `overflow` turns are handed to `history/summarize.ts`, which produces (or ex
 
 ## Dependencies  *(REQUIRED)*
 
-- [features/1-local-qwen-inference-core.md](./1-local-qwen-inference-core.md) — local Qwen via MLX + HF cloud fallback; OpenAI-compatible streaming API; load/unload status.
+- [features/1-local-qwen-inference-core.md](./1-local-qwen-inference-core.md) — local Qwen via MLX + cloud fallback (Fireworks/Anthropic); OpenAI-compatible streaming API; load/unload status.
 - [features/3-memory-capture-and-ingestion.md](./3-memory-capture-and-ingestion.md) — receives the closed turn for ingestion into long-term memory.
 - [features/4-long-term-memory-store.md](./4-long-term-memory-store.md) — Graphiti temporal graph + LanceDB/Chroma vectors backing retrieval.
 - [features/5-hybrid-memory-retrieval.md](./5-hybrid-memory-retrieval.md) — per-turn scored memory retrieval (recency × importance × relevance) and the memory-peek query.

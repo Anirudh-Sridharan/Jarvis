@@ -8,7 +8,7 @@ Modeled on Letta-style "sleep-time compute" and the Generative Agents *reflectio
 
 Because capture is everything-in, consolidation is **load-bearing for correctness**: the retrieval quality of feature 5 is bounded by how well this job extracts, dedups, and invalidates. The two highest-value correctness wins are (a) **contradiction resolution** (newest-wins / source-trust, invalidate via `valid_to`) and (b) **stale-fact handling** — without them the store accretes mutually-contradictory facts and retrieval degrades over weeks.
 
-Heavy LLM work (extraction, reflection, importance rating) routes to **Hugging Face Inference Endpoints** — cost is no concern, it runs overnight, and the M3 Air would thermal-throttle on a multi-hundred-record batch. Orchestration, temporal math, and dedup are deterministic TS/Node; only ML steps touch Python/HF. The whole run is **idempotent and resumable**: each stage commits a checkpoint so a crash at 03:17 resumes cleanly the next invocation rather than re-processing or corrupting the store.
+Heavy LLM work (extraction, reflection, importance rating) routes to **Fireworks AI** (serverless, OpenAI-compatible, `accounts/fireworks/models/qwen3-next-80b-a3b-instruct`) — cost is no concern, it runs overnight, and the M3 Air would thermal-throttle on a multi-hundred-record batch. Orchestration, temporal math, and dedup are deterministic TS/Node; only ML steps touch the cloud provider (or the local Python/MLX sidecar for embeddings). The whole run is **idempotent and resumable**: each stage commits a checkpoint so a crash at 03:17 resumes cleanly the next invocation rather than re-processing or corrupting the store.
 
 ## Data flow  *(REQUIRED)*
 
@@ -21,28 +21,28 @@ Heavy LLM work (extraction, reflection, importance rating) routes to **Hugging F
 
 ### Processing pipeline (the 9 stages)
 1. **GATHER** *(deterministic)* — select pending records in window; create/resume a `ConsolidationRun`; take an advisory lock; snapshot input ids for idempotency. Order records oldest-first.
-2. **EXTRACT** *(AI)* — for each record, call HF extraction model → discrete updateable `ExtractedFact[]` (subject-predicate-object-ish units, not blob summaries) with `confidence`. Validation/confidence gate drops hallucinated/low-confidence units. **Assistant chat turns are skipped entirely** (marked processed, zero facts minted): the assistant's output either restates what the user/memory already provided (redundant) or was hallucinated — extracting from it poisons the graph with the model's own confabulations, which later retrieve as "grounded" memories.
+2. **EXTRACT** *(AI)* — for each record, call the Fireworks extraction model → discrete updateable `ExtractedFact[]` (subject-predicate-object-ish units, not blob summaries) with `confidence`. Validation/confidence gate drops hallucinated/low-confidence units. **Assistant chat turns are skipped entirely** (marked processed, zero facts minted): the assistant's output either restates what the user/memory already provided (redundant) or was hallucinated — extracting from it poisons the graph with the model's own confabulations, which later retrieve as "grounded" memories.
 3. **REFLECT** *(AI)* — over the day's facts + recent window, synthesize higher-level `Insight[]` ("mentioned job stress 4× this week"; "prefers morning deep work"). Reflection reads aggregates, not single records.
 4. **RESOLVE** *(deterministic temporal + AI tie-break)* — for each new fact, find candidate prior facts (same entity/predicate via embedding + key match). Apply newest-wins / source-trust; set `valid_to` on superseded facts; merge near-duplicates. Genuine same-day conflicts escalate to an AI tie-break only when deterministic rules tie.
 5. **FORGET** *(deterministic scoring)* — FadeMem-style decay over all facts; produce `ForgetDecision[]` (evict / compress / keep). Safety floor: never evict below a per-entity minimum; **never delete the raw journal** (only derived facts).
 6. **SCORE IMPORTANCE** *(AI + deterministic clamp)* — rate salience 1–10 for new/changed facts (used by feature 5 retrieval scoring). Deterministic guardrails clamp drift vs prior importance.
 7. **UPDATE PROCEDURAL BLOCK** *(AI propose / deterministic apply)* — fold new procedural signals into feature 20's preference block via small diffs; conflicting prefs use the same temporal-validity rule.
-8. **DEFERRED EMBED** *(deterministic batch, Python/HF)* — embed all `embed_deferred` bodies + new facts in one batched call; write vectors to feature 4; clear flags.
+8. **DEFERRED EMBED** *(deterministic batch, local Python/MLX)* — embed all `embed_deferred` bodies + new facts in one batched call; write vectors to feature 4; clear flags.
 9. **BRIEFING PREP** *(deterministic)* — assemble morning-briefing material (top insights, new facts, unresolved conflicts, "what changed") into a `BriefingPayload` for feature 15; mark records `consolidation_pending=false`; finalize `ConsolidationRun` with counts; release lock.
 
 ```mermaid
 flowchart TD
-    A[1. GATHER<br/>pending records, lock, checkpoint] --> B[2. EXTRACT<br/>HF → ExtractedFact + confidence]
-    B --> C[3. REFLECT<br/>HF → Insight patterns]
+    A[1. GATHER<br/>pending records, lock, checkpoint] --> B[2. EXTRACT<br/>Fireworks → ExtractedFact + confidence]
+    B --> C[3. REFLECT<br/>Fireworks → Insight patterns]
     C --> D[4. RESOLVE<br/>temporal validity, set valid_to, dedup]
     D --> E[5. FORGET<br/>decay scoring → ForgetDecision]
-    E --> F[6. SCORE IMPORTANCE<br/>HF salience 1-10 + clamp]
+    E --> F[6. SCORE IMPORTANCE<br/>Fireworks salience 1-10 + clamp]
     F --> G[7. UPDATE PROCEDURAL<br/>preference block diffs]
-    G --> H[8. DEFERRED EMBED<br/>batched HF embeddings]
+    G --> H[8. DEFERRED EMBED<br/>batched local embeddings]
     H --> I[9. BRIEFING PREP<br/>BriefingPayload, clear flags, finalize]
     I --> J[(feature 4 store)]
     I --> K[feature 15 briefing]
-    subgraph AI [AI-driven · HF endpoints]
+    subgraph AI [AI-driven · cloud provider]
         B
         C
         F
@@ -143,7 +143,7 @@ A **Consolidation** view in the Jarvis dashboard (read-mostly, one user):
 - **Insights feed** — the night's `Insight[]` with evidence-fact drill-down.
 - **Change diff / review** — a per-stage diff of what changed: new facts (green), invalidated facts with old→new value and the supersession edge (amber), forgotten/compressed facts (struck-through), procedural-block diff. Each row links to source record. Optional **undo** per change within a retention window (reverts `valid_to`, restores evicted fact from soft-delete tombstone).
 - **Run now** — manual trigger button (runs the same pipeline on the current pending window, `trigger='manual'`), with a live stage progress bar streaming stage transitions.
-- **Errors / skips** — list of records skipped (HF down, low confidence, validation fail) with retry-next-run note.
+- **Errors / skips** — list of records skipped (cloud provider down, low confidence, validation fail) with retry-next-run note.
 
 State: dashboard polls `ConsolidationRun` + a stage-progress stream. No editing of facts here beyond undo; full fact editing lives in feature 4's store view.
 
@@ -151,7 +151,7 @@ State: dashboard polls `ConsolidationRun` + a stage-progress stream. No editing 
 
 **Deterministic vs AI boundary (hard line):**
 - **Deterministic (TS/Node):** record selection & windowing, run/checkpoint lifecycle, locking, idempotency (frozen input ids), candidate-fact matching, **all temporal math** (`valid_from/valid_to`, newest-wins, source-trust ordering), dedup/merge, decay scoring & forget eviction, importance clamping, embedding batch orchestration, briefing assembly, flag clearing.
-- **AI-driven (HF endpoints):** fact extraction from raw bodies, reflection/insight synthesis, importance *suggestion*, procedural-signal *proposal*, and a narrow conflict tie-break only when deterministic rules tie. Every AI output passes a deterministic gate before it touches the store.
+- **AI-driven (cloud provider):** fact extraction from raw bodies, reflection/insight synthesis, importance *suggestion*, procedural-signal *proposal*, and a narrow conflict tie-break only when deterministic rules tie. Every AI output passes a deterministic gate before it touches the store.
 
 **Temporal validity:** a fact is "current" iff `valid_to IS NULL`. Superseding sets the old fact's `valid_to = new fact's valid_from` (never deletes). Retrieval (feature 5) filters to current facts by default but can time-travel via `valid_at`.
 
@@ -167,7 +167,7 @@ State: dashboard polls `ConsolidationRun` + a stage-progress stream. No editing 
 
 | # | Case | Handling |
 |---|------|----------|
-| 1 | HF endpoint down / 5xx | Exponential-backoff retry (bounded). On exhaustion: **skip** the affected stage's failing units, mark run `partial`, leave those records `consolidation_pending=true` for next night. Never write garbage; never corrupt store. |
+| 1 | Cloud provider down / 5xx | Exponential-backoff retry (bounded). On exhaustion: **skip** the affected stage's failing units, mark run `partial`, leave those records `consolidation_pending=true` for next night. Never write garbage; never corrupt store. |
 | 2 | Partial run crash mid-pipeline | Resume from last committed `stage` via checkpoint; stages idempotent and keyed by `runId`. |
 | 3 | Extraction hallucination | Confidence gate (`confidence >= minConfidence`) + schema validation + entity/predicate sanity check; failed units dropped and logged, not persisted. |
 | 4 | Over-forgetting | Safety floor: `importance>=7` and `minFactsPerEntity` protected; eviction is soft-delete (tombstone) → reversible; raw journal never touched. |
@@ -186,11 +186,11 @@ State: dashboard polls `ConsolidationRun` + a stage-progress stream. No editing 
 - [features/3-memory-capture-and-ingestion.md](./3-memory-capture-and-ingestion.md) — source of `consolidation_pending` records and `embed_deferred` bodies.
 - [features/4-long-term-memory-store.md](./4-long-term-memory-store.md) — fact store with `valid_from/valid_to`, importance, embeddings; target of all writes.
 - [features/5-hybrid-memory-retrieval.md](./5-hybrid-memory-retrieval.md) — consumer; importance + currency drive retrieval scoring.
-- [features/1-local-qwen-inference-core.md](./1-local-qwen-inference-core.md) — local fallback / small deterministic checks; primary heavy lifting offloaded to HF.
+- [features/1-local-qwen-inference-core.md](./1-local-qwen-inference-core.md) — local fallback / small deterministic checks; primary heavy lifting offloaded to Fireworks AI.
 - [features/15-daily-briefing-and-digest.md](./15-daily-briefing-and-digest.md) — consumes `BriefingPayload`.
 - [features/19-proactive-scheduling-and-triggers.md](./19-proactive-scheduling-and-triggers.md) — schedules the 03:00 run; manual trigger path.
 - [features/20-personal-profile-and-preference-learning.md](./20-personal-profile-and-preference-learning.md) — procedural "how I like to work" block updated in stage 7.
-- [architecture/model-serving.md](../architecture/model-serving.md) — HF endpoint routing, batching, embeddings model.
+- [architecture/model-serving.md](../architecture/model-serving.md) — cloud provider routing, batching, embeddings model.
 
 ## File structure  *(deep tier)*
 ```
@@ -199,11 +199,11 @@ features/consolidation/
   run-lifecycle.ts             # ConsolidationRun create/resume/checkpoint/finalize, locking
   stages/
     01-gather.ts               # select pending, window, freeze input ids
-    02-extract.ts              # HF extraction orchestration + confidence gate
-    03-reflect.ts              # HF reflection → Insight[]
+    02-extract.ts              # Fireworks extraction orchestration + confidence gate
+    03-reflect.ts              # Fireworks reflection → Insight[]
     04-resolve.ts              # temporal validity, supersession, dedup
     05-forget.ts               # FadeMem decay scoring → ForgetDecision[]
-    06-importance.ts           # HF salience + deterministic clamp
+    06-importance.ts           # Fireworks salience + deterministic clamp
     07-procedural.ts           # preference-block diff/apply
     08-embed.ts                # deferred embedding batch
     09-briefing.ts             # BriefingPayload assembly, flag clearing
@@ -212,14 +212,14 @@ features/consolidation/
     temporal.ts               # newest-wins / source-trust / valid_to math
   forget/
     decay.ts                   # decay score, safety floors, tombstones
-  hf/
+  cloud/
     extract-prompt.ts          # extraction prompt template
-    client.ts                  # HF endpoint client, retry/backoff
+    client.ts                  # cloud provider client, retry/backoff
   schemas.ts                   # ConsolidationRun, ExtractedFact, Insight, ForgetDecision
   config.ts                    # thresholds, caps, decay params, floors
 ml/consolidation/              # Python — only for ML
-  embed_batch.py               # batched embeddings via HF
-  extract_model.py             # extraction model adapter (HF endpoint)
+  embed_batch.py               # batched embeddings via local MLX
+  extract_model.py             # extraction model adapter (cloud provider)
 dashboard/views/Consolidation.tsx
 ```
 
@@ -322,4 +322,4 @@ function applyWinner(winner, prior, incoming, store, invalidated) {
 }
 ```
 
-The deterministic core owns every write that affects retrieval correctness; the HF endpoints only ever *propose* content that a TS gate must accept. That separation is what makes capture-everything safe: the more Jarvis records, the harder this job works each night — extracting, deduping, invalidating, and forgetting — but it can never silently corrupt the store, and it never deletes your raw journal.
+The deterministic core owns every write that affects retrieval correctness; the cloud provider only ever *proposes* content that a TS gate must accept. That separation is what makes capture-everything safe: the more Jarvis records, the harder this job works each night — extracting, deduping, invalidating, and forgetting — but it can never silently corrupt the store, and it never deletes your raw journal.
