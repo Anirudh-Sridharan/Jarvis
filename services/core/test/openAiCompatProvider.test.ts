@@ -36,10 +36,9 @@ function sseEvent(content: string): string {
 }
 const DONE_EVENT = "data: [DONE]\n\n";
 
-/** A fake streaming Response: two content deltas ("hello ", "world") then [DONE]. */
-function makeFakeStreamResponse(): Response {
+/** A fake streaming Response from a list of raw SSE event strings. */
+function makeStreamResponse(events: string[]): Response {
   const encoder = new TextEncoder();
-  const events = [sseEvent("hello "), sseEvent("world"), DONE_EVENT];
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const event of events) controller.enqueue(encoder.encode(event));
@@ -47,6 +46,11 @@ function makeFakeStreamResponse(): Response {
     },
   });
   return new Response(body, { status: 200 });
+}
+
+/** A fake streaming Response: two content deltas ("hello ", "world") then [DONE]. */
+function makeFakeStreamResponse(): Response {
+  return makeStreamResponse([sseEvent("hello "), sseEvent("world"), DONE_EVENT]);
 }
 
 /** Drains an async generator of string deltas into a single joined string. */
@@ -252,6 +256,84 @@ describe("OpenAiCompatProvider", () => {
       const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
       const result = await drain(provider.streamChat(makeDispatch()));
       expect(result).toBe("hello world");
+    });
+
+    it('a terminal finish_reason "stop" chunk does not throw', async () => {
+      fetchMock.mockResolvedValue(
+        makeStreamResponse([
+          sseEvent("all good"),
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+          DONE_EVENT,
+        ]),
+      );
+      const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
+      const result = await drain(provider.streamChat(makeDispatch()));
+      expect(result).toBe("all good");
+    });
+  });
+
+  describe("bad streams never end cleanly (WR-05)", () => {
+    it("a mid-stream data:{error:...} event throws with the provider's message instead of ending the stream", async () => {
+      fetchMock.mockResolvedValue(
+        makeStreamResponse([
+          sseEvent("partial "),
+          `data: ${JSON.stringify({ error: { message: "backend exploded", type: "server_error" } })}\n\n`,
+        ]),
+      );
+      const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
+
+      await expect(drain(provider.streamChat(makeDispatch()))).rejects.toThrow(
+        /Provider stream error: backend exploded/,
+      );
+    });
+
+    it('finish_reason "length" (output clipped by max_tokens) throws instead of returning the truncated accumulation', async () => {
+      fetchMock.mockResolvedValue(
+        makeStreamResponse([
+          sseEvent('{"facts": ['),
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] })}\n\n`,
+          DONE_EVENT,
+        ]),
+      );
+      const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
+
+      await expect(drain(provider.streamChat(makeDispatch()))).rejects.toThrow(
+        /finish_reason="length"/,
+      );
+    });
+
+    it('finish_reason "error" (MLX mid-generation failure marker) throws', async () => {
+      fetchMock.mockResolvedValue(
+        makeStreamResponse([
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "error" }] })}\n\n`,
+          DONE_EVENT,
+        ]),
+      );
+      const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
+
+      await expect(drain(provider.streamChat(makeDispatch()))).rejects.toThrow(
+        /finish_reason="error"/,
+      );
+    });
+
+    it("an abort observed between reads throws instead of reporting the partial accumulation as a completion", async () => {
+      const encoder = new TextEncoder();
+      // A body that delivers one delta and then stays open (no [DONE], no close).
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(sseEvent("partial ")));
+        },
+      });
+      fetchMock.mockResolvedValue(new Response(body, { status: 200 }));
+      const provider = new OpenAiCompatProvider({ endpointUrl: FIREWORKS_BASE_URL, apiKey: "k" });
+
+      const abort = new AbortController();
+      const gen = provider.streamChat(makeDispatch({ signal: abort.signal }));
+      const first = await gen.next();
+      expect(first.value).toBe("partial ");
+
+      abort.abort();
+      await expect(gen.next()).rejects.toThrow(/abort/i);
     });
   });
 });
