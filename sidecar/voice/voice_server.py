@@ -472,10 +472,24 @@ def resolve_voice(pipeline: Any, spec: str) -> Any:
     ).sum(dim=0)
 
 
-def _voice_for(spec: str) -> Any:
-    """Cached resolve_voice against the loaded pipeline."""
+async def _voice_for_async(spec: str) -> Any:
+    """Cached resolve_voice against the loaded pipeline.
+
+    Cache misses run on the default executor (WR-08): ``resolve_voice`` on a
+    blend spec imports torch and calls ``pipeline.load_voice`` per component
+    — synchronous tensor/file I/O that must never block the event loop (the
+    /stt/stream WS receive path and /health share it; the Aura→Kokoro
+    fallback even hits this mid-stream on first use). Every other
+    model-touching call in this file already routes through
+    ``run_in_executor`` — this brings the three voice-resolution call sites
+    in line. A concurrent double-miss for the same spec resolves twice and
+    idempotently overwrites — harmless (first-use-per-spec cost only).
+    """
     if spec not in _resolved_voices:
-        _resolved_voices[spec] = resolve_voice(tts_mgr.get_pipeline(), spec)
+        loop = asyncio.get_running_loop()
+        _resolved_voices[spec] = await loop.run_in_executor(
+            None, resolve_voice, tts_mgr.get_pipeline(), spec
+        )
     return _resolved_voices[spec]
 
 
@@ -888,7 +902,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
 
     if use_aura:
         # Plain string — Aura voice ids are never cached/resolved via
-        # _voice_for (that cache is Kokoro-only).
+        # _voice_for_async (that cache is Kokoro-only).
         #
         # Voice-shape rule (WR-03): only an Aura-shaped id ("aura-…", e.g.
         # "aura-2-draco-en") is forwarded to Deepgram. A Kokoro-style value
@@ -904,7 +918,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
         kokoro_voice = None
     else:
         try:
-            kokoro_voice = _voice_for(req.voice or TTS_VOICE)
+            kokoro_voice = await _voice_for_async(req.voice or TTS_VOICE)
         except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
             # Nothing to unregister: the cancel registry entry is only
             # created once the generator below actually starts (WR-06).
@@ -998,7 +1012,7 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                 _tts_engine_status["active"] = "kokoro"
                 _tts_engine_status["reason"] = reason[:200]
                 try:
-                    fallback_voice = _voice_for(TTS_VOICE)
+                    fallback_voice = await _voice_for_async(TTS_VOICE)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Kokoro fallback voice resolution failed: %s", exc)
                     return
@@ -1129,7 +1143,7 @@ async def warmup() -> Dict[str, Any]:
         async for _chunk in synthesize_streaming(
             text="Ready.",
             pipeline=tts_mgr.get_pipeline(),
-            voice=_voice_for(TTS_VOICE),
+            voice=await _voice_for_async(TTS_VOICE),
             speed=1.0,
             loop=loop,
         ):

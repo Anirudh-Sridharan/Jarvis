@@ -12,7 +12,7 @@ is replaced with a stub exposing a sentinel pipeline, ``tts.synthesize_streaming
 ``deepgram_tts.synthesize_streaming_aura`` is replaced with a scriptable
 async-generator stub that records the kwargs it received.
 
-Eleven cases are asserted:
+Twelve cases are asserted:
     1. Default engine — Kokoro serves, Aura stub never called, headers pinned.
     2. Per-request Aura — ``engine: "aura"`` serves via Aura even with the env
        default at kokoro; default voice is DEEPGRAM_TTS_MODEL, an Aura-shaped
@@ -46,6 +46,10 @@ Eleven cases are asserted:
         socket: (a) the bounded read ends the stream with outcome
         "stalled" instead of hanging; (b) cancel_event is observed even
         while a read is pending (outcome "cancelled").
+    12. Voice resolution off the event loop (WR-08) — a blend-spec cache
+        miss runs pipeline.load_voice on an executor thread (never the
+        loop thread) and the loop keeps ticking while it loads; a repeat
+        resolve is a cache hit.
 
 Prints ``TTS_SELFTEST_OK`` and exits 0 on success; prints a failure message to
 stderr and exits non-zero otherwise.
@@ -73,7 +77,7 @@ AURA_CHUNKS_DEFAULT = [b"AURA-CHUNK-1", b"AURA-CHUNK-2"]
 
 EXPECTED_CONTENT_TYPE = "audio/pcm; rate=24000; channels=1; bits=16"
 
-# A no-colon override for voice_server.TTS_VOICE so _voice_for()'s blend-parse
+# A no-colon override for voice_server.TTS_VOICE so _voice_for_async()'s blend-parse
 # branch (which needs a loaded torch + Kokoro pipeline) is never exercised —
 # our stub pipeline is a bare sentinel object, not a real KPipeline.
 TEST_KOKORO_VOICE_SPEC = "selftest-kokoro-voice"
@@ -571,6 +575,74 @@ def test_case11_real_generator_read_deadline() -> None:
     asyncio.run(_case11_async())
 
 
+# ---------------------------------------------------------------------------
+# Case 12: voice resolution off the event loop (WR-08) — a blend-spec cache
+# miss runs pipeline.load_voice (blocking torch/file I/O) on the executor,
+# never on the loop thread, and the loop keeps servicing other coroutines
+# while it loads.
+# ---------------------------------------------------------------------------
+
+
+async def _case12_async() -> None:
+    import threading
+    import time as _time
+
+    loaded_on: List[Any] = []
+
+    class _SlowPipeline:
+        def load_voice(self, _name: str) -> Any:
+            import torch  # type: ignore[import]
+
+            loaded_on.append(threading.current_thread())
+            _time.sleep(0.15)  # stand-in for blocking voicepack tensor/disk I/O
+            return torch.zeros(4)
+
+    class _SlowTtsMgr(_StubTtsMgr):
+        def get_pipeline(self) -> Any:
+            return _SlowPipeline()
+
+    spec = "bm_case12_a:0.5,bm_case12_b:0.5"
+    orig_mgr = voice_server.tts_mgr
+    voice_server.tts_mgr = _SlowTtsMgr()
+    ticks = [0]
+    stop = asyncio.Event()
+
+    async def _heartbeat() -> None:
+        while not stop.is_set():
+            ticks[0] += 1
+            await asyncio.sleep(0.01)
+
+    hb = asyncio.create_task(_heartbeat())
+    try:
+        resolved = await voice_server._voice_for_async(spec)
+        assert resolved is not None
+        # Cache hit resolves without touching the pipeline again.
+        again = await voice_server._voice_for_async(spec)
+        assert again is resolved, "second resolve must be a cache hit"
+    finally:
+        stop.set()
+        await hb
+        voice_server.tts_mgr = orig_mgr
+        voice_server._resolved_voices.pop(spec, None)
+
+    loop_thread = threading.current_thread()
+    assert loaded_on and all(t is not loop_thread for t in loaded_on), (
+        "pipeline.load_voice ran on the event-loop thread (WR-08)",
+        loaded_on,
+    )
+    assert len(loaded_on) == 2, ("expected exactly one load per blend component", loaded_on)
+    # ~0.3s of blocking I/O with a 10ms heartbeat: off-loop → ~30 ticks;
+    # on-loop → the heartbeat would starve to ~1-2.
+    assert ticks[0] >= 5, f"event loop starved during voice resolution (ticks={ticks[0]})"
+
+
+def test_case12_voice_resolution_off_loop() -> None:
+    voice_server.TTS_ENGINE = "kokoro"
+    voice_server.DEEPGRAM_API_KEY = None
+    _reset()
+    asyncio.run(_case12_async())
+
+
 def main() -> None:
     orig_tts_mgr = voice_server.tts_mgr
     orig_engine = voice_server.TTS_ENGINE
@@ -593,6 +665,7 @@ def main() -> None:
             test_case9_registry_lifecycle()
             test_case10_stall_falls_back_same_request(client)
             test_case11_real_generator_read_deadline()
+            test_case12_voice_resolution_off_loop()
     finally:
         voice_server.tts_mgr = orig_tts_mgr
         voice_server.TTS_ENGINE = orig_engine
