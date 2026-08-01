@@ -189,9 +189,11 @@ voice conversation client never sends it, so which engine actually serves a
 turn is governed entirely by the sidecar's own environment. Aura-2 output is
 `linear16` at 24 kHz — **identical** to Kokoro's format — so the response
 headers and the client's playback pipeline never need to change based on
-engine. An Aura failure (no key, failed connect, or a zero-byte stream)
-falls back to Kokoro **within the same request**, so the caller always gets
-audio, never a 4xx/5xx or silence.
+engine. An Aura failure (no key, failed connect, a zero-byte stream, or a
+**stall** — no socket message within the read deadline) falls back to Kokoro
+**within the same request**, so the caller always gets audio, never a
+4xx/5xx or silence. (A stream that dies outright *after* audio was already
+delivered ends truncated — restarting mid-sentence would double-speak.)
 
 `voice` is **engine-scoped**: on the Aura path only Aura-shaped ids
 (`aura-…`, e.g. `aura-2-draco-en`) are honored — a Kokoro voice id or blend

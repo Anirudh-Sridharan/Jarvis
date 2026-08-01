@@ -829,8 +829,13 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     other than exactly ``"aura"`` is treated as ``"kokoro"``. Requesting
     ``"aura"`` with no ``DEEPGRAM_API_KEY`` configured degrades to Kokoro
     (never a 400/503) — see ``GET /health``'s ``tts_engine.reason``. A zero-
-    byte Aura stream mid-request also falls through to Kokoro for the SAME
-    request, so a failed cloud voice never produces silence.
+    byte Aura stream falls through to Kokoro for the SAME request, and so
+    does a STALLED Aura stream (no socket message within
+    ``deepgram_tts.READ_TIMEOUT_S`` — the reply restarts on Kokoro rather
+    than hanging; WR-07), so a failed or stalled cloud voice never produces
+    silence. Scope note: an Aura stream that dies outright AFTER audio was
+    already delivered ends truncated — restarting mid-sentence would
+    double-speak.
 
     ``voice`` is engine-scoped: on the Aura path only Aura-shaped ids
     (``aura-…``, e.g. ``aura-2-pandora-en``) are honored — a Kokoro voice id
@@ -948,11 +953,13 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                 import deepgram_tts  # type: ignore[import]
 
                 bytes_yielded = 0
+                aura_outcome: Dict[str, str] = {}
                 async for pcm_chunk in deepgram_tts.synthesize_streaming_aura(
                     text=req.text,
                     api_key=DEEPGRAM_API_KEY,
                     voice=aura_voice,
                     cancel_event=cancel_event,
+                    outcome=aura_outcome,
                 ):
                     if cancel_event.is_set():
                         log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
@@ -964,16 +971,29 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                 if cancel_event.is_set():
                     return
 
-                if bytes_yielded > 0:
+                stalled = aura_outcome.get("result") == "stalled"
+                if bytes_yielded > 0 and not stalled:
                     _tts_engine_status["active"] = "aura"
                     return
 
-                # Zero bytes and not cancelled: Aura failed somewhere between
-                # connect and Flushed (deepgram_tts.py already logged the
-                # specific reason on its own). A failed cloud voice must
-                # never produce silence — fall through to Kokoro for the
-                # SAME request (T-13.2-10).
-                reason = f"Aura produced no audio for request_id={request_id}"
+                # Zero bytes, or a mid-request STALL (WR-07), and not
+                # cancelled: Aura failed between connect and Flushed
+                # (deepgram_tts.py already logged the specific reason). A
+                # failed cloud voice must never produce silence — fall
+                # through to Kokoro for the SAME request (T-13.2-10). A
+                # stall restarts the reply on Kokoro from the top: a rare
+                # repetition beats an indefinite hang or a half-said reply
+                # (D-02 — degradation is surfaced, never silent). A stream
+                # that dies outright AFTER yielding audio still truncates
+                # (bytes_yielded > 0, not stalled): restarting there would
+                # double-speak on every transient mid-stream death.
+                if stalled:
+                    reason = (
+                        f"Aura stalled mid-request after {bytes_yielded} bytes "
+                        f"for request_id={request_id}"
+                    )
+                else:
+                    reason = f"Aura produced no audio for request_id={request_id}"
                 log.warning("Aura TTS unavailable (falling back to Kokoro): %s", reason)
                 _tts_engine_status["active"] = "kokoro"
                 _tts_engine_status["reason"] = reason[:200]

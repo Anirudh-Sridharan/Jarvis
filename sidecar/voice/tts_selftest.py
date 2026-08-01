@@ -12,7 +12,7 @@ is replaced with a stub exposing a sentinel pipeline, ``tts.synthesize_streaming
 ``deepgram_tts.synthesize_streaming_aura`` is replaced with a scriptable
 async-generator stub that records the kwargs it received.
 
-Nine cases are asserted:
+Eleven cases are asserted:
     1. Default engine — Kokoro serves, Aura stub never called, headers pinned.
     2. Per-request Aura — ``engine: "aura"`` serves via Aura even with the env
        default at kokoro; default voice is DEEPGRAM_TTS_MODEL, an Aura-shaped
@@ -38,6 +38,14 @@ Nine cases are asserted:
        never iterated registers nothing (no _tts_cancel leak; /tts/cancel
        for that id honestly reports false), while a consumed request
        registers on first iteration and pops on completion.
+    10. Stall fallback, route level (WR-07) — an Aura stream reporting
+        outcome "stalled" after partial audio falls through to Kokoro in
+        the SAME response; /health surfaces the stall reason.
+    11. Real Aura generator read deadline (WR-07) — drives the REAL
+        synthesize_streaming_aura against a scripted stalled-but-alive
+        socket: (a) the bounded read ends the stream with outcome
+        "stalled" instead of hanging; (b) cancel_event is observed even
+        while a read is pending (outcome "cancelled").
 
 Prints ``TTS_SELFTEST_OK`` and exits 0 on success; prints a failure message to
 stderr and exits non-zero otherwise.
@@ -126,6 +134,9 @@ class _AuraCalls:
     chunks: List[bytes] = list(AURA_CHUNKS_DEFAULT)
     delay_s: float = 0.0
     observed_cancel_set: List[bool] = []
+    # What the stub writes into outcome["result"] when the chunk list is
+    # exhausted normally ("stalled" scripts a WR-07 mid-request stall).
+    outcome_result: Optional[str] = "complete"
 
 
 async def _aura_stub(
@@ -134,6 +145,7 @@ async def _aura_stub(
     voice: str = deepgram_tts.DEFAULT_AURA_VOICE,
     sample_rate: int = deepgram_tts.AURA_SAMPLE_RATE,
     cancel_event: Optional[asyncio.Event] = None,
+    outcome: Optional[Dict[str, str]] = None,
 ) -> AsyncGenerator[bytes, None]:
     _AuraCalls.calls.append({"text": text, "api_key": api_key, "voice": voice})
     for chunk in _AuraCalls.chunks:
@@ -141,8 +153,12 @@ async def _aura_stub(
             await asyncio.sleep(_AuraCalls.delay_s)
         if cancel_event is not None and cancel_event.is_set():
             _AuraCalls.observed_cancel_set.append(True)
+            if outcome is not None:
+                outcome["result"] = "cancelled"
             return
         yield chunk
+    if outcome is not None and _AuraCalls.outcome_result is not None:
+        outcome["result"] = _AuraCalls.outcome_result
 
 
 def _reset() -> None:
@@ -152,7 +168,12 @@ def _reset() -> None:
     _AuraCalls.chunks = list(AURA_CHUNKS_DEFAULT)
     _AuraCalls.delay_s = 0.0
     _AuraCalls.observed_cancel_set = []
+    _AuraCalls.outcome_result = "complete"
 
+
+# Captured BEFORE the monkeypatch below — case 11 drives the REAL Aura
+# generator's read-deadline/cancel-watch machinery against a scripted socket.
+_REAL_AURA_SYNTH = deepgram_tts.synthesize_streaming_aura
 
 tts.synthesize_streaming = _kokoro_stub  # type: ignore[assignment]
 deepgram_tts.synthesize_streaming_aura = _aura_stub  # type: ignore[assignment]
@@ -434,6 +455,122 @@ def test_case9_registry_lifecycle() -> None:
     asyncio.run(_case9_async())
 
 
+# ---------------------------------------------------------------------------
+# Case 10: mid-request STALL fallback (WR-07, route level) — an Aura stream
+# that stalls after partial audio must fall through to Kokoro in the SAME
+# response (not hang, not end truncated), with the stall surfaced on
+# /health.tts_engine.
+# ---------------------------------------------------------------------------
+
+
+def test_case10_stall_falls_back_same_request(client: TestClient) -> None:
+    voice_server.TTS_ENGINE = "aura"
+    voice_server.DEEPGRAM_API_KEY = "case10-key-not-a-real-secret"
+    _reset()
+    _AuraCalls.chunks = [b"AURA-PARTIAL-1"]
+    _AuraCalls.outcome_result = "stalled"
+
+    resp = client.post("/tts", json={"text": "hello"})
+
+    assert resp.status_code == 200, resp.status_code
+    # Partial Aura bytes, then the FULL Kokoro fallback, in one response.
+    assert resp.content == b"AURA-PARTIAL-1" + KOKORO_BYTES, resp.content
+    assert _KokoroCalls.calls, "Kokoro fallback must run in the same request on a stall"
+
+    health = client.get("/health").json()
+    assert health["tts_engine"]["active"] == "kokoro", health["tts_engine"]
+    assert "stalled" in (health["tts_engine"]["reason"] or ""), health["tts_engine"]
+
+
+# ---------------------------------------------------------------------------
+# Case 11: REAL Aura generator read-deadline + concurrent cancel watch
+# (WR-07, deepgram_tts level) — drives _REAL_AURA_SYNTH against a scripted
+# stalled-but-alive socket (one audio frame, then recv never resolves) with
+# websockets' connect() patched at the module attribute deepgram_tts imports.
+# ---------------------------------------------------------------------------
+
+
+class _StallingWs:
+    """Fake Aura socket: one binary frame, then alive-but-silent forever."""
+
+    def __init__(self) -> None:
+        self.sent: List[Any] = []
+        self._yielded = False
+
+    async def send(self, data: Any) -> None:
+        self.sent.append(data)
+
+    async def recv(self) -> Any:
+        if not self._yielded:
+            self._yielded = True
+            return b"REAL-AURA-CHUNK"
+        await asyncio.sleep(3600)  # stalled-but-alive: never resolves
+
+
+class _FakeConnectCtx:
+    def __init__(self) -> None:
+        self.ws = _StallingWs()
+
+    async def __aenter__(self) -> Any:
+        return self.ws
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        return False
+
+
+async def _case11_async() -> None:
+    import websockets.asyncio.client as wac
+
+    orig_connect = wac.connect
+    orig_timeout = deepgram_tts.READ_TIMEOUT_S
+    wac.connect = lambda *_a, **_k: _FakeConnectCtx()  # type: ignore[assignment]
+    try:
+        # (a) Read deadline: the stalled socket ends the stream with
+        # outcome "stalled" after yielding the one real chunk — previously
+        # this hung indefinitely on `async for message in ws`.
+        deepgram_tts.READ_TIMEOUT_S = 0.05
+        outcome: Dict[str, str] = {}
+        chunks: List[bytes] = []
+        async for chunk in _REAL_AURA_SYNTH(
+            text="hi", api_key="case11-key-not-a-real-secret", outcome=outcome
+        ):
+            chunks.append(chunk)
+        assert chunks == [b"REAL-AURA-CHUNK"], chunks
+        assert outcome.get("result") == "stalled", outcome
+
+        # (b) Cancellation is observed even while a read is pending
+        # (previously only checked when a message arrived): with a long
+        # read deadline, setting cancel_event mid-stall ends the stream
+        # promptly with outcome "cancelled".
+        deepgram_tts.READ_TIMEOUT_S = 30.0
+        cancel_event = asyncio.Event()
+
+        async def _set_cancel() -> None:
+            await asyncio.sleep(0.05)
+            cancel_event.set()
+
+        canceller = asyncio.create_task(_set_cancel())
+        outcome2: Dict[str, str] = {}
+        chunks2: List[bytes] = []
+        async for chunk in _REAL_AURA_SYNTH(
+            text="hi",
+            api_key="case11-key-not-a-real-secret",
+            cancel_event=cancel_event,
+            outcome=outcome2,
+        ):
+            chunks2.append(chunk)
+        await canceller
+        assert chunks2 == [b"REAL-AURA-CHUNK"], chunks2
+        assert outcome2.get("result") == "cancelled", outcome2
+    finally:
+        wac.connect = orig_connect
+        deepgram_tts.READ_TIMEOUT_S = orig_timeout
+
+
+def test_case11_real_generator_read_deadline() -> None:
+    asyncio.run(_case11_async())
+
+
 def main() -> None:
     orig_tts_mgr = voice_server.tts_mgr
     orig_engine = voice_server.TTS_ENGINE
@@ -454,6 +591,8 @@ def main() -> None:
             test_case7_key_hygiene(client)
             test_case8_engine_scoped_voice(client)
             test_case9_registry_lifecycle()
+            test_case10_stall_falls_back_same_request(client)
+            test_case11_real_generator_read_deadline()
     finally:
         voice_server.tts_mgr = orig_tts_mgr
         voice_server.TTS_ENGINE = orig_engine
