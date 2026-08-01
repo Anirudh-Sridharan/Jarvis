@@ -800,7 +800,14 @@ class TTSRequest(BaseModel):
         default=None,
         description="Client-supplied idempotency/cancel key. Auto-generated if omitted.",
     )
-    voice: Optional[str] = Field(default=None, description="Kokoro voice ID. Defaults to TTS_VOICE env.")
+    voice: Optional[str] = Field(
+        default=None,
+        description=(
+            "Engine-scoped voice id. Kokoro id/blend spec applies only on the "
+            "kokoro path (defaults to TTS_VOICE env); on the aura path only "
+            "aura-* ids are honored (else DEEPGRAM_TTS_MODEL)."
+        ),
+    )
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     engine: Optional[str] = Field(
         default=None, description="kokoro | aura — defaults to the TTS_ENGINE env value."
@@ -824,6 +831,14 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     (never a 400/503) — see ``GET /health``'s ``tts_engine.reason``. A zero-
     byte Aura stream mid-request also falls through to Kokoro for the SAME
     request, so a failed cloud voice never produces silence.
+
+    ``voice`` is engine-scoped: on the Aura path only Aura-shaped ids
+    (``aura-…``, e.g. ``aura-2-pandora-en``) are honored — a Kokoro voice id
+    or blend spec (such as a set ``JARVIS_TTS_VOICE``, which predates Aura
+    and always means "Kokoro voice") is never forwarded to Deepgram as a
+    (bogus) Aura model; the Aura voice stays ``DEEPGRAM_TTS_MODEL``. A
+    Kokoro-shaped ``voice`` applies only when the request resolves to the
+    kokoro engine.
 
     Response headers
     ----------------
@@ -868,7 +883,18 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     if use_aura:
         # Plain string — Aura voice ids are never cached/resolved via
         # _voice_for (that cache is Kokoro-only).
-        aura_voice = req.voice or DEEPGRAM_TTS_MODEL
+        #
+        # Voice-shape rule (WR-03): only an Aura-shaped id ("aura-…", e.g.
+        # "aura-2-draco-en") is forwarded to Deepgram. A Kokoro-style value
+        # (plain id or "name:weight,…" blend — exactly what the TS client
+        # sends whenever JARVIS_TTS_VOICE is set, a knob that predates Aura
+        # and always means "Kokoro voice") would reach Deepgram as an
+        # invalid model: every request would pay a failed handshake and fall
+        # back to Kokoro, silently defeating the user-chosen Aura default
+        # (commit 81eb736). Kokoro-shaped voices therefore apply only when
+        # the request's engine resolves to kokoro.
+        requested_voice = (req.voice or "").strip()
+        aura_voice = requested_voice if requested_voice.startswith("aura-") else DEEPGRAM_TTS_MODEL
         kokoro_voice = None
     else:
         try:

@@ -12,11 +12,11 @@ is replaced with a stub exposing a sentinel pipeline, ``tts.synthesize_streaming
 ``deepgram_tts.synthesize_streaming_aura`` is replaced with a scriptable
 async-generator stub that records the kwargs it received.
 
-Seven cases are asserted:
+Eight cases are asserted:
     1. Default engine — Kokoro serves, Aura stub never called, headers pinned.
     2. Per-request Aura — ``engine: "aura"`` serves via Aura even with the env
-       default at kokoro; default voice is DEEPGRAM_TTS_MODEL, request voice
-       overrides it.
+       default at kokoro; default voice is DEEPGRAM_TTS_MODEL, an Aura-shaped
+       request voice overrides it.
     3. Env-selected Aura — TTS_ENGINE="aura" + a key serves Aura with no
        ``engine`` field in the request body (the path a live conversation
        takes, since the TS client never sends ``engine``).
@@ -29,6 +29,11 @@ Seven cases are asserted:
        the same cancel_event the Aura generator observes.
     7. Key hygiene — a sentinel key value appears in no response body and
        nowhere in the /health JSON.
+    8. Engine-scoped voice (WR-03) — a Kokoro-shaped ``voice`` (id or blend
+       spec, e.g. a set JARVIS_TTS_VOICE) on the Aura path is NOT forwarded
+       to Deepgram (Aura serves with DEEPGRAM_TTS_MODEL, no Kokoro
+       fallback); an ``aura-*`` voice IS forwarded; the same Kokoro-shaped
+       voice still applies on the kokoro engine.
 
 Prints ``TTS_SELFTEST_OK`` and exits 0 on success; prints a failure message to
 stderr and exits non-zero otherwise.
@@ -335,6 +340,47 @@ def test_case7_key_hygiene(client: TestClient) -> None:
     assert sentinel not in health_resp.text, "sentinel key leaked into /health response"
 
 
+# ---------------------------------------------------------------------------
+# Case 8: engine-scoped voice (WR-03) — a Kokoro-shaped voice must never be
+# forwarded to Deepgram as a (bogus) Aura model; only aura-* ids are honored
+# on the Aura path. JARVIS_TTS_VOICE predates Aura and always means "Kokoro
+# voice", so a set value must not silently defeat the Aura default.
+# ---------------------------------------------------------------------------
+
+
+def test_case8_engine_scoped_voice(client: TestClient) -> None:
+    voice_server.TTS_ENGINE = "aura"
+    voice_server.DEEPGRAM_API_KEY = "case8-key-not-a-real-secret"
+
+    # (a) Kokoro blend spec (what the TS client sends whenever
+    # JARVIS_TTS_VOICE is set) on the Aura path → Aura serves with
+    # DEEPGRAM_TTS_MODEL; Deepgram never sees the blend; Kokoro never runs.
+    _reset()
+    resp = client.post(
+        "/tts", json={"text": "hello", "voice": "bm_george:0.7,bf_emma:0.3"}
+    )
+    assert resp.status_code == 200, resp.status_code
+    assert resp.content == b"".join(AURA_CHUNKS_DEFAULT), resp.content
+    assert _AuraCalls.calls[-1]["voice"] == voice_server.DEEPGRAM_TTS_MODEL, _AuraCalls.calls[-1]
+    assert not _KokoroCalls.calls, "Kokoro must not serve when Aura succeeds"
+
+    # (b) An Aura-shaped voice IS forwarded verbatim.
+    _reset()
+    resp2 = client.post("/tts", json={"text": "hello", "voice": "aura-2-pandora-en"})
+    assert resp2.status_code == 200, resp2.status_code
+    assert _AuraCalls.calls[-1]["voice"] == "aura-2-pandora-en", _AuraCalls.calls[-1]
+
+    # (c) The same Kokoro-shaped voice still applies on the kokoro engine.
+    _reset()
+    resp3 = client.post(
+        "/tts", json={"text": "hello", "engine": "kokoro", "voice": "bm_fable"}
+    )
+    assert resp3.status_code == 200, resp3.status_code
+    assert resp3.content == KOKORO_BYTES, resp3.content
+    assert _KokoroCalls.calls[-1]["voice"] == "bm_fable", _KokoroCalls.calls[-1]
+    assert not _AuraCalls.calls, "Aura must not be attempted on the kokoro engine"
+
+
 def main() -> None:
     orig_tts_mgr = voice_server.tts_mgr
     orig_engine = voice_server.TTS_ENGINE
@@ -353,6 +399,7 @@ def main() -> None:
             test_case5_aura_fails_mid_request(client)
             test_case6_cancellation_parity()
             test_case7_key_hygiene(client)
+            test_case8_engine_scoped_voice(client)
     finally:
         voice_server.tts_mgr = orig_tts_mgr
         voice_server.TTS_ENGINE = orig_engine

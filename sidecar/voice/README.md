@@ -191,6 +191,13 @@ engine. An Aura failure (no key, failed connect, or a zero-byte stream)
 falls back to Kokoro **within the same request**, so the caller always gets
 audio, never a 4xx/5xx or silence.
 
+`voice` is **engine-scoped**: on the Aura path only Aura-shaped ids
+(`aura-…`, e.g. `aura-2-draco-en`) are honored — a Kokoro voice id or blend
+spec (such as a set `JARVIS_TTS_VOICE`, which predates Aura and always means
+"Kokoro voice") is never forwarded to Deepgram as a bogus Aura model; the
+Aura voice stays `DEEPGRAM_TTS_MODEL`. A Kokoro-shaped `voice` applies only
+when the request resolves to the kokoro engine.
+
 **Response:** chunked binary stream of raw **PCM-16 LE mono 24 kHz** audio.
 
 Headers:
