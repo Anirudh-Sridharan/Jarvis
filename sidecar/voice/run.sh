@@ -23,6 +23,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# shellcheck disable=SC1091
+# Allowlisted, non-overriding load of DEEPGRAM_*/TTS_ENGINE/JARVIS_ECHO_*
+# from the repo-root .env (see load_env.sh for the allowlist/security
+# rationale). Sourced before the venv probe so both the pip step and the
+# exec'd uvicorn process see the loaded values.
+source "${SCRIPT_DIR}/load_env.sh"
+
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PORT="${VOICE_SIDECAR_PORT:-8089}"
 
@@ -87,10 +94,34 @@ python -m pip install -r requirements.txt --quiet
 # ---------------------------------------------------------------------------
 # serve
 # ---------------------------------------------------------------------------
+
+# Compute the STT engine line and the key-presence word WITHOUT ever naming
+# the key's value in an echo/printf line (leak gate: grep for
+# echo/printf...DEEPGRAM_API_KEY across this file and load_env.sh must be 0).
+if [ -n "${DEEPGRAM_API_KEY:-}" ] && [ "${DEEPGRAM_STT_ENABLED:-}" != "0" ]; then
+  STT_ENGINE_LINE="deepgram (${DEEPGRAM_MODEL:-nova-3})"
+  DEEPGRAM_KEY_STATUS="set"
+else
+  STT_ENGINE_LINE="faster-whisper (${STT_MODEL_SIZE:-small})"
+  DEEPGRAM_KEY_STATUS="unset"
+fi
+
+# TTS engine line mirrors voice_server._configured_tts_engine: aura only when
+# TTS_ENGINE (default "aura" — user decision, phase 13.2) asks for it AND a
+# key is present; otherwise the Kokoro fallback serves.
+if [ "${TTS_ENGINE:-aura}" = "aura" ] && [ -n "${DEEPGRAM_API_KEY:-}" ]; then
+  TTS_ENGINE_LINE="aura (${DEEPGRAM_TTS_MODEL:-aura-2-draco-en})"
+else
+  TTS_ENGINE_LINE="kokoro (${TTS_VOICE:-bm_george:0.7,bf_emma:0.3})"
+fi
+
 echo ""
 echo "Starting Jarvis Voice sidecar on 127.0.0.1:${PORT}"
+echo "  STT engine  : ${STT_ENGINE_LINE}"
+echo "  Deepgram key: ${DEEPGRAM_KEY_STATUS}"
 echo "  STT model   : ${STT_MODEL_SIZE:-small} (faster-whisper int8)"
-echo "  TTS voice   : ${TTS_VOICE:-bm_george:0.7,bf_emma:0.3} (Kokoro, British English)"
+echo "  TTS engine  : ${TTS_ENGINE_LINE}"
+echo "  Kokoro voice: ${TTS_VOICE:-bm_george:0.7,bf_emma:0.3} (British blend — the automatic fallback voice)"
 echo "  Wake model  : ${WAKE_WORD_MODEL:-hey_jarvis} (openWakeWord)"
 echo "  Wake thresh : ${WAKE_THRESHOLD:-0.35} (lower = more sensitive)"
 echo "  Orchestrator: ${VOICE_ORCHESTRATOR_URL:-http://127.0.0.1:8080/voice/wake}"

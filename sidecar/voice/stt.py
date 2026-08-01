@@ -120,6 +120,7 @@ def run_vad_and_transcribe(
     vad_model: Any,
     whisper_model: Any,
     threshold: float = 0.5,
+    transcribe: bool = True,
 ) -> List[Dict[str, Any]]:
     """Process buffered PCM through VAD and (when a segment ends) Whisper.
 
@@ -136,6 +137,18 @@ def run_vad_and_transcribe(
         ``faster_whisper.WhisperModel`` instance.
     threshold:
         VAD speech probability threshold.
+    transcribe:
+        When ``True`` (default), a ``speech_end`` still runs ``_transcribe``
+        and appends the resulting ``final`` event — every existing call site
+        and timing semantic is byte-identical to before this parameter
+        existed. When ``False``, the Whisper decode and the ``final`` event
+        are skipped entirely; ``speech_end`` (with its ``silence_ms``) still
+        fires and ``buf.reset_speech()`` still runs. VAD-only mode exists for
+        engines that transcribe continuously (Deepgram) — those engines
+        finalize their own text out-of-band, and running Whisper too would be
+        exactly the redundant decode tax SC3 removes. In this mode
+        ``silence_ms`` no longer includes any decode time, which is the
+        honest, smaller number the orchestrator will then receive.
 
     Returns
     -------
@@ -145,7 +158,7 @@ def run_vad_and_transcribe(
           {"type": "speech_start"},                              # on rising edge
           {"type": "partial", "text": "…", "stability": 0.0},   # mid-speech hint
           {"type": "speech_end"},                                # on falling edge
-          {"type": "final",   "text": "…", "confidence": 0.9},  # post-segment
+          {"type": "final",   "text": "…", "confidence": 0.9},  # post-segment (transcribe=True only)
         ]
 
     Notes
@@ -193,24 +206,32 @@ def run_vad_and_transcribe(
                 buf.speech_frames.extend(frame_raw)  # include hangover frames
 
                 if buf._silent_frame_count >= SILENCE_HANGOVER:
-                    # End of speech segment — run Whisper on the accumulated frames.
+                    # End of speech segment — run Whisper on the accumulated frames
+                    # (unless an engine that transcribes continuously, e.g. Deepgram,
+                    # already owns this segment's text — see `transcribe` above).
                     end_event: Dict[str, Any] = {"type": "speech_end"}
                     events.append(end_event)
                     log.debug("speech_end (hangover=%d)", SILENCE_HANGOVER)
 
-                    transcript, confidence = _transcribe(
-                        bytes(buf.speech_frames), whisper_model
-                    )
+                    if transcribe:
+                        transcript, confidence = _transcribe(
+                            bytes(buf.speech_frames), whisper_model
+                        )
+                    else:
+                        transcript, confidence = "", 0.0
+
                     # Honest silence measurement: time since the last voiced
                     # frame, INCLUDING the transcription time that just elapsed.
                     # The TS orchestrator counts this toward its end-of-turn
                     # silence threshold instead of re-waiting silence the VAD
                     # already observed (it previously received silenceMs: 0).
+                    # In VAD-only mode (transcribe=False) there was no decode,
+                    # so this is honestly smaller too.
                     if buf.last_voiced_monotonic is not None:
                         end_event["silence_ms"] = int(
                             (time.monotonic() - buf.last_voiced_monotonic) * 1000
                         )
-                    if transcript:
+                    if transcribe and transcript:
                         events.append({
                             "type": "final",
                             "text": transcript,

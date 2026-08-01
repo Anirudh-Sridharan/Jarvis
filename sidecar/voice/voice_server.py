@@ -8,7 +8,9 @@ importing Python.
 Contract (keep exact — the TS ``voiceClient`` calls these):
 
     GET  /health
-        → { state, components: { stt, tts, vad, wake } }
+        → { state, components: { stt, tts, vad, wake },
+            stt_engine: { configured, active, reason },
+            tts_engine: { configured, active, reason } }
 
     WS   /stt/stream
         Client sends binary PCM-16 mono 16 kHz frames (any frame size,
@@ -21,10 +23,16 @@ Contract (keep exact — the TS ``voiceClient`` calls these):
             { "type": "error",    "detail": "…" }
         Close the WebSocket to cancel.
 
-    POST /tts   { "text": "…", "request_id": "<optional uuid>" }
+    POST /tts   { "text": "…", "request_id": "<optional uuid>", "engine": "kokoro|aura" }
         → Streams raw PCM-16 LE mono 24 kHz audio chunks (Content-Type:
           audio/pcm; rate=24000).  Request-id header ``X-TTS-Request-Id``
-          echoed back.  Close the response / call /tts/cancel to abort.
+          echoed back.  ``engine`` is optional and defaults to the
+          TTS_ENGINE env value — currently "aura" (Deepgram Aura-2, an
+          explicit user decision, 2026-08-01 listening checkpoint); Kokoro
+          is the automatic FALLBACK — a failed, zero-byte, or stalled Aura
+          stream yields Kokoro audio for the same request, never a 500 or
+          silence (a stream that dies after delivering audio truncates).
+          Close the response / call /tts/cancel to abort.
 
     POST /tts/cancel   { "request_id": "…" }
         → { "cancelled": bool }
@@ -51,6 +59,7 @@ for lower cold-start).  See README.md → "Model downloads".
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import json
 import logging
@@ -105,6 +114,37 @@ VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
 
 # Wake word model path or name recognised by openWakeWord.
 WAKE_WORD_MODEL = os.environ.get("WAKE_WORD_MODEL", "hey_jarvis")
+
+# Deepgram streaming-STT config. The key is read ONCE here and is never
+# logged, printed, or returned by any endpoint — /health only ever reports
+# whether an engine is configured/active and a short, key-free reason.
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")  # None = disabled
+DEEPGRAM_MODEL = os.environ.get("DEEPGRAM_MODEL", "nova-3")
+DEEPGRAM_STT_ENABLED = os.environ.get("DEEPGRAM_STT_ENABLED", "1")
+DEEPGRAM_CONNECT_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_CONNECT_TIMEOUT_MS", "2000"))
+DEEPGRAM_FINALIZE_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_FINALIZE_TIMEOUT_MS", "600"))
+
+# Deepgram Aura-2 streaming-TTS config (parallel to the STT block above).
+# "aura" (voice aura-2-draco-en) is the default by EXPLICIT USER DECISION in
+# the plan 13.2-06 listening checkpoint (2026-08-01, "use aura-draco" — user
+# wanted a deeper voice; measured mean TTFB 542ms vs Kokoro's 2370ms). The
+# Kokoro British blend remains the automatic fallback whenever the key is
+# absent or Aura fails mid-request (13.2-CONTEXT.md D-05).
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "aura")
+DEEPGRAM_TTS_MODEL = os.environ.get("DEEPGRAM_TTS_MODEL", "aura-2-draco-en")
+
+# Sidecar-side echo gate (round-2 live defect fix — see echo_gate.py's module
+# docstring and .planning/debug/deepgram-stt-live-defects.md). During an
+# active/recently-active TTS synthesis window, partial/final STT frames whose
+# text fuzzy-matches the synthesized text are DROPPED before the WebSocket:
+# Nova-3 re-hears no-AEC speaker echo as different words than were spoken, so
+# the TS client's token-containment echo filter cannot catch them and every
+# reply self-cancels via spurious confirmed barge-in. Dropping a frame is
+# invisible to the TS client (additive-only WS contract change).
+JARVIS_ECHO_GATE = os.environ.get("JARVIS_ECHO_GATE", "1")
+JARVIS_ECHO_SIM_THRESHOLD = float(os.environ.get("JARVIS_ECHO_SIM_THRESHOLD", "0.72"))
+JARVIS_ECHO_CONF_THRESHOLD = float(os.environ.get("JARVIS_ECHO_CONF_THRESHOLD", "0.85"))
+JARVIS_ECHO_DECAY_MS = int(os.environ.get("JARVIS_ECHO_DECAY_MS", "3000"))
 
 ComponentState = Literal["unloaded", "loading", "ready", "error"]
 
@@ -347,11 +387,68 @@ stt_mgr = STTManager()
 tts_mgr = TTSManager()
 wake_mgr = WakeManager()
 
+# Shared between /tts (registers synthesis windows) and /stt/stream (gates
+# echo-suspect transcripts). Selftests replace this with a clock-injected
+# instance; live config comes from the JARVIS_ECHO_* env values above.
+from echo_gate import EchoGate  # noqa: E402  (import after config block, stdlib-only module)
+
+echo_gate = EchoGate(
+    enabled=JARVIS_ECHO_GATE != "0",
+    sim_threshold=JARVIS_ECHO_SIM_THRESHOLD,
+    conf_threshold=JARVIS_ECHO_CONF_THRESHOLD,
+    decay_s=JARVIS_ECHO_DECAY_MS / 1000,
+)
+
 # In-flight TTS cancellation registry: request_id → asyncio.Event
 _tts_cancel: Dict[str, asyncio.Event] = {}
 
 # Resolved voice cache: spec string → str | torch.FloatTensor.
 _resolved_voices: Dict[str, Any] = {}
+
+# Active STT engine status, updated at session start and on mid-session
+# Deepgram death. Surfaced verbatim (minus the key, which never enters this
+# dict) via GET /health's top-level "stt_engine" key.
+_stt_engine_status: Dict[str, Optional[str]] = {"active": None, "reason": None}
+
+
+def _configured_stt_engine() -> str:
+    """Which STT engine is configured (not necessarily currently active)."""
+    if DEEPGRAM_API_KEY and DEEPGRAM_STT_ENABLED != "0":
+        return "deepgram"
+    return "faster-whisper"
+
+
+def _configured_stt_reason() -> Optional[str]:
+    """Why the configured engine is faster-whisper, or None when deepgram."""
+    if not DEEPGRAM_API_KEY:
+        return "DEEPGRAM_API_KEY not set"
+    if DEEPGRAM_STT_ENABLED == "0":
+        return "DEEPGRAM_STT_ENABLED=0"
+    return None
+
+
+# Active TTS engine status, updated at each /tts request. Surfaced verbatim
+# (minus the key, which never enters this dict) via GET /health's top-level
+# "tts_engine" key — mirrors _stt_engine_status above.
+_tts_engine_status: Dict[str, Optional[str]] = {"active": None, "reason": None}
+
+
+def _configured_tts_engine() -> str:
+    """Which TTS engine is configured (not necessarily last active).
+
+    "aura" only when TTS_ENGINE asks for it AND a key is present; otherwise
+    "kokoro" — the committed default (D-05).
+    """
+    if TTS_ENGINE.lower() == "aura" and DEEPGRAM_API_KEY:
+        return "aura"
+    return "kokoro"
+
+
+def _configured_tts_reason() -> Optional[str]:
+    """Why the configured engine is kokoro, or None when aura."""
+    if TTS_ENGINE.lower() == "aura" and not DEEPGRAM_API_KEY:
+        return "DEEPGRAM_API_KEY not set"
+    return None
 
 
 def resolve_voice(pipeline: Any, spec: str) -> Any:
@@ -378,10 +475,24 @@ def resolve_voice(pipeline: Any, spec: str) -> Any:
     ).sum(dim=0)
 
 
-def _voice_for(spec: str) -> Any:
-    """Cached resolve_voice against the loaded pipeline."""
+async def _voice_for_async(spec: str) -> Any:
+    """Cached resolve_voice against the loaded pipeline.
+
+    Cache misses run on the default executor (WR-08): ``resolve_voice`` on a
+    blend spec imports torch and calls ``pipeline.load_voice`` per component
+    — synchronous tensor/file I/O that must never block the event loop (the
+    /stt/stream WS receive path and /health share it; the Aura→Kokoro
+    fallback even hits this mid-stream on first use). Every other
+    model-touching call in this file already routes through
+    ``run_in_executor`` — this brings the three voice-resolution call sites
+    in line. A concurrent double-miss for the same spec resolves twice and
+    idempotently overwrites — harmless (first-use-per-spec cost only).
+    """
     if spec not in _resolved_voices:
-        _resolved_voices[spec] = resolve_voice(tts_mgr.get_pipeline(), spec)
+        loop = asyncio.get_running_loop()
+        _resolved_voices[spec] = await loop.run_in_executor(
+            None, resolve_voice, tts_mgr.get_pipeline(), spec
+        )
     return _resolved_voices[spec]
 
 
@@ -424,8 +535,23 @@ async def health() -> Dict[str, Any]:
             "tts":  "unloaded|loading|ready|error",
             "vad":  "unloaded|loading|ready|error",  # shares stt_mgr
             "wake": "unloaded|loading|ready|error|disabled"
+          },
+          "stt_engine": {
+            "configured": "deepgram" | "faster-whisper",
+            "active": "deepgram" | "faster-whisper" | null,
+            "reason": "<short, key-free degradation reason>" | null
+          },
+          "tts_engine": {
+            "configured": "aura" | "kokoro",
+            "active": "aura" | "kokoro" | null,
+            "reason": "<short, key-free degradation reason>" | null
           }
         }
+
+    ``stt_engine``/``tts_engine`` are ADDITIVE TOP-LEVEL keys (never inside
+    ``components`` — an engine name there would permanently force ``state``
+    to "degraded" since the overall-state computation below iterates
+    ``components.values()``, which stays exactly the four existing keys).
     """
     components = {
         "stt": stt_mgr.state,
@@ -441,7 +567,20 @@ async def health() -> Dict[str, Any]:
         overall = "ready"
     else:
         overall = "degraded"
-    return {"state": overall, "components": components}
+    return {
+        "state": overall,
+        "components": components,
+        "stt_engine": {
+            "configured": _configured_stt_engine(),
+            "active": _stt_engine_status["active"],
+            "reason": _stt_engine_status["reason"] or _configured_stt_reason(),
+        },
+        "tts_engine": {
+            "configured": _configured_tts_engine(),
+            "active": _tts_engine_status["active"],
+            "reason": _tts_engine_status["reason"] or _configured_tts_reason(),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +639,13 @@ async def stt_stream(ws: WebSocket) -> None:
 
     Engine note
     -----------
-    faster-whisper (small int8) is the default.  For lower latency on Apple
-    Silicon the MLX sidecar can expose Parakeet-TDT; see ``stt.py`` for the
-    alternative integration path.
+    faster-whisper (small int8) is the default.  When ``DEEPGRAM_API_KEY`` is
+    configured, Deepgram's streaming ``/v1/listen`` supplies the text instead
+    — Silero VAD still owns every ``speech_start``/``speech_end``/
+    ``silence_ms`` boundary (see ``deepgram_stt.py``'s module docstring); a
+    missing key, failed connect, or mid-session socket death degrades to
+    faster-whisper automatically and is surfaced on ``GET /health``'s
+    ``stt_engine`` key, never as an ``error`` frame or an abnormal close.
     """
     await ws.accept()
     log.info("STT WebSocket connected.")
@@ -515,6 +658,7 @@ async def stt_stream(ws: WebSocket) -> None:
         return
 
     from stt import AudioBuffer, run_vad_and_transcribe  # type: ignore[import]
+    import stt  # type: ignore[import]  # module reference, for stt.SAMPLE_RATE below
 
     buf = AudioBuffer()
     loop = asyncio.get_running_loop()
@@ -525,21 +669,125 @@ async def stt_stream(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
 
+    def _echo_suppressed(frame: Dict[str, Any], word_confs: Any = None) -> bool:
+        """True when the echo gate says to drop this partial/final frame.
+
+        Only text frames are ever gated — speech_start/speech_end/error pass
+        untouched (Silero remains the sole boundary authority; the gate drops
+        TEXT the mic heard Jarvis say, never VAD state).
+        """
+        if frame.get("type") not in ("partial", "final"):
+            return False
+        mean_conf: Optional[float] = None
+        if word_confs:
+            try:
+                mean_conf = sum(word_confs) / len(word_confs)
+            except (TypeError, ZeroDivisionError):
+                mean_conf = None
+        reason = echo_gate.check(frame.get("text") or "", mean_conf)
+        if reason is None:
+            return False
+        log.info(
+            "Echo gate suppressed %s (%s): %.60r",
+            frame.get("type"), reason, frame.get("text"),
+        )
+        return True
+
+    # -----------------------------------------------------------------------
+    # STT engine selection — attempted once, at session start, before the mic
+    # loop. Silero VAD (below) remains the sole speech_start/speech_end/
+    # silence_ms authority regardless of which engine wins; Deepgram only
+    # ever supplies text, finalized on Silero's own cue (Pitfall 1).
+    # -----------------------------------------------------------------------
+    session: Any = None
+    use_deepgram = False
+    if _configured_stt_engine() == "deepgram":
+        import deepgram_stt  # type: ignore[import]  # lazy, module-level so tests can patch the class
+
+        session = deepgram_stt.DeepgramSttSession(
+            DEEPGRAM_API_KEY,
+            DEEPGRAM_MODEL,
+            stt.SAMPLE_RATE,
+            DEEPGRAM_CONNECT_TIMEOUT_MS / 1000,
+            DEEPGRAM_FINALIZE_TIMEOUT_MS / 1000,
+        )
+        use_deepgram = await session.connect()
+        if use_deepgram:
+            log.info("STT engine: deepgram (model=%s).", DEEPGRAM_MODEL)
+            _stt_engine_status["active"] = "deepgram"
+            _stt_engine_status["reason"] = None
+        else:
+            # A failed connect must never send an error frame or abnormally
+            # close the socket — those are reserved for a genuine STT load
+            # failure above.
+            _stt_engine_status["active"] = "faster-whisper"
+            _stt_engine_status["reason"] = session.last_error
+            log.warning(
+                "Deepgram STT unavailable (falling back to faster-whisper): %s",
+                session.last_error,
+            )
+
     try:
         async for message in ws.iter_bytes():
             buf.extend(message)
 
-            # Run VAD + transcription step on executor so we don't block the loop.
+            if use_deepgram:
+                sent_ok = await session.send_audio(message)
+                if not sent_ok:
+                    # Mid-session death: only the in-flight segment's text is
+                    # lost, and that loss is logged. Deliberately no retry
+                    # loop here (out of scope; a PTT session is seconds long).
+                    use_deepgram = False
+                    _stt_engine_status["active"] = "faster-whisper"
+                    _stt_engine_status["reason"] = session.last_error
+                    log.warning(
+                        "Deepgram STT lost mid-session (falling back to faster-whisper): %s",
+                        session.last_error,
+                    )
+                    await session.close()
+
+            # Run VAD + transcription step on executor so we don't block the
+            # loop. transcribe is explicitly the inverse of use_deepgram: the
+            # Whisper decode never runs while Deepgram is serving the segment.
             events = await loop.run_in_executor(
                 None,
-                run_vad_and_transcribe,
-                buf,
-                stt_mgr.get_vad_model(),
-                stt_mgr.get_whisper(),
-                VAD_THRESHOLD,
+                functools.partial(
+                    run_vad_and_transcribe,
+                    buf,
+                    stt_mgr.get_vad_model(),
+                    stt_mgr.get_whisper(),
+                    VAD_THRESHOLD,
+                    transcribe=not use_deepgram,
+                ),
             )
             for event in events:
-                await _send(event)
+                # Echo gate: during an active TTS window, faster-whisper
+                # partials/finals that match the synthesized text are echo —
+                # drop the frame (VAD frames always pass).
+                if not _echo_suppressed(event):
+                    await _send(event)
+                # Silero's speech_start opens the Deepgram text segment: the
+                # session discards anything Deepgram transcribed OUTSIDE a
+                # Silero segment (speaker echo, noise, late tails of already-
+                # finalized segments) instead of banking it into this one
+                # (live defect: duplicated/garbled finals — see
+                # .planning/debug/deepgram-stt-live-defects.md).
+                if use_deepgram and event.get("type") == "speech_start":
+                    session.begin_segment()
+                # speech_end is sent BEFORE the Finalize flush is awaited —
+                # this ordering is load-bearing (the orchestrator commits
+                # finals only after it has seen the segment's speech_end).
+                if use_deepgram and event.get("type") == "speech_end":
+                    final_frame = await session.finalize_segment()
+                    if final_frame is not None and not _echo_suppressed(
+                        final_frame, getattr(session, "last_word_confs", None)
+                    ):
+                        await _send(final_frame)
+
+            if use_deepgram:
+                for partial_frame in session.drain_partials():
+                    if not _echo_suppressed(partial_frame):
+                        await _send(partial_frame)
 
     except WebSocketDisconnect:
         log.info("STT WebSocket disconnected (client close / barge-in).")
@@ -550,6 +798,11 @@ async def stt_stream(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:  # noqa: BLE001
+                pass
         log.info("STT session ended.")
 
 
@@ -564,16 +817,50 @@ class TTSRequest(BaseModel):
         default=None,
         description="Client-supplied idempotency/cancel key. Auto-generated if omitted.",
     )
-    voice: Optional[str] = Field(default=None, description="Kokoro voice ID. Defaults to TTS_VOICE env.")
+    voice: Optional[str] = Field(
+        default=None,
+        description=(
+            "Engine-scoped voice id. Kokoro id/blend spec applies only on the "
+            "kokoro path (defaults to TTS_VOICE env); on the aura path only "
+            "aura-* ids are honored (else DEEPGRAM_TTS_MODEL)."
+        ),
+    )
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    engine: Optional[str] = Field(
+        default=None, description="kokoro | aura — defaults to the TTS_ENGINE env value."
+    )
 
 
 @app.post("/tts")
 async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
-    """Synthesize text with Kokoro; stream raw PCM-16 LE mono 24 kHz back.
+    """Synthesize text with Kokoro or Aura-2; stream raw PCM-16 LE mono 24 kHz.
 
     The client sends ``{ "text": "…" }`` and receives a chunked binary stream
-    of raw PCM-16 LE mono audio at 24 000 Hz.
+    of raw PCM-16 LE mono audio at 24 000 Hz — identical for both engines.
+
+    Engine selection
+    ----------------
+    ``req.engine`` (``"kokoro"`` | ``"aura"``) overrides the ``TTS_ENGINE`` env
+    default for this one request; the TS client never sends it, so a live
+    conversation is governed entirely by the sidecar's own env. Anything
+    other than exactly ``"aura"`` is treated as ``"kokoro"``. Requesting
+    ``"aura"`` with no ``DEEPGRAM_API_KEY`` configured degrades to Kokoro
+    (never a 400/503) — see ``GET /health``'s ``tts_engine.reason``. A zero-
+    byte Aura stream falls through to Kokoro for the SAME request, and so
+    does a STALLED Aura stream (no socket message within
+    ``deepgram_tts.READ_TIMEOUT_S`` — the reply restarts on Kokoro rather
+    than hanging; WR-07), so a failed or stalled cloud voice never produces
+    silence. Scope note: an Aura stream that dies outright AFTER audio was
+    already delivered ends truncated — restarting mid-sentence would
+    double-speak.
+
+    ``voice`` is engine-scoped: on the Aura path only Aura-shaped ids
+    (``aura-…``, e.g. ``aura-2-pandora-en``) are honored — a Kokoro voice id
+    or blend spec (such as a set ``JARVIS_TTS_VOICE``, which predates Aura
+    and always means "Kokoro voice") is never forwarded to Deepgram as a
+    (bogus) Aura model; the Aura voice stays ``DEEPGRAM_TTS_MODEL``. A
+    Kokoro-shaped ``voice`` applies only when the request resolves to the
+    kokoro engine.
 
     Response headers
     ----------------
@@ -584,8 +871,8 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
     ------------
     Call ``POST /tts/cancel { "request_id": "<id>" }`` while the response is
     streaming to abort synthesis mid-stream.  The HTTP response will end after
-    the current Kokoro chunk completes.  Alternatively, close the HTTP
-    connection; the server detects disconnect and stops generating.
+    the current chunk completes, for either engine.  Alternatively, close the
+    HTTP connection; the server detects disconnect and stops generating.
 
     Barge-in
     --------
@@ -599,19 +886,71 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
 
     request_id = req.request_id or str(uuid.uuid4())
     cancel_event = asyncio.Event()
-    _tts_cancel[request_id] = cancel_event
+    # NB: the cancel registry entry is registered inside _generate() below,
+    # NOT here — see the WR-06 comment there.
 
-    try:
-        voice = _voice_for(req.voice or TTS_VOICE)
-    except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
-        _tts_cancel.pop(request_id, None)
-        raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
+    # Resolve the engine BEFORE resolving the voice — an Aura voice id must
+    # never enter the Kokoro-only _resolved_voices cache below.
+    requested_engine = (req.engine or TTS_ENGINE).lower()
+    if requested_engine != "aura":
+        requested_engine = "kokoro"
+    use_aura = requested_engine == "aura"
+
+    if use_aura and not DEEPGRAM_API_KEY:
+        # An unset key must degrade to Kokoro, never 400/503 (D-05 / T-13.2-10).
+        use_aura = False
+        _tts_engine_status["reason"] = "DEEPGRAM_API_KEY not set"
+    else:
+        _tts_engine_status["reason"] = None
+
+    if use_aura:
+        # Plain string — Aura voice ids are never cached/resolved via
+        # _voice_for_async (that cache is Kokoro-only).
+        #
+        # Voice-shape rule (WR-03): only an Aura-shaped id ("aura-…", e.g.
+        # "aura-2-draco-en") is forwarded to Deepgram. A Kokoro-style value
+        # (plain id or "name:weight,…" blend — exactly what the TS client
+        # sends whenever JARVIS_TTS_VOICE is set, a knob that predates Aura
+        # and always means "Kokoro voice") would reach Deepgram as an
+        # invalid model: every request would pay a failed handshake and fall
+        # back to Kokoro, silently defeating the user-chosen Aura default
+        # (commit 81eb736). Kokoro-shaped voices therefore apply only when
+        # the request's engine resolves to kokoro.
+        requested_voice = (req.voice or "").strip()
+        aura_voice = requested_voice if requested_voice.startswith("aura-") else DEEPGRAM_TTS_MODEL
+        kokoro_voice = None
+    else:
+        try:
+            kokoro_voice = await _voice_for_async(req.voice or TTS_VOICE)
+        except Exception as exc:  # noqa: BLE001  (bad blend spec / unknown voice)
+            # Nothing to unregister: the cancel registry entry is only
+            # created once the generator below actually starts (WR-06).
+            raise HTTPException(status_code=400, detail=f"bad voice spec: {exc}") from exc
+        aura_voice = None
 
     async def _generate() -> AsyncGenerator[bytes, None]:
         from tts import synthesize_streaming  # type: ignore[import]
 
         loop = asyncio.get_running_loop()
-        try:
+
+        # Cancel registry: registered HERE, inside the generator, so
+        # registration and the finally-cleanup below share one lifecycle
+        # (WR-06). A response whose generator is never iterated (client
+        # vanished before streaming; aclose() on an unstarted async
+        # generator runs none of its body) registers nothing — the old
+        # route-level registration leaked the entry forever in that case,
+        # and a later /tts/cancel for the stale id lied {"cancelled": true}.
+        # (/tts/cancel racing the first chunk is unaffected: the TS client
+        # can only learn request_id from the response headers, by which
+        # time the generator has started.)
+        _tts_cancel[request_id] = cancel_event
+        # Echo gate: this request's text is about to come out of the
+        # speakers — register the synthesis window so /stt/stream can drop
+        # transcripts of the echo (see echo_gate.py). Same
+        # inside-the-generator lifecycle as the cancel registry above.
+        echo_gate.register_start(request_id, req.text)
+
+        async def _kokoro_chunks(voice: Any) -> AsyncGenerator[bytes, None]:
             async for pcm_chunk in synthesize_streaming(
                 text=req.text,
                 pipeline=tts_mgr.get_pipeline(),
@@ -623,9 +962,72 @@ async def tts_synthesize(req: TTSRequest) -> StreamingResponse:
                 if cancel_event.is_set():
                     log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
                     return
+                echo_gate.note_audio_bytes(request_id, len(pcm_chunk))
                 yield pcm_chunk
+
+        try:
+            if use_aura:
+                import deepgram_tts  # type: ignore[import]
+
+                bytes_yielded = 0
+                aura_outcome: Dict[str, str] = {}
+                async for pcm_chunk in deepgram_tts.synthesize_streaming_aura(
+                    text=req.text,
+                    api_key=DEEPGRAM_API_KEY,
+                    voice=aura_voice,
+                    cancel_event=cancel_event,
+                    outcome=aura_outcome,
+                ):
+                    if cancel_event.is_set():
+                        log.info("TTS cancelled mid-stream (request_id=%s).", request_id)
+                        return
+                    bytes_yielded += len(pcm_chunk)
+                    echo_gate.note_audio_bytes(request_id, len(pcm_chunk))
+                    yield pcm_chunk
+
+                if cancel_event.is_set():
+                    return
+
+                stalled = aura_outcome.get("result") == "stalled"
+                if bytes_yielded > 0 and not stalled:
+                    _tts_engine_status["active"] = "aura"
+                    return
+
+                # Zero bytes, or a mid-request STALL (WR-07), and not
+                # cancelled: Aura failed between connect and Flushed
+                # (deepgram_tts.py already logged the specific reason). A
+                # failed cloud voice must never produce silence — fall
+                # through to Kokoro for the SAME request (T-13.2-10). A
+                # stall restarts the reply on Kokoro from the top: a rare
+                # repetition beats an indefinite hang or a half-said reply
+                # (D-02 — degradation is surfaced, never silent). A stream
+                # that dies outright AFTER yielding audio still truncates
+                # (bytes_yielded > 0, not stalled): restarting there would
+                # double-speak on every transient mid-stream death.
+                if stalled:
+                    reason = (
+                        f"Aura stalled mid-request after {bytes_yielded} bytes "
+                        f"for request_id={request_id}"
+                    )
+                else:
+                    reason = f"Aura produced no audio for request_id={request_id}"
+                log.warning("Aura TTS unavailable (falling back to Kokoro): %s", reason)
+                _tts_engine_status["active"] = "kokoro"
+                _tts_engine_status["reason"] = reason[:200]
+                try:
+                    fallback_voice = await _voice_for_async(TTS_VOICE)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Kokoro fallback voice resolution failed: %s", exc)
+                    return
+                async for pcm_chunk in _kokoro_chunks(fallback_voice):
+                    yield pcm_chunk
+            else:
+                _tts_engine_status["active"] = "kokoro"
+                async for pcm_chunk in _kokoro_chunks(kokoro_voice):
+                    yield pcm_chunk
         finally:
             _tts_cancel.pop(request_id, None)
+            echo_gate.register_end(request_id)
 
     return StreamingResponse(
         _generate(),
@@ -744,7 +1146,7 @@ async def warmup() -> Dict[str, Any]:
         async for _chunk in synthesize_streaming(
             text="Ready.",
             pipeline=tts_mgr.get_pipeline(),
-            voice=_voice_for(TTS_VOICE),
+            voice=await _voice_for_async(TTS_VOICE),
             speed=1.0,
             loop=loop,
         ):
