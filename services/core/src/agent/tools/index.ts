@@ -46,6 +46,13 @@
  *     mac_ui_click          readOnly:false  → GATED (mac_action)
  *     mac_ui_type           readOnly:false  → GATED (mac_action)
  *     mac_ui_press_key      readOnly:false  → GATED (mac_action)
+ *
+ *   Mac control (Tier 3 — vision fallback, phase 15 — optional, requires
+ *   BOTH the injected MacCommandRunner AND the InferenceGateway; this is NOT
+ *   Anthropic's native computer-use tool — see computerUseTools.ts header):
+ *     computer_screenshot   readOnly:true   ONE vision call, executes nothing
+ *     computer_click        readOnly:false  → GATED (mac_action), 0 inference
+ *     computer_type         readOnly:false  → GATED (mac_action), 0 inference
  */
 
 import type { ToolRegistry } from "@jarvis/agent";
@@ -72,14 +79,21 @@ import { makeBrowserTools } from "./browserTools.js";
 import type { McpToolClient } from "../../mcp/playwrightMcp.js";
 import { makeMacTools } from "./macTools.js";
 import { makeMacUiTools } from "./macUiTools.js";
+import { makeComputerUseTools } from "./computerUseTools.js";
 import type { MacCommandRunner } from "../../mac/commandRunner.js";
+import type { InferenceGateway } from "../../inference/gateway.js";
 
 export function buildToolRegistry(
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email">,
   /** Feature 18 browser slice: when provided, the six browser tools are added. */
   browser?: McpToolClient | null,
-  /** Phase 15 Tier 1: when provided, the six Mac-control tools are added. */
+  /** Phase 15 Tier 1/2: when provided, the ten Mac-control tools are added. */
   macRun?: MacCommandRunner | null,
+  /** Phase 15 Tier 3: when provided ALONGSIDE macRun, the three vision-fallback
+   * tools are added — Tier 3 requires BOTH a runner and a gateway, so an
+   * absent gateway silently omits Tier 3 rather than registering a tool that
+   * cannot work. */
+  visionGateway?: Pick<InferenceGateway, "chat"> | null,
 ): ToolRegistry {
   const tools = [
     // Calendar
@@ -105,6 +119,9 @@ export function buildToolRegistry(
     ...(macRun ? makeMacTools(macRun) : []),
     // Mac control (Tier 2 — Accessibility) — only when a command runner is wired
     ...(macRun ? makeMacUiTools(macRun) : []),
+    // Mac control (Tier 3 — vision fallback) — only when BOTH a command
+    // runner and a gateway are wired
+    ...(macRun && visionGateway ? makeComputerUseTools(macRun, visionGateway) : []),
   ];
 
   const registry: ToolRegistry = new Map(tools.map((t) => [t.name, t]));

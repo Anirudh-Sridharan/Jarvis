@@ -161,7 +161,10 @@ export function getAgentSystem(
     const dataDir = getDataDir();
 
     const llm = new AgentLlm(gateway);
-    const tools = buildToolRegistry(integrations, browser, macRun);
+    // Phase 15 Tier 3: the gateway getAgentSystem already holds is the same
+    // object Tier 3's computer_screenshot uses for its single perception
+    // call — no new plumbing reaches liveBootstrap.ts.
+    const tools = buildToolRegistry(integrations, browser, macRun, gateway);
     const queue = new ApprovalQueue();
 
     agentSystemInstance = createAgentSystem({
