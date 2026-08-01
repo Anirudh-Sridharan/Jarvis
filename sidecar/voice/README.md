@@ -86,8 +86,8 @@ Binds to **127.0.0.1 only** (loopback; never exposed off-box).
 | `DEEPGRAM_STT_ENABLED` | `1` | Set to `0` to force faster-whisper even with a key present, without removing the key. |
 | `DEEPGRAM_CONNECT_TIMEOUT_MS` | `2000` | Deepgram STT WS connect timeout before falling back to faster-whisper. |
 | `DEEPGRAM_FINALIZE_TIMEOUT_MS` | `600` | How long to wait for Deepgram's `Finalize` response before giving up on that segment's text. |
-| `TTS_ENGINE` | `kokoro` | `aura` selects Deepgram Aura-2 streaming TTS instead of Kokoro. **`kokoro` is the committed default — it changes only by explicit user decision, never automatically.** |
-| `DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Aura-2 voice model id (used only when the Aura engine is selected). |
+| `TTS_ENGINE` | `aura` | `aura` (Deepgram Aura-2 streaming TTS) is the default by explicit user decision in the phase 13.2 listening checkpoint (2026-08-01; measured mean TTFB: Aura ~542ms vs Kokoro ~2370ms). `kokoro` selects the local engine. Kokoro is always the automatic fallback when the key is absent or Aura fails. |
+| `DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Aura-2 voice model id (chosen 2026-08-01: `aura-2-draco-en`, the deeper baritone; used only when the Aura engine is selected). |
 | `JARVIS_ECHO_GATE` | `1` | Sidecar-side echo gate: during an active/recent TTS synthesis window, STT partial/final frames whose text fuzzy-matches the synthesized text are dropped (no-AEC speaker echo — Nova-3 re-hears it as *different* words the TS echo filter can't catch). `0` disables. See `echo_gate.py`. |
 | `JARVIS_ECHO_SIM_THRESHOLD` | `0.72` | Char-similarity tier threshold: windowed similarity ≥ this against recently synthesized text (candidates ≥ 8 chars) suppresses. Measured: hallucinated echo ≥ 0.80, genuine interruptions ≤ 0.60. |
 | `JARVIS_ECHO_CONF_THRESHOLD` | `0.85` | Word-confidence tier: moderate similarity (≥ 0.40) **and** mean Deepgram word confidence ≤ this suppresses (hallucinated echo words measure 0.74–0.83; clean genuine speech 0.98–1.0). `0` disables this tier. |

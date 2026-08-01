@@ -122,10 +122,12 @@ DEEPGRAM_CONNECT_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_CONNECT_TIMEOUT_MS", 
 DEEPGRAM_FINALIZE_TIMEOUT_MS = int(os.environ.get("DEEPGRAM_FINALIZE_TIMEOUT_MS", "600"))
 
 # Deepgram Aura-2 streaming-TTS config (parallel to the STT block above).
-# "kokoro" is the COMMITTED DEFAULT — it stays the default until the user
-# makes an explicit decision in plan 13.2-06 (13.2-CONTEXT.md D-05). No agent
-# may change this default.
-TTS_ENGINE = os.environ.get("TTS_ENGINE", "kokoro")
+# "aura" (voice aura-2-draco-en) is the default by EXPLICIT USER DECISION in
+# the plan 13.2-06 listening checkpoint (2026-08-01, "use aura-draco" — user
+# wanted a deeper voice; measured mean TTFB 542ms vs Kokoro's 2370ms). The
+# Kokoro British blend remains the automatic fallback whenever the key is
+# absent or Aura fails mid-request (13.2-CONTEXT.md D-05).
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "aura")
 DEEPGRAM_TTS_MODEL = os.environ.get("DEEPGRAM_TTS_MODEL", "aura-2-draco-en")
 
 # Sidecar-side echo gate (round-2 live defect fix — see echo_gate.py's module
