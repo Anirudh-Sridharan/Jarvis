@@ -10,7 +10,8 @@
 #   core, which imports loadEnv.js). Sourcing the *whole* .env file naively
 #   would inject every secret it contains — FIREWORKS_API_KEY, ANTHROPIC_API_KEY,
 #   BRAVE_API_KEY, SIMPLEFIN_ACCESS_URL, OAuth client secrets — into a
-#   long-running Python process that only ever needs DEEPGRAM_*/TTS_ENGINE.
+#   long-running Python process that only ever needs DEEPGRAM_*/TTS_ENGINE/
+#   JARVIS_ECHO_* (the echo-gate tunables voice_server.py reads).
 #   The allowlist regex below is the security control (T-13.2-02).
 #
 # Resolution:
@@ -30,7 +31,11 @@
 #   - Line-by-line. Blank lines and lines whose first non-space char is `#`
 #     are skipped.
 #   - A line is only honoured when its KEY matches the allowlist regex
-#     ^(DEEPGRAM_[A-Z0-9_]+|TTS_ENGINE)$ — everything else in .env is ignored.
+#     ^(DEEPGRAM_[A-Z0-9_]+|TTS_ENGINE|JARVIS_ECHO_[A-Z0-9_]+)$ — everything
+#     else in .env is ignored. A key containing any character outside
+#     [A-Z0-9_] (e.g. the typo "DEEPGRAM_API KEY") is skipped with a
+#     warning to stderr (key only, never the value) — it must not abort the
+#     `set -euo pipefail` parent via a bad ${!key} / export.
 #   - Split on the FIRST `=` only (values, e.g. API keys, may contain `=`).
 #   - One layer of surrounding single or double quotes is stripped from the
 #     value. No expansion, no command substitution, no `eval`, and the .env
@@ -79,9 +84,32 @@ _jarvis_load_env() {
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
 
-    # Allowlist gate: only DEEPGRAM_* or TTS_ENGINE keys are honoured.
+    # Malformed-key hardening (WR-05): a key containing any character
+    # outside [A-Z0-9_] is never a valid shell identifier — `[ -n "${!key}" ]`
+    # / `export "$key=…"` on it would abort the `set -euo pipefail` parent
+    # (run.sh) with a cryptic bash error at sidecar startup. Skip it, and
+    # warn (key only — NEVER the value) when it looks like an
+    # allowlist-prefixed typo so e.g. "DEEPGRAM_API KEY=…" gets a signal
+    # instead of silence.
     case "$key" in
-      DEEPGRAM_[A-Z0-9_]*|TTS_ENGINE) ;;
+      *[!A-Z0-9_]*)
+        case "$key" in
+          DEEPGRAM_*|TTS_ENGINE*|JARVIS_ECHO_*)
+            echo "load_env.sh: skipping malformed .env key (not a valid identifier): ${key}" >&2 ;;
+        esac
+        continue
+        ;;
+    esac
+
+    # Allowlist gate — anchored: with non-[A-Z0-9_] keys already rejected
+    # above, these globs are exactly the documented regex
+    # ^(DEEPGRAM_[A-Z0-9_]+|TTS_ENGINE|JARVIS_ECHO_[A-Z0-9_]+)$ (the old
+    # `DEEPGRAM_[A-Z0-9_]*` glob anchored only the first character after
+    # the prefix — the trailing * matched anything). JARVIS_ECHO_?* carries
+    # the echo-gate tunables voice_server.py reads (JARVIS_ECHO_GATE /
+    # _SIM_THRESHOLD / _CONF_THRESHOLD / _DECAY_MS) — WR-04.
+    case "$key" in
+      DEEPGRAM_?*|TTS_ENGINE|JARVIS_ECHO_?*) ;;
       *) continue ;;
     esac
 

@@ -107,10 +107,12 @@ any fallback are always visible on `GET /health`'s `stt_engine` key.
 ### `load_env.sh` — allowlisted `.env` loading
 
 `run.sh` sources `load_env.sh` before starting the sidecar, which loads *only*
-`DEEPGRAM_*`/`TTS_ENGINE` keys from the repo-root `.env` (an explicit
-allowlist — every other secret in `.env`, e.g. `FIREWORKS_API_KEY`, is never
-read into this process).  A variable already set in the shell environment is
-left untouched; values are never echoed or logged.
+`DEEPGRAM_*`/`TTS_ENGINE`/`JARVIS_ECHO_*` keys from the repo-root `.env` (an
+explicit anchored allowlist — every other secret in `.env`, e.g.
+`FIREWORKS_API_KEY`, is never read into this process).  A variable already set
+in the shell environment is left untouched; values are never echoed or logged.
+A malformed matching key (e.g. `DEEPGRAM_API KEY=…`) is skipped with a
+key-only warning — it never aborts the `set -euo pipefail` launcher.
 
 ---
 

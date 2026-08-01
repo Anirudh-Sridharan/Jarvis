@@ -24,10 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # shellcheck disable=SC1091
-# Allowlisted, non-overriding load of DEEPGRAM_*/TTS_ENGINE from the
-# repo-root .env (see load_env.sh for the allowlist/security rationale).
-# Sourced before the venv probe so both the pip step and the exec'd uvicorn
-# process see the loaded values.
+# Allowlisted, non-overriding load of DEEPGRAM_*/TTS_ENGINE/JARVIS_ECHO_*
+# from the repo-root .env (see load_env.sh for the allowlist/security
+# rationale). Sourced before the venv probe so both the pip step and the
+# exec'd uvicorn process see the loaded values.
 source "${SCRIPT_DIR}/load_env.sh"
 
 VENV_DIR="${SCRIPT_DIR}/.venv"
