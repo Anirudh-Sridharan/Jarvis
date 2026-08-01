@@ -106,12 +106,22 @@ else
   DEEPGRAM_KEY_STATUS="unset"
 fi
 
+# TTS engine line mirrors voice_server._configured_tts_engine: aura only when
+# TTS_ENGINE (default "aura" — user decision, phase 13.2) asks for it AND a
+# key is present; otherwise the Kokoro fallback serves.
+if [ "${TTS_ENGINE:-aura}" = "aura" ] && [ -n "${DEEPGRAM_API_KEY:-}" ]; then
+  TTS_ENGINE_LINE="aura (${DEEPGRAM_TTS_MODEL:-aura-2-draco-en})"
+else
+  TTS_ENGINE_LINE="kokoro (${TTS_VOICE:-bm_george:0.7,bf_emma:0.3})"
+fi
+
 echo ""
 echo "Starting Jarvis Voice sidecar on 127.0.0.1:${PORT}"
 echo "  STT engine  : ${STT_ENGINE_LINE}"
 echo "  Deepgram key: ${DEEPGRAM_KEY_STATUS}"
 echo "  STT model   : ${STT_MODEL_SIZE:-small} (faster-whisper int8)"
-echo "  TTS voice   : ${TTS_VOICE:-bm_george:0.7,bf_emma:0.3} (Kokoro, British English)"
+echo "  TTS engine  : ${TTS_ENGINE_LINE}"
+echo "  Kokoro voice: ${TTS_VOICE:-bm_george:0.7,bf_emma:0.3} (British blend — the automatic fallback voice)"
 echo "  Wake model  : ${WAKE_WORD_MODEL:-hey_jarvis} (openWakeWord)"
 echo "  Wake thresh : ${WAKE_THRESHOLD:-0.35} (lower = more sensitive)"
 echo "  Orchestrator: ${VOICE_ORCHESTRATOR_URL:-http://127.0.0.1:8080/voice/wake}"

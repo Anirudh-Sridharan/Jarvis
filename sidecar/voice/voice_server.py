@@ -26,10 +26,13 @@ Contract (keep exact — the TS ``voiceClient`` calls these):
     POST /tts   { "text": "…", "request_id": "<optional uuid>", "engine": "kokoro|aura" }
         → Streams raw PCM-16 LE mono 24 kHz audio chunks (Content-Type:
           audio/pcm; rate=24000).  Request-id header ``X-TTS-Request-Id``
-          echoed back.  ``engine`` is optional (defaults to the TTS_ENGINE
-          env value); Kokoro is always the default and the fallback — an
-          Aura failure yields Kokoro audio for the same request, never a
-          500 or silence.  Close the response / call /tts/cancel to abort.
+          echoed back.  ``engine`` is optional and defaults to the
+          TTS_ENGINE env value — currently "aura" (Deepgram Aura-2, an
+          explicit user decision, 2026-08-01 listening checkpoint); Kokoro
+          is the automatic FALLBACK — a failed, zero-byte, or stalled Aura
+          stream yields Kokoro audio for the same request, never a 500 or
+          silence (a stream that dies after delivering audio truncates).
+          Close the response / call /tts/cancel to abort.
 
     POST /tts/cancel   { "request_id": "…" }
         → { "cancelled": bool }

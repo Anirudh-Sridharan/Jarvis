@@ -266,8 +266,10 @@ def run_ab_eval(args: argparse.Namespace) -> int:
     print("\n" + "=" * 70)
     print("Latency is measured above; audio QUALITY is not. Listening and")
     print("deciding between Kokoro and the two Aura-2 voices is entirely up")
-    print("to you — this tool does not pick one. The current default stays")
-    print("Kokoro (bm_george:0.7,bf_emma:0.3) until you decide otherwise.")
+    print("to you — this tool does not pick one and never writes config.")
+    print("Current default (your decision, 2026-08-01): Aura-2 aura-2-draco-en;")
+    print("Kokoro (bm_george:0.7,bf_emma:0.3) is the automatic fallback.")
+    print("Re-run this tool and change TTS_ENGINE/DEEPGRAM_TTS_MODEL to revisit.")
     print("=" * 70)
 
     if args.play:
