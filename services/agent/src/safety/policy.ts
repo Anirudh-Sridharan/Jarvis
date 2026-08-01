@@ -13,6 +13,7 @@
  *   calendar_write  → require_approval (always; delete → double-confirm)
  *   code_exec       → require_approval (always)
  *   browser_action  → require_approval (always)
+ *   mac_action      → require_approval (always)
  *   unknown/new     → require_approval (read-only default fail-safe)
  */
 
@@ -58,6 +59,7 @@ export const DECISION_TABLE: Record<RiskClass, TableEntry> = {
   calendar_write: { defaultOutcome: "require_approval", requiresApproval: true },
   code_exec: { defaultOutcome: "require_approval", requiresApproval: true },
   browser_action: { defaultOutcome: "require_approval", requiresApproval: true },
+  mac_action: { defaultOutcome: "require_approval", requiresApproval: true },
 };
 
 // ── Dynamic trigger evaluation ────────────────────────────────────────────────
