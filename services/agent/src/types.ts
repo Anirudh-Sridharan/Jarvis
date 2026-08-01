@@ -116,7 +116,8 @@ export type RiskClass =
   | "destructive"
   | "calendar_write"
   | "code_exec"
-  | "browser_action";
+  | "browser_action"
+  | "mac_action";
 
 export interface ProposedAction {
   id: string;

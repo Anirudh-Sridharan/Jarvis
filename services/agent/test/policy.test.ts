@@ -249,6 +249,7 @@ describe("Policy decision table", () => {
     const riskClasses: RiskClass[] = [
       "read_only", "internal_write", "outward_comm", "financial",
       "destructive", "calendar_write", "code_exec", "browser_action",
+      "mac_action",
     ];
     for (const cls of riskClasses) {
       expect(DECISION_TABLE[cls]).toBeDefined();
@@ -276,6 +277,33 @@ describe("browser_action decisions (feature 18 browser slice)", () => {
     });
     const decision = classifyAndDecide(action, {
       sideEffects: "browser_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.reasons.join(" ")).toMatch(/untrusted|external/i);
+  });
+});
+
+describe("mac_action decisions (phase 15 mac-control slice)", () => {
+  it("mac_action → require_approval, even from a clean (untainted) run", () => {
+    const decision = classifyAndDecide(makeAction("mac_open"), {
+      sideEffects: "mac_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.riskClass).toBe("mac_action");
+  });
+
+  it("mac_action from an external-content-tainted run still requires approval", () => {
+    const action = makeAction("mac_open", {}, {
+      provenance: {
+        derivedFromExternal: true,
+        sources: ["mac_ui_snapshot"],
+        injectionFlags: ["external_content_source"],
+      },
+    });
+    const decision = classifyAndDecide(action, {
+      sideEffects: "mac_action",
       reversible: false,
     });
     expect(decision.outcome).toBe("require_approval");
