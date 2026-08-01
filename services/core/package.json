@@ -16,6 +16,7 @@
     "connect": "tsx src/cli/connect.ts",
     "voice": "tsx src/cli/voice.ts",
     "eval:browser-use": "tsx src/cli/evalBrowserUse.ts",
+    "mac-doctor": "tsx src/cli/macDoctor.ts",
     "test": "vitest run"
   },
   "dependencies": {
