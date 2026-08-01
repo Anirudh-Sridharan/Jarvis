@@ -1,13 +1,12 @@
 /**
  * gateway-fallback.test.ts
  *
- * SC4 — the 3-way gateway fallback matrix, in both directions, for both
- * cloud providers, with fake providers patched onto a real gateway (no
- * network, no credentials):
+ * SC4 — the 3-way gateway fallback matrix, in BOTH directions, with fake
+ * providers patched onto a real gateway (no network, no credentials):
  *
- *   1. cloud-load/runtime failure BEFORE any token -> the turn completes on
- *      the local model instead of erroring (local-unavailable-fallback /
- *      oom-fallback), with modelManager.isFallbackActive() true.
+ * cloud->local (agent/reasoning — interactive, fallback-eligible):
+ *   1. cloud runtime failure BEFORE any token -> the turn completes on the
+ *      local model (cloud-unavailable fallback), fallbackActive true.
  *   2. BOTH cloud and local fail -> exactly one structured error chunk,
  *      naming the failing cloud target and containing the original error
  *      text, no token chunk emitted.
@@ -16,8 +15,15 @@
  *      invoked for a given task hint (proves per-task-class dispatch, not
  *      "some cloud provider answered").
  *
- * Parameterized with describe.each over the D-04 task-class matrix
- * (consolidation->fireworks, agent->anthropic, reasoning->anthropic) instead
+ * local->cloud (chat — WR-07): local load failure (lifecycle gate) and local
+ * pre-token runtime failure (oom-fallback) both complete on the
+ * defaultCloudProvider; the double failure yields one structured error.
+ *
+ * Cloud-PINNED lanes (CR-01/WR-01: consolidation, token-overflow) and the
+ * forceTarget:"local" privacy pin (WR-02) fail loudly instead of falling
+ * back — see their describes below.
+ *
+ * Parameterized with describe.each over the D-04 task-class matrix instead
  * of one hardcoded fixture, per RESEARCH.md Pitfall 3 (full rewrite, not a
  * patch — the old file's `(gw as any).hf` monkey-patch no longer exists).
  */
@@ -232,6 +238,68 @@ describe("cloud-pinned consolidation (CR-01)", () => {
     expect(gw.modelManager.isFallbackActive()).toBe(false);
     expect(calls.anthropic).toBe(0);
     expect(calls.mlx).toBe(0);
+  });
+});
+
+// ── WR-07: the local->cloud direction — a chat turn whose LOCAL lane dies ──
+// falls back to the defaultCloudProvider (config-driven, NOT a task entry).
+describe("local->cloud fallback for taskHint=chat (WR-07)", () => {
+  it("a local LOAD failure (lifecycle gate) completes on the defaultCloudProvider fake", async () => {
+    const { gw, calls } = buildGateway({ cloudFails: false, localFails: true, cloudTarget: "fireworks" });
+    const chunks = await collect(gw.chat(requestFor("chat")));
+
+    const tokens = chunks.filter((c) => c.type === "token").map((c) => (c as { text: string }).text);
+    expect(tokens.join("")).toBe("hello from cloud");
+    expect(chunks.at(-1)).toEqual({ type: "done" });
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    // defaultCloudProvider = fireworks (makeConfig); anthropic must never see the turn.
+    expect(calls.fireworks).toBe(1);
+    expect(calls.anthropic).toBe(0);
+    expect(gw.modelManager.isFallbackActive()).toBe(true);
+  });
+
+  it("a local RUNTIME failure before any token (oom-fallback) completes on the defaultCloudProvider fake", async () => {
+    const { gw, calls } = buildGateway({
+      cloudFails: false,
+      localRuntimeFails: true,
+      cloudTarget: "fireworks",
+    });
+    const chunks = await collect(gw.chat(requestFor("chat")));
+
+    const tokens = chunks.filter((c) => c.type === "token").map((c) => (c as { text: string }).text);
+    expect(tokens.join("")).toBe("hello from cloud");
+    expect(chunks.at(-1)).toEqual({ type: "done" });
+    expect(calls.mlx).toBe(1);
+    expect(calls.fireworks).toBe(1);
+    expect(calls.anthropic).toBe(0);
+    expect(gw.modelManager.isFallbackActive()).toBe(true);
+  });
+
+  it("local LOAD failure AND dead cloud yields exactly one structured error naming both failures", async () => {
+    const { gw } = buildGateway({ cloudFails: true, localFails: true, cloudTarget: "fireworks" });
+    const chunks = await collect(gw.chat(requestFor("chat")));
+
+    const errors = chunks.filter((c) => c.type === "error") as { message: string }[];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toContain("fireworks");
+    expect(errors[0]!.message).toContain("402");
+    expect(errors[0]!.message).toContain("local fallback also failed");
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
+  });
+
+  it("local RUNTIME failure AND dead cloud yields exactly one structured error naming the cloud fallback", async () => {
+    const { gw } = buildGateway({
+      cloudFails: true,
+      localRuntimeFails: true,
+      cloudTarget: "fireworks",
+    });
+    const chunks = await collect(gw.chat(requestFor("chat")));
+
+    const errors = chunks.filter((c) => c.type === "error") as { message: string }[];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toContain("Cloud fallback (fireworks) failed");
+    expect(errors[0]!.message).toContain("402");
+    expect(chunks.some((c) => c.type === "token")).toBe(false);
   });
 });
 
