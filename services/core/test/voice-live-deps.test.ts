@@ -172,6 +172,58 @@ describe("SidecarSttEngine", () => {
       silenceMs: 0,
     });
   });
+
+  // Phase 13.2: the sidecar's STT engine became swappable (faster-whisper /
+  // Deepgram). These cases pin translateFrame's contract so an engine swap
+  // can never change the TS-visible event shape — any additive field a new
+  // engine attaches to a frame must be silently ignored, never leaked
+  // through to @jarvis/voice's SttEvent union.
+  it("ignores an extra field on a final frame (engine tag does not leak through)", () => {
+    expect(
+      translateFrame({
+        type: "final",
+        text: "hello world",
+        confidence: 0.93,
+        // @ts-expect-error additive/undocumented field a future engine might attach
+        engine: "deepgram",
+      }),
+    ).toEqual({ type: "final", text: "hello world", confidence: 0.93 });
+  });
+
+  it("ignores an extra field on a partial frame (engine tag does not leak through)", () => {
+    expect(
+      translateFrame({
+        type: "partial",
+        text: "hello",
+        stability: 0.6,
+        // @ts-expect-error additive/undocumented field a future engine might attach
+        engine: "deepgram",
+      }),
+    ).toEqual({ type: "partial", text: "hello", stability: 0.6 });
+  });
+
+  it("keeps the silence_ms passthrough intact alongside an extra field on speech_end", () => {
+    expect(
+      translateFrame({
+        type: "speech_end",
+        silence_ms: 480,
+        // @ts-expect-error additive/undocumented field a future engine might attach
+        engine: "deepgram",
+      }),
+    ).toEqual({ type: "speech_end", silenceMs: 480 });
+  });
+
+  it("defaults an empty-text final to text: \"\" / confidence: 1 (a Deepgram segment finalizing empty must not crash the orchestrator)", () => {
+    expect(translateFrame({ type: "final" })).toEqual({
+      type: "final",
+      text: "",
+      confidence: 1,
+    });
+  });
+
+  it("returns null for a brand-new frame type — introducing one would be silently dropped, so this phase never does", () => {
+    expect(translateFrame({ type: "utterance_end" })).toBeNull();
+  });
 });
 
 // ── SidecarTtsEngine ──────────────────────────────────────────────────────────
