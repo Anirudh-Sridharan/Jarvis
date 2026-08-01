@@ -264,6 +264,58 @@ describe("runBrowserUseTask — poll to terminal", () => {
   });
 });
 
+describe("runBrowserUseTask — poll shape drift (WR-02)", () => {
+  it("tolerates a terminal poll response missing steps/output/isSuccess/cost without throwing", async () => {
+    const fetchFn = fakeFetchRouter(
+      () => createResponse(),
+      () =>
+        new Response(JSON.stringify({ status: "finished" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    const record = await runBrowserUseTask(TASK_E1, { fetchFn, sleep: async () => {} });
+
+    expect(record.ok).toBe(true);
+    expect(record.status).toBe("finished");
+    expect(record.steps).toBe(0);
+    expect(record.answer).toBeNull();
+    expect(record.providerReportedSuccess).toBeNull();
+    expect(record.costUsd).toBeNull();
+    expect(record.success).toBe(false);
+  });
+
+  it("tolerates steps arriving as a non-array", async () => {
+    const fetchFn = fakeFetchRouter(
+      () => createResponse(),
+      () =>
+        new Response(JSON.stringify({ status: "finished", output: "x", steps: 7 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    const record = await runBrowserUseTask(TASK_E1, { fetchFn, sleep: async () => {} });
+
+    expect(record.ok).toBe(true);
+    expect(record.steps).toBe(0);
+  });
+
+  it("a poll body of JSON null becomes a structured error record, never a rejection (degrade-never-throw backstop)", async () => {
+    const fetchFn = fakeFetchRouter(
+      () => createResponse(),
+      () => new Response("null", { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+
+    const record = await runBrowserUseTask(TASK_E1, { fetchFn, sleep: async () => {} });
+
+    expect(record.ok).toBe(false);
+    expect(record.status).toBe("error");
+    expect(record.error).toContain("Unexpected client error");
+  });
+});
+
 describe("runBrowserUseTask — poll bound (timeout)", () => {
   it("stops at the poll ceiling and returns status:timeout without hanging or throwing", async () => {
     const clock = makeFakeClock();

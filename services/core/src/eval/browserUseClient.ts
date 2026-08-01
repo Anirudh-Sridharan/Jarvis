@@ -63,15 +63,19 @@ interface BrowserUseCreateResponse {
   sessionId: string;
 }
 
+/** What we EXPECT a poll response to look like. The cast in getTask() is
+ *  unvalidated and the live API has already diverged once (`cost` as string,
+ *  CR-01), so every field is optional and runTask() accesses each one
+ *  defensively — shape drift degrades a field, never throws (WR-02). */
 interface BrowserUseGetResponse {
-  status: BrowserUseStatus;
-  output: string | null;
-  isSuccess: boolean | null;
+  status?: BrowserUseStatus;
+  output?: string | null;
+  isSuccess?: boolean | null;
   /** The live API returns this as a JSON *string* (e.g. "0.006") despite the
    *  docs implying a number — confirmed by the 13.3-04 live run. Accept both;
    *  runTask() coerces via coerceCost() so records always carry a number. */
-  cost: number | string | null;
-  steps: unknown[];
+  cost?: number | string | null;
+  steps?: unknown[];
 }
 
 export interface BrowserUseClientDeps {
@@ -193,9 +197,31 @@ export function makeBrowserUseClient(deps: BrowserUseClientDeps = {}): {
     }
   }
 
+  /** Degrade-never-throw wrapper (WR-02): a task that fails is data, not an
+   *  exception — the caller (the eval CLI) writes records for every task, so
+   *  an unexpected TypeError from API shape drift must become a structured
+   *  error record rather than rejecting out and losing prior records. */
   async function runTask(task: BrowsingEvalTask): Promise<BrowserUseTaskRecord> {
     const startedAt = now();
+    try {
+      return await runTaskInner(task, startedAt);
+    } catch (err) {
+      return {
+        ...baseRecord(task.id),
+        ok: false,
+        status: "error",
+        success: false,
+        providerReportedSuccess: null,
+        answer: null,
+        steps: 0,
+        latencyMs: now() - startedAt,
+        costUsd: null,
+        error: `Unexpected client error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
 
+  async function runTaskInner(task: BrowsingEvalTask, startedAt: number): Promise<BrowserUseTaskRecord> {
     const apiKey = process.env["BROWSER_USE_API_KEY"];
     if (!apiKey) {
       return {
@@ -250,9 +276,11 @@ export function makeBrowserUseClient(deps: BrowserUseClientDeps = {}): {
         };
       }
 
+      // Defensive access on every field (WR-02): the cast in getTask() is
+      // unvalidated and the live API has already drifted once (cost, CR-01).
       const { status } = polled.data;
       if (status === "finished" || status === "failed" || status === "stopped") {
-        const answer = polled.data.output ?? null;
+        const answer = typeof polled.data.output === "string" ? polled.data.output : null;
         const success = status === "finished" ? gradeAnswer(answer, task) : false;
         return {
           ...baseRecord(task.id),
@@ -260,9 +288,10 @@ export function makeBrowserUseClient(deps: BrowserUseClientDeps = {}): {
           taskId: created.id,
           status,
           success,
-          providerReportedSuccess: polled.data.isSuccess,
+          providerReportedSuccess:
+            typeof polled.data.isSuccess === "boolean" ? polled.data.isSuccess : null,
           answer,
-          steps: polled.data.steps.length,
+          steps: Array.isArray(polled.data.steps) ? polled.data.steps.length : 0,
           latencyMs: elapsed,
           costUsd: coerceCost(polled.data.cost),
         };
