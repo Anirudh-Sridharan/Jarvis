@@ -67,7 +67,10 @@ interface BrowserUseGetResponse {
   status: BrowserUseStatus;
   output: string | null;
   isSuccess: boolean | null;
-  cost: number | null;
+  /** The live API returns this as a JSON *string* (e.g. "0.006") despite the
+   *  docs implying a number — confirmed by the 13.3-04 live run. Accept both;
+   *  runTask() coerces via coerceCost() so records always carry a number. */
+  cost: number | string | null;
   steps: unknown[];
 }
 
@@ -93,6 +96,16 @@ function hostnameOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** Coerce the API's `cost` — a number, a numeric JSON string (the live v2
+ *  shape, e.g. "0.006"), or anything else — to `number | null`, so
+ *  BrowserUseTaskRecord.costUsd always honors its declared number|null
+ *  contract and the CLI's `.toFixed()` sum can never throw (CR-01). */
+function coerceCost(c: unknown): number | null {
+  if (typeof c === "number" && Number.isFinite(c)) return c;
+  if (typeof c === "string" && c.trim() !== "" && !Number.isNaN(Number(c))) return Number(c);
+  return null;
 }
 
 function baseRecord(evalTaskId: string): Pick<BrowserUseTaskRecord, "path" | "evalTaskId"> {
@@ -251,7 +264,7 @@ export function makeBrowserUseClient(deps: BrowserUseClientDeps = {}): {
           answer,
           steps: polled.data.steps.length,
           latencyMs: elapsed,
-          costUsd: polled.data.cost,
+          costUsd: coerceCost(polled.data.cost),
         };
       }
 

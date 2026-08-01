@@ -52,7 +52,7 @@ function pollResponse(body: {
   status: "started" | "paused" | "finished" | "failed" | "stopped";
   output?: string | null;
   isSuccess?: boolean | null;
-  cost?: number | null;
+  cost?: number | string | null;
   steps?: unknown[];
 }): Response {
   return new Response(
@@ -209,6 +209,40 @@ describe("runBrowserUseTask — poll to terminal", () => {
       expect(record.success).toBe(false);
     },
   );
+
+  it("coerces a string cost from the live API (CR-01 regression) to a number in costUsd", async () => {
+    // The live Browser Use v2 API returns cost as a JSON STRING (e.g. "0.006")
+    // — confirmed by the committed 13.3-eval-browseruse.json artifact. A string
+    // costUsd string-concatenates in the CLI's reduce() and then crashes
+    // `.toFixed()` AFTER paid tasks complete, losing every record.
+    const fetchFn = fakeFetchRouter(
+      () => createResponse(),
+      () =>
+        pollResponse({
+          status: "finished",
+          output: "The author is Albert Einstein.",
+          isSuccess: true,
+          cost: "0.043",
+          steps: [{}],
+        }),
+    );
+
+    const record = await runBrowserUseTask(TASK_E1, { fetchFn, sleep: async () => {} });
+
+    expect(record.costUsd).toBe(0.043);
+    expect(typeof record.costUsd).toBe("number");
+  });
+
+  it("degrades a non-numeric string cost to null rather than NaN or a string", async () => {
+    const fetchFn = fakeFetchRouter(
+      () => createResponse(),
+      () => pollResponse({ status: "finished", output: "x", isSuccess: false, cost: "free??", steps: [] }),
+    );
+
+    const record = await runBrowserUseTask(TASK_E1, { fetchFn, sleep: async () => {} });
+
+    expect(record.costUsd).toBeNull();
+  });
 
   it("grading beats self-report: isSuccess true but output lacks the expected string yields success:false", async () => {
     const fetchFn = fakeFetchRouter(
