@@ -78,6 +78,16 @@ INTER_REP_PAUSE_S = 0.5
 # long-lived reconnecting client.
 CONNECT_TIMEOUT_S = 3.0
 
+# Echo-gate settle (WR-01): synthesizing the fixture via the sidecar's own
+# /tts registers the fixture TEXT as an active echo-gate synthesis window on
+# that same sidecar (echo_gate.py — active until estimated playback end +
+# decay). Rep 0 then streams near-identical audio and waits for a final whose
+# text fuzzy-matches that window at ~1.0 — the gate would drop it before the
+# WebSocket and rep 0 would falsely report "no final frame received". The
+# probe therefore waits out the window before the first repetition.
+ECHO_GATE_DECAY_S = 3.0        # echo_gate.py's JARVIS_ECHO_DECAY_MS default
+ECHO_GATE_SETTLE_MARGIN_S = 1.0  # margin over the playback-end estimate
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (asserted by --self-check with no network, no key, no sidecar)
@@ -107,6 +117,17 @@ def strip_wav_header(data: bytes) -> bytes:
     if data[:4] == b"RIFF":
         return data[44:]
     return data
+
+
+def gate_settle_seconds(fixture_ms: float) -> float:
+    """Seconds to wait after a /tts-synthesized fixture before streaming rep 0.
+
+    The sidecar's echo gate keeps the fixture's synthesis window active until
+    roughly its estimated playback end (~the fixture's own duration past first
+    audio) plus the decay; waiting audio duration + decay + margin guarantees
+    the window has expired before the first measured repetition.
+    """
+    return fixture_ms / 1000.0 + ECHO_GATE_DECAY_S + ECHO_GATE_SETTLE_MARGIN_S
 
 
 def summarize(samples: List[float]) -> Dict[str, float]:
@@ -343,6 +364,19 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"n:       {args.n}")
     print("=" * 70)
 
+    if not args.wav:
+        # WR-01: the /tts call above registered this exact text as an active
+        # echo-gate synthesis window on the target sidecar. Wait the window
+        # out (audio duration + decay + margin) so rep 0's final is not
+        # suppressed as speaker echo.
+        settle_s = gate_settle_seconds(fixture_ms)
+        log.info(
+            "Fixture came from /tts — waiting %.1fs for the sidecar echo gate "
+            "window to expire before rep 0.",
+            settle_s,
+        )
+        await asyncio.sleep(settle_s)
+
     results: List[RepetitionResult] = []
     for i in range(args.n):
         result = await run_repetition(ws_url, fixture_pcm, i)
@@ -421,6 +455,12 @@ def _self_check() -> int:
 
     q = summarize([10.0, 20.0, 30.0])
     assert q["min"] == 10 and q["max"] == 30 and q["median"] == 20 and abs(q["mean"] - 20) < 1e-9
+
+    # WR-01 regression: a 4 s /tts fixture must settle 4 + 3 (decay) + 1
+    # (margin) = 8 s before rep 0 so the sidecar echo gate cannot suppress
+    # the probe's own final.
+    assert abs(gate_settle_seconds(4000.0) - 8.0) < 1e-9
+    assert gate_settle_seconds(0.0) == ECHO_GATE_DECAY_S + ECHO_GATE_SETTLE_MARGIN_S
 
     print("STT_LATENCY_PROBE_SELF_CHECK_OK")
     return 0
