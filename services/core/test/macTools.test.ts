@@ -466,6 +466,71 @@ describe("approval ordering — no native command runs before a human approves (
     expect(fake.calls.length).toBe(0);
   });
 
+  it("mac_run_shortcut's 'not inspectable' clause reaches the approval request (T-15-11)", async () => {
+    tmpDir = makeTempDir();
+
+    const fake = new FakeMacRunner();
+    const tools = makeToolRegistry(makeMacTools(fake.runner));
+    const llm = scriptedLlm("mac_run_shortcut", { name: "Pay rent" });
+    const clock = new FixedClock(Date.now());
+    const manualSink = new ManualApprovalSink();
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: manualSink.sink,
+    });
+
+    const runPromise = agentSystem.agent.run("run the Pay rent shortcut", { source: "manual" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const request = manualSink.requests[0]!;
+    // The sentence the approver needs is in the PAYLOAD, not only in the
+    // model-facing tool description.
+    expect(request.disclosure).toMatch(/not inspectable/i);
+    expect(request.summary).toMatch(/not inspectable/i);
+    expect(request.riskClass).toBe("mac_action");
+
+    manualSink.reject(request.id, "test-user");
+    await runPromise;
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("mac_run_script's approval-facing disclosure says a script CAN reach a shell (T-15-11 / CR-03)", async () => {
+    tmpDir = makeTempDir();
+
+    const fake = new FakeMacRunner();
+    const tools = makeToolRegistry(makeMacTools(fake.runner));
+    const llm = scriptedLlm("mac_run_script", {
+      language: "javascript",
+      script: 'Application("TextEdit").documents[0].text()',
+    });
+    const clock = new FixedClock(Date.now());
+    const manualSink = new ManualApprovalSink();
+
+    const agentSystem = createAgentSystem({
+      llm,
+      tools,
+      clock,
+      dataDir: tmpDir,
+      approvalSink: manualSink.sink,
+    });
+
+    const runPromise = agentSystem.agent.run("read the front TextEdit doc", { source: "manual" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const request = manualSink.requests[0]!;
+    expect(request.disclosure).toMatch(/reach a shell/i);
+    // CR-03's honest framing: the denylist is a speed bump, not a boundary.
+    expect(request.disclosure).toMatch(/NOT a boundary/i);
+    expect(request.summary).toMatch(/reach a shell/i);
+
+    manualSink.reject(request.id, "test-user");
+    await runPromise;
+  });
+
   it("a mac_list_apps (readOnly) goal completes with zero approval requests", async () => {
     tmpDir = makeTempDir();
 

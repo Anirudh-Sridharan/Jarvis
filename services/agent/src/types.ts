@@ -161,6 +161,20 @@ export interface ApprovalRequest {
   runId: string;
   riskClass: RiskClass;
   summary: string;
+  /**
+   * The tool's standing, approver-facing risk disclosure, copied from its
+   * registered ToolMeta (phase 15 T-15-11). This is the sentence a human must
+   * read BEFORE deciding — e.g. mac_run_script's "a script can ultimately
+   * reach a shell; the denylist is a speed bump, not a boundary", or
+   * mac_run_shortcut's "shortcut contents are not inspectable before
+   * execution". Before this field existed, those clauses lived only in the
+   * tool description, which is visible to the MODEL and in the repo but never
+   * in the approval payload.
+   *
+   * Optional and purely additive: a tool that registers no disclosure produces
+   * an ApprovalRequest identical to the pre-15 shape.
+   */
+  disclosure?: string;
   args: Record<string, unknown>;
   reasoning: string;
   argsHash: string;

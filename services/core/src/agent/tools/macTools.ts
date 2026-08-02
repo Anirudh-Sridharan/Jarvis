@@ -302,13 +302,42 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
   ];
 
   // Phase 15 risk metadata. Gated tools ride the LOCKED decision-table class
-  // mac_action (require_approval, always) — do not weaken.
+  // mac_action (require_approval, always; never coverable by an always-allow
+  // grant — see @jarvis/agent NON_GRANTABLE_RISK_CLASSES) — do not weaken.
+  //
+  // `disclosure` (T-15-11) is the approver-facing half of each gated tool's
+  // honest wording. The tool DESCRIPTION is read by the model; the disclosure
+  // is copied onto the ApprovalRequest and into its summary, so the sentence a
+  // human is supposed to read before approving actually reaches the approval
+  // surface.
   registerToolMeta("mac_list_apps", { sideEffects: "read_only", reversible: true });
   registerToolMeta("mac_frontmost_app", { sideEffects: "read_only", reversible: true });
   registerToolMeta("mac_list_shortcuts", { sideEffects: "read_only", reversible: true });
-  registerToolMeta("mac_open", { sideEffects: "mac_action", reversible: false });
-  registerToolMeta("mac_run_script", { sideEffects: "mac_action", reversible: false });
-  registerToolMeta("mac_run_shortcut", { sideEffects: "mac_action", reversible: false });
+  registerToolMeta("mac_open", {
+    sideEffects: "mac_action",
+    reversible: false,
+    disclosure:
+      "Opens your REAL apps and REAL logged-in default browser — there is no isolated-profile " +
+      "equivalent here (unlike browser_navigate). Approve only if you want this target opened " +
+      "with your own session and credentials.",
+  });
+  registerToolMeta("mac_run_script", {
+    sideEffects: "mac_action",
+    reversible: false,
+    disclosure:
+      "AppleScript and JXA are full programming languages: this script can ultimately reach a " +
+      "shell, read or delete files, and send messages. Jarvis rejects the obvious " +
+      "shell-laundering shapes first, but that check is a best-effort denylist over source " +
+      "text, NOT a boundary — approve only if you understand and trust the exact script shown.",
+  });
+  registerToolMeta("mac_run_shortcut", {
+    sideEffects: "mac_action",
+    reversible: false,
+    disclosure:
+      "Shortcut contents are not inspectable before execution — Jarvis cannot statically " +
+      "determine what this Shortcut does. A Shortcut can itself run shell scripts, delete " +
+      "files, or send messages. Approve only if you trust it.",
+  });
 
   return tools;
 }

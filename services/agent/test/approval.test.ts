@@ -407,6 +407,54 @@ describe("ApprovalService", () => {
     expect(isGrantableRiskClass("calendar_write")).toBe(true);
   });
 
+  // ── Approver-facing disclosure — 15 T-15-11 ────────────────────────────────
+
+  it("a tool's registered disclosure reaches the ApprovalRequest and its summary", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    const disclosure =
+      "shortcut contents are not inspectable before execution — approve only if you trust it";
+    registerToolMeta("mac_run_shortcut", {
+      sideEffects: "mac_action",
+      reversible: false,
+      disclosure,
+    });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir, clock);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    const action = makeAction("mac_run_shortcut", { name: "Pay rent" });
+    void service.evaluateAndMaybeRequest(action, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+
+    const request = manualSink.requests[0]!;
+    // The sentence a human must read before deciding is IN the payload…
+    expect(request.disclosure).toBe(disclosure);
+    // …and in the one-line summary an approval surface renders.
+    expect(request.summary).toContain("not inspectable");
+    expect(request.summary).toContain("mac_run_shortcut");
+  });
+
+  it("a tool without a disclosure produces the pre-15 request shape (additive only)", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    registerToolMeta("send_email", { sideEffects: "outward_comm", reversible: false });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir, clock);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    const action = makeAction("send_email", { to: ["a@b.com"], subject: "Hi" });
+    void service.evaluateAndMaybeRequest(action, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+
+    const request = manualSink.requests[0]!;
+    expect(request.disclosure).toBeUndefined();
+    expect(request.summary).not.toContain("NOTE:");
+    expect(request.summary.split("\n").length).toBe(1);
+  });
+
   it("hashArgs canonicalizes nested objects at every depth", () => {
     // Same nested args, different key order → identical hash
     expect(hashArgs({ a: { b: 1, c: { d: 2, e: 3 } }, f: [1, 2] })).toBe(

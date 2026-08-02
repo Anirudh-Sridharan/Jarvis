@@ -158,12 +158,19 @@ export class ApprovalService {
       clock.now() + DEFAULT_APPROVAL_TIMEOUT_MS,
     ).toISOString();
 
+    // T-15-11: carry the tool's standing risk disclosure onto the request and
+    // into the summary, so the sentence a human must read before deciding is
+    // actually IN the approval payload — not only in the model-facing tool
+    // description.
+    const disclosure = toolMeta?.disclosure;
+
     const request: ApprovalRequest = {
       id: requestId,
       actionId: action.id,
       runId: action.runId,
       riskClass: decision.riskClass,
-      summary: buildSummary(action, decision),
+      summary: buildSummary(action, decision, disclosure),
+      ...(disclosure !== undefined ? { disclosure } : {}),
       args: action.args,
       reasoning: action.reasoning,
       argsHash: hashArgs(action.args),
@@ -385,6 +392,11 @@ export class ApprovalService {
   }
 }
 
-function buildSummary(action: ProposedAction, decision: PolicyDecision): string {
-  return `[${decision.riskClass}] ${action.tool}(${JSON.stringify(action.args).slice(0, 100)})`;
+function buildSummary(
+  action: ProposedAction,
+  decision: PolicyDecision,
+  disclosure?: string,
+): string {
+  const head = `[${decision.riskClass}] ${action.tool}(${JSON.stringify(action.args).slice(0, 100)})`;
+  return disclosure ? `${head}\nNOTE: ${disclosure}` : head;
 }

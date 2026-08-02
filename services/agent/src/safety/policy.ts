@@ -35,6 +35,18 @@ import { scanForInjectionMarkers, severityForFlags } from "./injectionGuards.js"
 export interface ToolMeta {
   sideEffects?: RiskClass;
   reversible: boolean;
+  /**
+   * Standing, approver-facing risk disclosure for this tool (T-15-11).
+   * Copied verbatim onto every ApprovalRequest the tool raises and rendered
+   * in the human-facing summary, so the sentence a human is supposed to read
+   * before approving actually reaches the approval surface rather than only
+   * the model-facing tool description.
+   *
+   * Keep it one or two sentences, and state what CANNOT be guaranteed —
+   * that is the part a human needs at the moment of decision. Optional:
+   * tools without one behave exactly as before.
+   */
+  disclosure?: string;
 }
 
 const toolRegistry = new Map<string, ToolMeta>();
