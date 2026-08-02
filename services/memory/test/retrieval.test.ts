@@ -9,8 +9,9 @@ import { join } from "node:path";
 import { openDatabase } from "../src/db/database.js";
 import { MemoryStore } from "../src/store/memoryStore.js";
 import { RetrievalService } from "../src/retrieval/retrieval.js";
-import { FakeEmbedder } from "../src/testing/fakes.js";
+import { FakeEmbedder, FakeLlm } from "../src/testing/fakes.js";
 import { CaptureService } from "../src/capture/capture.js";
+import { ConsolidationService } from "../src/consolidation/consolidation.js";
 
 function makeRetrieval() {
   const dir = mkdtempSync(join(tmpdir(), "jarvis-retrieval-test-"));
@@ -333,6 +334,59 @@ describe("RetrievalService - MEM-01 pendingRetriever (4th retriever + provisiona
     expect(pendingResult).toBeDefined();
     expect(factResult).toBeDefined();
     expect(pendingResult!.fusedScore).toBeLessThan(factResult!.fusedScore);
+  });
+
+  it("the SAME captured text transitions from pending to a promoted graph node after consolidation", async () => {
+    const { store, retrieval, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    const llm = new FakeLlm();
+    const marker = "eval-canary-pending-5528";
+    // FakeLlm's default extraction is a fixed "User prefers TypeScript" fact —
+    // the captured record's own literal text never reaches the graph unless
+    // an override is registered on a distinctive substring of its body.
+    // reflectInsights() embeds the same raw record text under "Recent
+    // experiences:" — suppress that prompt explicitly (checked first) so the
+    // marker only ever promotes into a single fact, not a duplicate episode.
+    llm.addOverride("Recent experiences:", "[]");
+    llm.addOverride(
+      marker,
+      JSON.stringify([
+        {
+          entity: "self",
+          predicate: "mentions",
+          object: marker,
+          text: `Captured note mentions ${marker}`,
+          confidence: 0.9,
+        },
+      ]),
+    );
+
+    await capture.captureNote({
+      text: `Reminder about ${marker} for the team`,
+      noteId: "pending-transition-1",
+    });
+
+    // Pre-consolidation half (MEM-01's already-proven path): the record
+    // surfaces as a provisional "pending" candidate before consolidation runs.
+    const before = await retrieval.retrieve(`${marker} team`, { k: 5 });
+    const pendingHit = before.find((r) => r.kind === "pending");
+    expect(pendingHit).toBeDefined();
+    expect(pendingHit?.text).toContain(marker);
+
+    const consolidation = new ConsolidationService(store, llm, embedder);
+    await consolidation.run("manual"); // force-consolidate — the MEM-06 gap
+
+    // Post-consolidation half (MEM-06's gap): the SAME text is now retrievable
+    // as a promoted fact, not merely "some pending row exists somewhere".
+    const after = await retrieval.retrieve(`${marker} team`, { k: 5 });
+    const factHit = after.find((r) => r.kind === "fact" && r.text.includes(marker));
+    expect(factHit).toBeDefined();
+    // The disappearance of the pending row here is expected and correct:
+    // MemoryStore.pendingSearch() selects WHERE consolidation_pending = 1 OR
+    // dead_letter = 1, so a legitimately-promoted record leaves that pool —
+    // which is exactly why this post-consolidation half is a distinct proof,
+    // not redundant with the pre-consolidation case above.
+    expect(after.some((r) => r.kind === "pending" && r.text.includes(marker))).toBe(false);
   });
 });
 
