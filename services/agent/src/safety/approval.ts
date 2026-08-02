@@ -392,11 +392,82 @@ export class ApprovalService {
   }
 }
 
+// ── Human-facing summary ──────────────────────────────────────────────────────
+
+/**
+ * Argument keys that identify a HANDLE rather than the action itself: a
+ * capture id, an element ref, a message/thread id. They are meaningless to a
+ * human approver and, at ~40-55 characters each, used to consume most of the
+ * summary budget — computer_click's `captureId` alone pushed `x`, `y` and
+ * `element` off the line the approver reads (15 security audit UF-04).
+ *
+ * They are not dropped (an approver may still want to see them); they are
+ * ordered LAST so the decision-relevant fields always survive truncation.
+ * Matched case-insensitively.
+ */
+const OPAQUE_ARG_KEYS: ReadonlySet<string> = new Set([
+  "captureid",
+  "ref",
+  "id",
+  "requestid",
+  "runid",
+  "actionid",
+  "threadid",
+  "messageid",
+  "eventid",
+  "sessionid",
+  "token",
+  "hash",
+]);
+
+/** Total budget for the rendered arg list. */
+export const SUMMARY_ARGS_BUDGET = 300;
+
+/** Per-value cap, so one long body/script cannot crowd out every sibling. */
+export const SUMMARY_VALUE_CAP = 80;
+
+/**
+ * Render `args` for a human approver: decision-relevant fields first, opaque
+ * handles last, each value individually capped, and a budget applied to whole
+ * key/value pairs instead of slicing the JSON mid-token.
+ *
+ * The FULL, untruncated args always remain on `ApprovalRequest.args` and in
+ * `argsHash` — this is the display line only.
+ */
+export function summarizeArgs(args: Record<string, unknown>): string {
+  const keys = Object.keys(args);
+  const ordered = [
+    ...keys.filter((k) => !OPAQUE_ARG_KEYS.has(k.toLowerCase())),
+    ...keys.filter((k) => OPAQUE_ARG_KEYS.has(k.toLowerCase())),
+  ];
+
+  const parts: string[] = [];
+  let used = 0;
+  let dropped = 0;
+  for (const key of ordered) {
+    let rendered = JSON.stringify(args[key]) ?? "null"; // undefined → "null"
+    if (rendered.length > SUMMARY_VALUE_CAP) {
+      rendered = `${rendered.slice(0, SUMMARY_VALUE_CAP)}…`;
+    }
+    const part = `${JSON.stringify(key)}:${rendered}`;
+    // Always keep at least one pair, so a single oversized arg still shows.
+    if (parts.length > 0 && used + part.length > SUMMARY_ARGS_BUDGET) {
+      dropped += 1;
+      continue;
+    }
+    parts.push(part);
+    used += part.length + 1; // + the joining comma
+  }
+
+  const more = dropped > 0 ? `,…+${dropped} more` : "";
+  return `{${parts.join(",")}${more}}`;
+}
+
 function buildSummary(
   action: ProposedAction,
   decision: PolicyDecision,
   disclosure?: string,
 ): string {
-  const head = `[${decision.riskClass}] ${action.tool}(${JSON.stringify(action.args).slice(0, 100)})`;
+  const head = `[${decision.riskClass}] ${action.tool}(${summarizeArgs(action.args)})`;
   return disclosure ? `${head}\nNOTE: ${disclosure}` : head;
 }

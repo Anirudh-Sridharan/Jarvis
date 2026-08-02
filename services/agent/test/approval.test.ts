@@ -12,7 +12,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalService, hashArgs, canonicalJson } from "../src/safety/approval.js";
+import {
+  ApprovalService,
+  hashArgs,
+  canonicalJson,
+  summarizeArgs,
+  SUMMARY_ARGS_BUDGET,
+} from "../src/safety/approval.js";
 import { AuditLog } from "../src/safety/audit.js";
 import {
   registerToolMeta,
@@ -453,6 +459,59 @@ describe("ApprovalService", () => {
     expect(request.disclosure).toBeUndefined();
     expect(request.summary).not.toContain("NOTE:");
     expect(request.summary.split("\n").length).toBe(1);
+  });
+
+  // ── Summary budget — 15 security audit UF-04 ───────────────────────────────
+
+  it("the summary keeps the decision-relevant args when an opaque id is present", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    registerToolMeta("computer_click", { sideEffects: "mac_action", reversible: false });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir, clock);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    // A real computer_click: the captureId alone is ~55 chars and used to
+    // consume most of the old 100-char budget, pushing x/y/element — the only
+    // fields a human can actually judge — off the summary line.
+    const args = {
+      captureId: "cap-3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      x: 512,
+      y: 384,
+      element: "Send payment button in the checkout dialog",
+    };
+    const action = makeAction("computer_click", args);
+    void service.evaluateAndMaybeRequest(action, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+
+    const summary = manualSink.requests[0]!.summary;
+    expect(summary).toContain('"x":512');
+    expect(summary).toContain('"y":384');
+    expect(summary).toContain("Send payment button");
+    // The opaque handle is kept, just ordered after the decision-relevant args.
+    expect(summary).toContain("cap-3f2504e0");
+    expect(summary.indexOf('"x"')).toBeLessThan(summary.indexOf('"captureId"'));
+  });
+
+  it("summarizeArgs caps each value and never slices the JSON mid-token", () => {
+    const long = "x".repeat(5_000);
+    const rendered = summarizeArgs({ script: long, language: "javascript" });
+    expect(rendered.startsWith("{")).toBe(true);
+    expect(rendered.endsWith("}")).toBe(true);
+    expect(rendered).toContain('"language":"javascript"');
+    expect(rendered).toContain("…");
+    expect(rendered.length).toBeLessThan(SUMMARY_ARGS_BUDGET + 200);
+
+    // Many small args: whole pairs are dropped with an explicit count, not a
+    // truncated tail that looks like data.
+    const many: Record<string, unknown> = {};
+    for (let i = 0; i < 40; i++) many[`field${i}`] = `value-${i}`;
+    const rendered2 = summarizeArgs(many);
+    expect(rendered2).toMatch(/…\+\d+ more}$/);
+
+    // A single oversized arg still shows something.
+    expect(summarizeArgs({ body: long })).toContain('"body"');
   });
 
   it("hashArgs canonicalizes nested objects at every depth", () => {
