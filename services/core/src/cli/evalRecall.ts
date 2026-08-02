@@ -186,7 +186,14 @@ async function runLive(args: EvalRecallArgs, canaries: Canary[], runToken: strin
   const promotedByIndex: boolean[] = [];
 
   for (const c of canaries) {
-    const results = await memory.retrieval.retrieve(c.query, { k: args.k });
+    // trackAccess: false (WR-01) — a measurement retrieval must NOT bump
+    // last_accessed_at/access_count on the real memories it surfaces as
+    // distractors: those fields feed recencyScore in future real retrievals
+    // and shield touched memories from forget-decay, so an eval that touched
+    // them would perturb the very ranking it is measuring. With this opt-out
+    // the probe's only writes really are captureNote() + consolidation
+    // (T-13-19).
+    const results = await memory.retrieval.retrieve(c.query, { k: args.k, trackAccess: false });
     const hit = results.find((r) => r.text.includes(c.marker));
     const targetMemoryId = hit?.memoryId ?? "__canary-not-retrieved__";
     const retrieved = results.map((r) => ({ memoryId: r.memoryId, rank: r.rank }));
@@ -195,7 +202,7 @@ async function runLive(args: EvalRecallArgs, canaries: Canary[], runToken: strin
     // Wide sweep distinguishes "consolidation dropped the marker" from
     // "ranking failed to surface it in the top k" (T-13-21) — without it a
     // found:false is unattributable.
-    const wide = await memory.retrieval.retrieve(c.query, { k: 50 });
+    const wide = await memory.retrieval.retrieve(c.query, { k: 50, trackAccess: false });
     promotedByIndex.push(wide.some((r) => r.text.includes(c.marker)));
   }
 

@@ -199,6 +199,13 @@ export interface RetrievalOptions {
   /** MEM-01: include not-yet-consolidated/dead-lettered experience_records via
    *  the pendingRetriever. Defaults to true at the RetrievalService call site. */
   includePending?: boolean;
+  /** When false, skip touchAccess() on the returned memories — the retrieval
+   *  leaves last_accessed_at/access_count untouched. Defaults to true
+   *  (normal chat/agent retrievals SHOULD refresh access recency). Built for
+   *  read-only measurement paths (the phase-13 eval probe): an observer that
+   *  bumps access counters perturbs recencyScore and shields touched memories
+   *  from forget-decay, distorting the very ranking it is trying to measure. */
+  trackAccess?: boolean;
 }
 
 // ─── Consolidation (feature 6) ────────────────────────────────────────────────

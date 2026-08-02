@@ -275,10 +275,15 @@ export class RetrievalService {
 
     // 10. Touch access counters for the returned memories (fire-and-forget:
     // results are already computed, so this cannot affect determinism).
-    try {
-      this.store.touchAccess(results.map((r) => r.memoryId));
-    } catch {
-      // Non-fatal — access tracking must never break retrieval.
+    // Skipped when opts.trackAccess === false — a read-only measurement path
+    // (e.g. the phase-13 eval probe) must not mutate last_accessed_at/
+    // access_count, which feed recencyScore and forget-decay (WR-01).
+    if (opts.trackAccess !== false) {
+      try {
+        this.store.touchAccess(results.map((r) => r.memoryId));
+      } catch {
+        // Non-fatal — access tracking must never break retrieval.
+      }
     }
 
     return results;

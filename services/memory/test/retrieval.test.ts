@@ -202,6 +202,40 @@ describe("RetrievalService - access tracking", () => {
     expect(row.access_count).toBe(1);
     expect(row.last_accessed_at).toBeGreaterThan(0);
   });
+
+  it("trackAccess: false leaves access_count and last_accessed_at untouched (WR-01)", async () => {
+    const { store, retrieval } = makeRetrieval();
+    const ep = await store.upsertEpisode({
+      text: "User prefers TypeScript for backend services",
+      occurredAt: "2026-06-01T10:00:00Z",
+      provenance: { source: "chat", sourceId: "touch-2", confidence: 0.9 },
+    });
+
+    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const before = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+
+    // Read-only measurement retrieval: the episode is returned but NOT touched.
+    const results = await retrieval.retrieve("TypeScript backend services", {
+      k: 5,
+      trackAccess: false,
+    });
+    expect(results.some((r) => r.memoryId === ep.id)).toBe(true);
+
+    const after = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+    expect(after.access_count).toBe(before.access_count);
+    expect(after.last_accessed_at).toBe(before.last_accessed_at);
+
+    // Default behavior is unchanged: an ordinary retrieval still bumps both.
+    await retrieval.retrieve("TypeScript backend services", { k: 5 });
+    const bumped = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+    expect(bumped.access_count).toBe(before.access_count + 1);
+  });
 });
 
 describe("MemoryStore.pendingSearch() - MEM-01 pending-record search", () => {
