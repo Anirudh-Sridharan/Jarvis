@@ -235,6 +235,106 @@ describe("AxActionRunner.typeAtFocus — secure field refusal", () => {
   });
 });
 
+// ── TOCTOU re-verification inside the keystroke call (15 WR-03) ───────────────
+
+describe("AxActionRunner — keystroke-time re-verification", () => {
+  it("type passes the inspected role+subrole to the keystroke script so it can re-check them", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(
+        JSON.stringify({
+          elementRole: "AXTextField",
+          elementSubrole: SUBROLE_NONE,
+          focusedRole: "AXTextField",
+          focusedSubrole: SUBROLE_NONE,
+        }),
+      ),
+      ok(JSON.stringify({ success: true })),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    await runner.type(REF, "hello");
+
+    const keystrokeCall = fake.calls[1]!;
+    expect(keystrokeCall.args.slice(-2)).toEqual(["AXTextField", SUBROLE_NONE]);
+    const body = scriptBodyOf(keystrokeCall);
+    expect(body).toContain("readSubrole");
+    expect(body).toContain("isSecureLive");
+    expect(body).toContain("focus-changed");
+  });
+
+  it("type surfaces a focus-changed refusal from the keystroke script instead of reporting success", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(
+        JSON.stringify({
+          elementRole: "AXTextField",
+          elementSubrole: SUBROLE_NONE,
+          focusedRole: "AXTextField",
+          focusedSubrole: SUBROLE_NONE,
+        }),
+      ),
+      ok(JSON.stringify({ refused: "focus-changed", liveRole: "AXSheet", liveSubrole: SUBROLE_NONE })),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.type(REF, "hello");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.refused).toBe("focus-changed");
+      expect(result.error).toMatch(/AXSheet/);
+    }
+  });
+
+  it("typeAtFocus surfaces a secure-field refusal raised at keystroke time (focus moved to a password field)", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE })),
+      ok(JSON.stringify({ refused: "secure-field", liveRole: "AXTextField", liveSubrole: "AXSecureTextField" })),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.typeAtFocus("late-arriving-secret");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.refused).toBe("secure-field");
+      expect(result.error).toMatch(/secure field/i);
+    }
+  });
+
+  it("typeAtFocus does not report success when the keystroke script returns no success flag", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE })),
+      ok(JSON.stringify({})),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.typeAtFocus("hello");
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("the in-script secure guard is generated from the TS constants, so the two cannot drift", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE })),
+      ok(JSON.stringify({ success: true })),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    await runner.typeAtFocus("hello");
+
+    const body = scriptBodyOf(fake.calls[1]!);
+    for (const name of [...SECURE_FIELD_SUBROLES, ...SECURE_FIELD_ROLES]) {
+      expect(body).toContain(name.toLowerCase());
+    }
+    expect(() => new Function(body)).not.toThrow();
+  });
+});
+
 // ── click ──────────────────────────────────────────────────────────────────────
 
 describe("AxActionRunner.click", () => {

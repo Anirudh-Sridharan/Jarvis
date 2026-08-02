@@ -83,6 +83,11 @@ export type AxActionResult =
 const SECURE_FIELD_REFUSAL =
   "refusing to type into a secure field — Jarvis never enters credentials; use Keychain/passkey autofill instead";
 
+const FOCUS_CHANGED_REFUSAL =
+  "refusing to type — the target changed between the safety check and the keystroke " +
+  "(a dialog or another app may have taken focus); nothing was typed. Re-run mac_ui_snapshot " +
+  "and try again";
+
 /** Allowlisted key names -> System Events key codes. Anything outside this
  * set is refused pre-spawn. */
 const ALLOWED_KEYS: Record<string, number> = {
@@ -99,6 +104,30 @@ const ALLOWED_KEYS: Record<string, number> = {
 };
 
 // ── Fixed JXA script bodies (never string-concatenated with untrusted data) ───
+
+/**
+ * In-script mirror of `isSecureTarget`, prepended to the keystroke scripts so
+ * the D-03 decision is re-made in the SAME process that synthesizes the
+ * keystroke (15 WR-03 — the inspect call is a separate osascript process and
+ * focus can move in between). The lists are interpolated from this module's
+ * own constants — never caller data — so the two implementations cannot
+ * drift.
+ */
+const AX_SECURE_GUARD_SCRIPT = `
+var SECURE_NAMES = ${JSON.stringify(
+  [...SECURE_FIELD_SUBROLES, ...SECURE_FIELD_ROLES].map((n) => n.toLowerCase()),
+)};
+var TEXT_ENTRY_ROLES = ${JSON.stringify(TEXT_ENTRY_ROLES.map((n) => n.toLowerCase()))};
+function isSecureLive(role, subrole) {
+  if (!role) return true;
+  var r = String(role).toLowerCase();
+  var s = (subrole === null || subrole === undefined) ? "" : String(subrole).toLowerCase();
+  if (SECURE_NAMES.indexOf(s) >= 0) return true;
+  if (SECURE_NAMES.indexOf(r) >= 0) return true;
+  if (TEXT_ENTRY_ROLES.indexOf(r) >= 0 && s === "") return true;
+  return false;
+}
+`;
 
 /** argv: [app, indexPath, expectedRole]. Walks to the element, compares the
  * live role to expectedRole; on match performs AXPress and returns
@@ -180,14 +209,21 @@ function run(argv) {
 }
 `;
 
-/** argv: [app, indexPath, text, submit01]. Only reached after the refusal
- * decision has cleared — keystrokes text and, if submit, a Return. */
+/** argv: [app, indexPath, text, submit01, expectedRole, expectedSubrole].
+ * Only reached after the TS-side refusal decision has cleared. RE-READS the
+ * target's role/subrole (and the live focused element) immediately before
+ * synthesizing anything and aborts with a `refused` sentinel if the
+ * observation the decision was made against no longer holds (15 WR-03). */
 const AX_TYPE_KEYSTROKE_SCRIPT = `
+${AX_ROLE_HELPER_SCRIPT}
+${AX_SECURE_GUARD_SCRIPT}
 function run(argv) {
   const appName = argv[0];
   const indexPath = argv[1].split(".").map(Number);
   const text = argv[2];
   const submit = argv[3] === "1";
+  const expectedRole = argv[4];
+  const expectedSubrole = argv[5];
   const se = Application("System Events");
   const proc = se.processes.byName(appName);
   let el = proc.windows[0];
@@ -197,6 +233,27 @@ function run(argv) {
   try {
     el.actions.byName("AXFocus").perform();
   } catch (e) {}
+
+  const liveRole = readRole(el);
+  const liveSubrole = readSubrole(el);
+  if (liveRole !== expectedRole || liveSubrole !== expectedSubrole) {
+    return JSON.stringify({ refused: "focus-changed", liveRole: liveRole, liveSubrole: liveSubrole });
+  }
+  if (isSecureLive(liveRole, liveSubrole)) {
+    return JSON.stringify({ refused: "secure-field", liveRole: liveRole, liveSubrole: liveSubrole });
+  }
+
+  var focusedRole = "";
+  var focusedSubrole = "";
+  try {
+    const focused = proc.attributes.byName("AXFocusedUIElement").value();
+    focusedRole = readRole(focused);
+    focusedSubrole = readSubrole(focused);
+  } catch (e) {}
+  if (isSecureLive(focusedRole, focusedSubrole)) {
+    return JSON.stringify({ refused: "secure-field", liveRole: focusedRole, liveSubrole: focusedSubrole });
+  }
+
   se.keystroke(text);
   if (submit) se.keyCode(36);
   return JSON.stringify({ success: true });
@@ -223,13 +280,38 @@ function run(argv) {
 }
 `;
 
-/** argv: [text, submit01]. Only reached after the refusal decision has
- * cleared. */
+/** argv: [text, submit01, expectedRole, expectedSubrole]. Only reached after
+ * the TS-side refusal decision has cleared. Re-reads the LIVE focused element
+ * immediately before the keystroke and aborts if it is not the element the
+ * decision was made against (15 WR-03) — this script previously typed blindly
+ * into whatever held focus at that instant. */
 const AX_TYPE_AT_FOCUS_KEYSTROKE_SCRIPT = `
+${AX_ROLE_HELPER_SCRIPT}
+${AX_SECURE_GUARD_SCRIPT}
 function run(argv) {
   const text = argv[0];
   const submit = argv[1] === "1";
+  const expectedRole = argv[2];
+  const expectedSubrole = argv[3];
   const se = Application("System Events");
+  const matches = se.processes.whose({ frontmost: true });
+  const proc = matches[0];
+
+  var liveRole = "";
+  var liveSubrole = "";
+  try {
+    const focused = proc.attributes.byName("AXFocusedUIElement").value();
+    liveRole = readRole(focused);
+    liveSubrole = readSubrole(focused);
+  } catch (e) {}
+
+  if (liveRole !== expectedRole || liveSubrole !== expectedSubrole) {
+    return JSON.stringify({ refused: "focus-changed", liveRole: liveRole, liveSubrole: liveSubrole });
+  }
+  if (isSecureLive(liveRole, liveSubrole)) {
+    return JSON.stringify({ refused: "secure-field", liveRole: liveRole, liveSubrole: liveSubrole });
+  }
+
   se.keystroke(text);
   if (submit) se.keyCode(36);
   return JSON.stringify({ success: true });
@@ -245,6 +327,38 @@ function run(argv) {
   return JSON.stringify({ success: true });
 }
 `;
+
+/**
+ * Interpret a keystroke script's stdout. The script re-verifies its target
+ * immediately before typing (15 WR-03), so its payload is authoritative:
+ * a `refused` sentinel becomes a structured refusal, and anything that is
+ * not an explicit success is treated as a failure rather than reported as a
+ * successful keystroke.
+ */
+function interpretKeystrokeOutput(stdout: string, success: AxActionResult): AxActionResult {
+  let out: { success?: boolean; refused?: string; liveRole?: string };
+  try {
+    out = JSON.parse(stdout) as typeof out;
+  } catch {
+    return { ok: false, error: "failed to parse type result", kind: "unknown" };
+  }
+  if (out.refused === "secure-field") {
+    return { ok: false, error: SECURE_FIELD_REFUSAL, kind: "unknown", refused: "secure-field" };
+  }
+  if (out.refused === "focus-changed") {
+    const seen = out.liveRole ? ` (focus is now ${out.liveRole})` : "";
+    return {
+      ok: false,
+      error: `${FOCUS_CHANGED_REFUSAL}${seen}`,
+      kind: "unknown",
+      refused: "focus-changed",
+    };
+  }
+  if (out.success !== true) {
+    return { ok: false, error: "typing did not report success", kind: "unknown" };
+  }
+  return success;
+}
 
 export class AxActionRunner {
   constructor(private readonly script: ScriptRunner = new ScriptRunner()) {}
@@ -357,16 +471,21 @@ export class AxActionRunner {
       parsed.indexPath.join("."),
       text,
       submit ? "1" : "0",
+      roles.elementRole ?? "",
+      roles.elementSubrole ?? "",
     ]);
     if (!keystroke.ok) return keystroke;
-    return { ok: true, typed: ref };
+    return interpretKeystrokeOutput(keystroke.stdout, { ok: true, typed: ref });
   }
 
   /**
    * Type `text` into whatever currently has focus (no ref addressing) — the
    * variant Tier 3 (plan 15-05) uses since a vision-grounded click leaves
    * focus somewhere the model did not address by ref. Identical two-call,
-   * refuse-before-second-call structure as `type`.
+   * refuse-before-second-call structure as `type`, plus the WR-03
+   * re-verification inside the keystroke call: if focus moved between the
+   * two spawns the keystroke is abandoned rather than delivered to whatever
+   * arrived (an auth dialog, another app).
    */
   async typeAtFocus(text: string, submit?: boolean): Promise<AxActionResult> {
     const inspect = await this.script.runJxa(AX_TYPE_AT_FOCUS_INSPECT_SCRIPT, []);
@@ -383,9 +502,14 @@ export class AxActionRunner {
       return { ok: false, error: SECURE_FIELD_REFUSAL, kind: "unknown", refused: "secure-field" };
     }
 
-    const keystroke = await this.script.runJxa(AX_TYPE_AT_FOCUS_KEYSTROKE_SCRIPT, [text, submit ? "1" : "0"]);
+    const keystroke = await this.script.runJxa(AX_TYPE_AT_FOCUS_KEYSTROKE_SCRIPT, [
+      text,
+      submit ? "1" : "0",
+      roles.focusedRole ?? "",
+      roles.focusedSubrole ?? "",
+    ]);
     if (!keystroke.ok) return keystroke;
-    return { ok: true, typed: "focus" };
+    return interpretKeystrokeOutput(keystroke.stdout, { ok: true, typed: "focus" });
   }
 
   /** Press an allowlisted key. Any key outside ALLOWED_KEYS is refused
