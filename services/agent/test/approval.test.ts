@@ -14,7 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalService, hashArgs, canonicalJson } from "../src/safety/approval.js";
 import { AuditLog } from "../src/safety/audit.js";
-import { registerToolMeta } from "../src/safety/policy.js";
+import {
+  registerToolMeta,
+  DECISION_TABLE,
+  NON_GRANTABLE_RISK_CLASSES,
+  isGrantableRiskClass,
+} from "../src/safety/policy.js";
 import {
   makeAutoApproveSink,
   makeAutoRejectSink,
@@ -304,6 +309,102 @@ describe("ApprovalService", () => {
     // Still requires approval — no phantom "any" grant exists.
     expect(decision.outcome).toBe("require_approval");
     expect(service.pendingCount).toBe(1);
+  });
+
+  // ── LOCKED (non-grantable) risk classes — 15 security audit UF-01 ──────────
+  //
+  // browser_action / mac_action are declared "require_approval, always" in the
+  // decision table, but the always-allow grant is applied one layer ABOVE
+  // classifyAndDecide — so before this fix a single human "always allow"
+  // permanently converted the highest-capability tools in the repo to
+  // auto_allow on every later untainted run.
+
+  it("alwaysAllow on a LOCKED class (mac_action) never creates a usable grant", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    registerToolMeta("mac_run_script", { sideEffects: "mac_action", reversible: false });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir, clock);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    const first = makeAction("mac_run_script", { language: "javascript", script: "x" });
+    const evalPromise = service.evaluateAndMaybeRequest(first, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+    const waitPromise = service.waitForDecision(first.id, clock, 5000);
+
+    // The human approves AND asks for a blanket always-allow.
+    service.approve(manualSink.requests[0]!.id, "test-user", auditLog, {
+      tool: "mac_run_script",
+      match: "any",
+    });
+    const [, delivered] = await Promise.all([evalPromise, waitPromise]);
+
+    // The action itself is approved, but the decision must NOT claim a
+    // standing grant was created…
+    expect(delivered?.status).toBe("approved");
+    expect(delivered?.alwaysAllow).toBeUndefined();
+
+    // …and a second, byte-identical, perfectly untainted action still stops.
+    const second = makeAction("mac_run_script", { language: "javascript", script: "x" });
+    const { decision } = await service.evaluateAndMaybeRequest(second, auditLog, clock);
+    expect(decision.outcome).toBe("require_approval");
+    expect(manualSink.requests.length).toBe(2); // a NEW human decision was demanded
+
+    // The refusal is in the hash-chained log, not silent.
+    const entries = auditLog.forRun("run-1");
+    expect(entries.some((e) => e.payload["grantRefused"] === true)).toBe(true);
+    expect(auditLog.verifyChain().ok).toBe(true);
+  });
+
+  it("a PRE-EXISTING grant does not auto-allow a LOCKED-class action", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "approval-test-"));
+    // Simulate a grant minted while the tool was still classified as an
+    // ordinary grantable class (registration order, a renamed tool, an older
+    // persisted grant) — matchGrant must refuse it once the tool is LOCKED.
+    registerToolMeta("browser_click", { sideEffects: "outward_comm", reversible: false });
+
+    const manualSink = new ManualApprovalSink();
+    const clock = new FixedClock(Date.now());
+    const auditLog = new AuditLog(tmpDir, clock);
+    const service = new ApprovalService(manualSink.sink, clock);
+
+    const first = makeAction("browser_click", { element: "Buy", ref: "e9" });
+    const evalPromise = service.evaluateAndMaybeRequest(first, auditLog, clock);
+    await new Promise((r) => setImmediate(r));
+    service.approve(manualSink.requests[0]!.id, "test-user", auditLog, {
+      tool: "browser_click",
+      match: "any",
+    });
+    await evalPromise;
+
+    // Sanity: while the class is grantable, the grant DOES apply.
+    const grantable = makeAction("browser_click", { element: "Buy", ref: "e9" });
+    const { decision: grantedDecision } = await service.evaluateAndMaybeRequest(
+      grantable,
+      auditLog,
+      clock,
+    );
+    expect(grantedDecision.outcome).toBe("auto_allow");
+
+    // Now the tool declares the LOCKED class it really belongs to.
+    registerToolMeta("browser_click", { sideEffects: "browser_action", reversible: false });
+
+    const after = makeAction("browser_click", { element: "Buy", ref: "e9" });
+    const { decision } = await service.evaluateAndMaybeRequest(after, auditLog, clock);
+    expect(decision.riskClass).toBe("browser_action");
+    expect(decision.outcome).toBe("require_approval");
+    expect(manualSink.requests.length).toBe(2);
+  });
+
+  it("every LOCKED class is also require_approval in the decision table", () => {
+    for (const riskClass of NON_GRANTABLE_RISK_CLASSES) {
+      expect(isGrantableRiskClass(riskClass)).toBe(false);
+      expect(DECISION_TABLE[riskClass].requiresApproval).toBe(true);
+    }
+    // Ordinary gated classes stay grantable — the lock is narrow on purpose.
+    expect(isGrantableRiskClass("outward_comm")).toBe(true);
+    expect(isGrantableRiskClass("calendar_write")).toBe(true);
   });
 
   it("hashArgs canonicalizes nested objects at every depth", () => {

@@ -9,7 +9,9 @@
  *      is called (earlyDecisions map).
  *   3. approve() / reject(): called externally (by tests or the UI bridge).
  *   4. Always-allow scoping: a decision can come with an AllowScope that pre-approves
- *      future matching actions.
+ *      future matching actions — EXCEPT for a LOCKED risk class (see
+ *      policy.NON_GRANTABLE_RISK_CLASSES). For those, no grant is ever created
+ *      and no grant is ever matched, so every action reaches a human.
  *
  * NOTE(future): In LangGraph.js, step 2 is replaced by interrupt() + Command(resume=...).
  */
@@ -24,7 +26,7 @@ import type {
   ApprovalSink,
   Clock,
 } from "../types.js";
-import { classifyAndDecide, getToolMeta } from "./policy.js";
+import { classifyAndDecide, getToolMeta, isGrantableRiskClass } from "./policy.js";
 import type { AuditLog } from "./audit.js";
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
@@ -133,7 +135,11 @@ export class ApprovalService {
     const tainted =
       action.provenance.derivedFromExternal ||
       (action.provenance.injectionFlags?.length ?? 0) > 0;
-    const grant = tainted ? undefined : this.matchGrant(action);
+    // …and NEVER for a LOCKED risk class (UF-01). browser_action/mac_action
+    // drive the user's real browser/machine: no single earlier decision may
+    // convert them to auto_allow, even on a perfectly clean, untainted run.
+    const locked = !isGrantableRiskClass(decision.riskClass);
+    const grant = tainted || locked ? undefined : this.matchGrant(action);
     if (grant) {
       auditLog.append({
         kind: "decided",
@@ -253,14 +259,37 @@ export class ApprovalService {
     // pending — a bogus/expired requestId must never mint a standing grant.
     const entry = this.pending.get(requestId);
     if (!entry || entry.request.status !== "pending") return;
-    if (alwaysAllow) {
-      this.grants.push(alwaysAllow);
+
+    // UF-01: a LOCKED risk class is never grantable. The approval itself still
+    // stands (this one action was approved by a human) — only the STANDING
+    // grant is refused, and the delivered decision must not claim otherwise.
+    const grantable = isGrantableRiskClass(entry.request.riskClass);
+    const grant = alwaysAllow !== undefined && grantable ? alwaysAllow : undefined;
+    if (grant) {
+      this.grants.push(grant);
+    } else if (alwaysAllow !== undefined) {
+      // Refusing silently would leave the user believing a grant exists.
+      // Record it in the hash-chained log.
+      auditLog.append({
+        kind: "decided",
+        actionId: entry.actionId,
+        runId: entry.request.runId,
+        payload: {
+          requestId,
+          outcome: "require_approval",
+          grantRefused: true,
+          riskClass: entry.request.riskClass,
+          reason:
+            "always-allow is not available for this risk class — every action reaches a human",
+        },
+      });
     }
+
     const decision: ApprovalDecision = {
       requestId,
       status: "approved",
       byUser,
-      alwaysAllow,
+      ...(grant !== undefined ? { alwaysAllow: grant } : {}),
     };
     this._deliverDecision(requestId, decision, auditLog);
   }
@@ -313,6 +342,15 @@ export class ApprovalService {
   }
 
   private matchGrant(action: ProposedAction): AllowScope | undefined {
+    // Defense in depth (UF-01): even if a grant was minted before this tool's
+    // metadata declared a LOCKED class (registration order, a renamed tool, a
+    // future caller that skips evaluateAndMaybeRequest), it can never MATCH.
+    // Unknown metadata falls back to outward_comm, exactly like
+    // classifyAndDecide — a grant for an unregistered tool stays possible only
+    // because it was explicitly reviewed and approved as such.
+    const riskClass = getToolMeta(action.tool)?.sideEffects ?? "outward_comm";
+    if (!isGrantableRiskClass(riskClass)) return undefined;
+
     const now = this.clock.isoNow();
     return this.grants.find((g) => {
       if (g.tool !== action.tool) return false;

@@ -86,11 +86,14 @@ export {
   classifyAndDecide,
   evalDynamicTriggers,
   DECISION_TABLE,
+  NON_GRANTABLE_RISK_CLASSES,
+  isGrantableRiskClass,
   registerToolMeta,
   getToolMeta,
   addKnownContact,
   isKnownContact,
 } from "./safety/policy.js";
+export type { ToolMeta } from "./safety/policy.js";
 export { ApprovalService } from "./safety/approval.js";
 export { AuditLog } from "./safety/audit.js";
 export {
