@@ -11,8 +11,8 @@
  * dialog hangs for well over two minutes with no human present, so our own
  * ~15s execFile timeout firing first is the most actionable signal we can
  * give); then automation-denied (-1743); then accessibility-denied
- * (-25211); then screen-recording-denied; then shortcut-not-found;
- * otherwise unknown.
+ * (-25211 / -1719 / "not allowed to send keystrokes"); then
+ * screen-recording-denied; then shortcut-not-found; otherwise unknown.
  */
 
 import type { MacCommandResult } from "./commandRunner.js";
@@ -37,7 +37,14 @@ export function classifyTccFailure(
   if (/-1743|Not authorized to send Apple events/i.test(stderr)) {
     return "automation-denied";
   }
-  if (/-25211|not allowed assistive access/i.test(stderr)) {
+  // Accessibility denial has THREE live-verified signatures on macOS 26.5:
+  // reading the UI tree fails with `-25211` / "not allowed assistive access"
+  // (and `-1719` on this machine), while SYNTHESIZED INPUT — se.keystroke /
+  // se.keyCode, i.e. mac_ui_type, mac_ui_press_key and computer_type — fails
+  // with the completely different "osascript is not allowed to send
+  // keystrokes." (15 WR-01: that string previously classified as `unknown`,
+  // so the whole typing surface lost its named remediation).
+  if (/-25211|-1719|not allowed assistive access|not allowed to send keystrokes/i.test(stderr)) {
     return "accessibility-denied";
   }
   if (/could not create image from display/i.test(stderr)) {

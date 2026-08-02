@@ -29,6 +29,35 @@ describe("classifyTccFailure", () => {
     ).toBe("accessibility-denied");
   });
 
+  it("maps the live synthesized-input denial to accessibility-denied (15 WR-01)", () => {
+    // Executed live on macOS 26.5 with Accessibility ungranted:
+    //   osascript -l JavaScript -e 'Application("System Events").keystroke("x")'
+    //   -> Error: osascript is not allowed to send keystrokes.
+    // This is the ONLY signature mac_ui_type / mac_ui_press_key /
+    // computer_type ever produce, and it matches neither -25211 nor
+    // "not allowed assistive access".
+    expect(classifyTccFailure("osascript is not allowed to send keystrokes.", false)).toBe(
+      "accessibility-denied",
+    );
+  });
+
+  it("maps the -1719 accessibility signature emitted by this machine to accessibility-denied (IN-01)", () => {
+    expect(
+      classifyTccFailure("osascript is not allowed assistive access. (-1719)", false),
+    ).toBe("accessibility-denied");
+    expect(classifyTccFailure("some failure (-1719)", false)).toBe("accessibility-denied");
+  });
+
+  it("a keystroke denial carries the Accessibility remediation end-to-end, not 'The command failed.'", () => {
+    const result = macFailure(
+      makeResult({ stderr: "osascript is not allowed to send keystrokes." }),
+      { command: "osascript -l JavaScript" },
+    );
+    expect(result.kind).toBe("accessibility-denied");
+    expect(result.error).toContain("Privacy & Security > Accessibility");
+    expect(result.error).toContain("mac-doctor");
+  });
+
   it("timedOut wins outright even when stderr contains an accessibility signature (timeout precedence)", () => {
     expect(
       classifyTccFailure("osascript is not allowed assistive access. (-25211)", true),
