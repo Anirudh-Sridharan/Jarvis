@@ -136,6 +136,15 @@ describe("runEmailIngest - MEM-06 force-consolidate -> retrieve -> content asser
     // so without this override the marker cannot possibly come back, and the
     // test would be measuring the fake, not the pipeline.
     const llm = new FakeLlm();
+    // reflectInsights()'s prompt also embeds a raw sample of the same pending
+    // record text (under "Recent experiences:"), so the marker override would
+    // otherwise ALSO match the reflection call and mint a duplicate
+    // marker-bearing EPISODE via indexInsightAsEpisode(). Suppress reflection
+    // explicitly — FakeLlm checks overrides in insertion order, so this must
+    // be registered FIRST to win for the reflect prompt; the extraction
+    // prompt never contains "Recent experiences:", so the marker override
+    // below still matches it (WR-03, mirroring the memory-side retrofits).
+    llm.addOverride("Recent experiences:", "[]");
     llm.addOverride(
       marker,
       JSON.stringify([
@@ -153,7 +162,13 @@ describe("runEmailIngest - MEM-06 force-consolidate -> retrieve -> content asser
     expect(result.run.errors.length).toBe(0);
     expect(result.run.counts.recordsProcessed).toBeGreaterThanOrEqual(1);
 
+    // kind === "fact" pins the marker to the extract→resolve→fact promotion
+    // path specifically — a reflection-minted episode (or a still-pending
+    // record) satisfying a bare text-includes check would prove only that the
+    // marker reached the graph via SOME path (WR-03).
     const hits2 = await memory.retrieval.retrieve(marker, { k: 5 });
-    expect(hits2.some((h) => h.text.includes(marker))).toBe(true);
+    const factHit = hits2.find((h) => h.text.includes(marker));
+    expect(factHit).toBeDefined();
+    expect(factHit?.kind).toBe("fact");
   });
 });
