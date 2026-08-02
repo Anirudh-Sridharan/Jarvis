@@ -227,6 +227,111 @@ describe("computer_screenshot — surface", () => {
   });
 });
 
+// ── fullDisplay is an OPERATOR decision, not a model decision (15 UF-02) ──────
+
+describe("computer_screenshot — fullDisplay opt-in", () => {
+  /** A full-display capture sequence: display bounds, screencapture, dims
+   * (1200x800 is under SCREENSHOT_MAX_DIM, so no resize call follows). */
+  const DISPLAY_CAPTURE_SEQUENCE: MacCommandResult[] = [
+    boundsJson({ x: 0, y: 0, width: 1200, height: 800 }),
+    OK_EMPTY,
+    sipsDims(1200, 800),
+  ];
+
+  function screenshotTool(
+    fake: FakeMacRunner,
+    gateway: FakeGateway,
+    allowFullDisplay?: boolean,
+  ): Tool {
+    const tools = makeComputerUseTools(fake.runner, gateway, {
+      fs: new FakeFs(),
+      ...(allowFullDisplay !== undefined ? { allowFullDisplay } : {}),
+    });
+    const tool = tools.find((t) => t.name === "computer_screenshot");
+    if (!tool) throw new Error("computer_screenshot not built");
+    return tool;
+  }
+
+  it("refuses fullDisplay by default — nothing is captured, nothing reaches the cloud", async () => {
+    await withApiKey("test-key", async () => {
+      const fake = new FakeMacRunner();
+      fake.responses = DISPLAY_CAPTURE_SEQUENCE;
+      const gateway = new FakeGateway();
+      const tool = screenshotTool(fake, gateway, false);
+
+      const result = (await tool.run({ fullDisplay: true })) as Record<string, unknown>;
+
+      expect(result["ok"]).toBe(false);
+      expect(String(result["error"])).toContain("JARVIS_MAC_FULL_DISPLAY");
+      // Refused BEFORE any native command and BEFORE any inference call.
+      expect(fake.calls.length).toBe(0);
+      expect(gateway.calls.length).toBe(0);
+    });
+  });
+
+  it("captures the full display once the operator has opted in", async () => {
+    await withApiKey("test-key", async () => {
+      const fake = new FakeMacRunner();
+      fake.responses = DISPLAY_CAPTURE_SEQUENCE;
+      const gateway = new FakeGateway();
+      const tool = screenshotTool(fake, gateway, true);
+
+      const result = (await tool.run({ fullDisplay: true })) as Record<string, unknown>;
+
+      expect(result["ok"]).toBe(true);
+      expect(result["source"]).toBe("display");
+      expect(gateway.calls.length).toBe(1);
+    });
+  });
+
+  it("reads the opt-in from JARVIS_MAC_FULL_DISPLAY when no explicit seam is given", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "test-key", JARVIS_MAC_FULL_DISPLAY: "1" }, async () => {
+      const fake = new FakeMacRunner();
+      fake.responses = DISPLAY_CAPTURE_SEQUENCE;
+      const gateway = new FakeGateway();
+      const result = (await screenshotTool(fake, gateway).run({ fullDisplay: true })) as Record<
+        string,
+        unknown
+      >;
+      expect(result["ok"]).toBe(true);
+      expect(result["source"]).toBe("display");
+    });
+
+    await withEnv(
+      { ANTHROPIC_API_KEY: "test-key", JARVIS_MAC_FULL_DISPLAY: undefined },
+      async () => {
+        const fake = new FakeMacRunner();
+        fake.responses = DISPLAY_CAPTURE_SEQUENCE;
+        const gateway = new FakeGateway();
+        const result = (await screenshotTool(fake, gateway).run({ fullDisplay: true })) as Record<
+          string,
+          unknown
+        >;
+        expect(result["ok"]).toBe(false);
+        expect(fake.calls.length).toBe(0);
+      },
+    );
+  });
+
+  it("the ordinary window-scoped capture keeps the free readOnly fast path", async () => {
+    await withEnv(
+      { ANTHROPIC_API_KEY: "test-key", JARVIS_MAC_FULL_DISPLAY: undefined },
+      async () => {
+        const fake = new FakeMacRunner();
+        fake.responses = RETINA_CAPTURE_SEQUENCE;
+        const gateway = new FakeGateway();
+        const tool = screenshotTool(fake, gateway);
+
+        const result = (await tool.run({ app: "Preview" })) as Record<string, unknown>;
+
+        expect(tool.readOnly).toBe(true);
+        expect(result["ok"]).toBe(true);
+        expect(result["source"]).toBe("window");
+      },
+    );
+  });
+});
+
 // ── Happy path ────────────────────────────────────────────────────────────────
 
 describe("computer_screenshot — happy path", () => {

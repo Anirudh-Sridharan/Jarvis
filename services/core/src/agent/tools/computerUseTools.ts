@@ -15,6 +15,13 @@
  *                                        focus; secure fields are refused
  *                                        exactly like mac_ui_type (D-03).
  *
+ * WHOLE-DISPLAY CAPTURE IS NOT A MODEL DECISION (15 UF-02): computer_screenshot
+ * is readOnly, so the approval gate never sees it — which made
+ * `fullDisplay: true` a model-controlled route to sending the entire screen to
+ * a cloud provider with no human in the loop. Window-scoped capture keeps the
+ * free readOnly fast path; whole-display capture requires the operator opt-in
+ * JARVIS_MAC_FULL_DISPLAY=1 and is otherwise refused as a structured error.
+ *
  * ACTIONS ARE BOUND TO THE PERCEPTION THEY CAME FROM (15 WR-12): every
  * computer_screenshot returns a `captureId` and both acting tools require it.
  * A click is refused unless its coordinate matches an element that capture
@@ -91,6 +98,25 @@ export const MAX_RETAINED_CAPTURES = 8;
  * the exact coordinates computer_screenshot returned. */
 export const CAPTURE_MATCH_TOLERANCE = 2;
 
+/**
+ * Operator opt-in for whole-display capture (15 security audit UF-02).
+ *
+ * `computer_screenshot` is `readOnly: true`, so reactLoop.ts's approval gate
+ * never sees it — and `fullDisplay` was a plain model-controlled boolean. A
+ * (possibly taint-influenced) planner could therefore set `fullDisplay: true`
+ * and ship the ENTIRE screen — every other app's window, whatever is open
+ * behind the target — to a cloud provider with no human decision anywhere in
+ * the path.
+ *
+ * The window-scoped case is the overwhelmingly common one and stays on the
+ * free readOnly fast path exactly as before. Whole-display capture now
+ * requires an explicit, out-of-band operator decision: set
+ * `JARVIS_MAC_FULL_DISPLAY=1`. Default is window-scoped only, and a refusal
+ * is a structured error naming the variable — never a crash, matching every
+ * other degrade path in this tier.
+ */
+export const FULL_DISPLAY_ENV = "JARVIS_MAC_FULL_DISPLAY";
+
 export interface ComputerElement {
   label: string;
   role: string;
@@ -136,7 +162,11 @@ const ScreenshotSchema = z.object({
   fullDisplay: z
     .boolean()
     .optional()
-    .describe("Capture the entire display instead of a single window (opt-in only)"),
+    .describe(
+      "Capture the entire display instead of a single window. Requires an operator opt-in " +
+        "(JARVIS_MAC_FULL_DISPLAY=1) and is refused otherwise — prefer naming the app you " +
+        "actually need to look at",
+    ),
   goal: z
     .string()
     .max(500)
@@ -231,6 +261,10 @@ export function makeComputerUseTools(
     now?: () => number;
     /** Capture-id generator seam. Defaults to a random id. */
     newCaptureId?: () => string;
+    /** UF-02: operator opt-in for whole-display capture. Defaults to reading
+     * JARVIS_MAC_FULL_DISPLAY at call time; tests pass it explicitly so they
+     * never touch process.env. */
+    allowFullDisplay?: boolean;
   },
 ): Tool[] {
   const screenshotRunner = new ScreenshotRunner({ run, ...(opts?.fs ? { fs: opts.fs } : {}) });
@@ -291,13 +325,33 @@ export function makeComputerUseTools(
         "Accessibility tree (Tier 2) — the last-resort fallback for arbitrary UI. Costs exactly " +
         "one vision inference call and executes NOTHING. Returns a description plus a capped list " +
         "of interactive elements with their real screen coordinates, ready for computer_click or " +
-        "computer_type. This is NOT Anthropic's native computer-use tool — there is no internal " +
-        "action loop here; use computer_click/computer_type as separate, approved steps.",
+        "computer_type. Captures ONE WINDOW: whole-display capture needs an operator opt-in and " +
+        "is refused by default, so name the app you need to look at. This is NOT Anthropic's " +
+        "native computer-use tool — there is no internal action loop here; use " +
+        "computer_click/computer_type as separate, approved steps.",
       schema: ScreenshotSchema,
       readOnly: true,
       returnsExternalContent: true,
       run: async (rawArgs: unknown) => {
         const args = ScreenshotSchema.parse(rawArgs);
+
+        // 15 UF-02: whole-display capture is not a model decision. This tool
+        // is readOnly, so nothing downstream will ask a human — the operator
+        // opt-in IS the human decision, and it is off by default.
+        if (args.fullDisplay === true) {
+          const allowed =
+            opts?.allowFullDisplay ?? process.env[FULL_DISPLAY_ENV] === "1";
+          if (!allowed) {
+            return {
+              ok: false,
+              error:
+                "full-display capture is disabled — computer_screenshot is a read-only tool, so a " +
+                "whole-screen grab (every other app's window included) would reach the cloud vision " +
+                `model with no human decision. Capture a single window instead (pass \`app\`), or set ` +
+                `${FULL_DISPLAY_ENV}=1 to opt in.`,
+            };
+          }
+        }
 
         // 15 WR-07: ask the router which provider actually serves this task
         // hint rather than hardcoding Anthropic. routing.cloudTaskProviders
