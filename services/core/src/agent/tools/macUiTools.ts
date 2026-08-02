@@ -108,10 +108,13 @@ export function makeMacUiTools(run: MacCommandRunner): Tool[] {
       name: "mac_ui_type",
       description:
         "Type text into a UI element in an app that has no scripting dictionary (requires " +
-        "approval). Use the ref from the latest mac_ui_snapshot. Jarvis never types credentials " +
-        "— typing into a secure/password field (role or AXSecureTextField subrole), or a field " +
-        "whose role cannot be determined, or a text field whose subrole cannot be read at all, " +
-        "is refused before any keystroke is synthesized.",
+        "approval). Use the ref from the latest mac_ui_snapshot. The element's ROLE at that " +
+        "index path is re-checked live and a stale ref is refused before anything is typed — " +
+        "but the path is positional, so a different element of the SAME role that has moved " +
+        "into that position would still be typed into. Jarvis never types credentials — typing " +
+        "into a secure/password field (role or AXSecureTextField subrole), or a field whose " +
+        "role cannot be determined, or a text field whose subrole cannot be read at all, is " +
+        "refused before any keystroke is synthesized.",
       schema: TypeSchema,
       readOnly: false,
       returnsExternalContent: true,

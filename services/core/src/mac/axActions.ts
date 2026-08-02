@@ -32,6 +32,14 @@
  * therefore RE-READ role+subrole immediately before synthesizing anything and
  * abort with a `refused` sentinel if the observation no longer matches the
  * one the refusal decision was made against.
+ *
+ * T-15-22 (stale refs) — BOTH `click` and `type` compare the role the ref
+ * captured at snapshot time against the live role at that index path and
+ * refuse identically (`staleRefRefusal`). `type` used to skip this check
+ * entirely, so a `mac_ui_type` ref taken before a UI change was not refused
+ * as stale; only the WR-03 self-consistency re-check and the secure-field
+ * guard applied. Note the scope both share (15 WR-11): the index path is
+ * positional, so this is a role re-check, NOT an element-identity guarantee.
  */
 
 import { ScriptRunner } from "./scriptRunner.js";
@@ -178,19 +186,31 @@ function run(argv) {
 }
 `;
 
-/** argv: [app, indexPath]. Inspect-only: focuses the element, reads its role
- * AND subrole, AND separately the process's AXFocusedUIElement role/subrole.
- * Types NOTHING. */
+/** argv: [app, indexPath, expectedRole]. Inspect-only: re-checks the ref's
+ * snapshot-time role against the live role, then focuses the element, reads
+ * its role AND subrole, AND separately the process's AXFocusedUIElement
+ * role/subrole. Types NOTHING.
+ *
+ * T-15-22: the staleness re-check happens BEFORE the AXFocus — a ref that no
+ * longer addresses the element it was taken for must not even move focus. An
+ * UNREADABLE live role ("") is deliberately NOT treated as stale: it falls
+ * through to the caller's D-08 fail-closed secure refusal, which is the more
+ * specific (and more important) message for an undeterminable target. */
 const AX_TYPE_INSPECT_SCRIPT = `
 ${AX_ROLE_HELPER_SCRIPT}
 function run(argv) {
   const appName = argv[0];
   const indexPath = argv[1].split(".").map(Number);
+  const expectedRole = argv[2];
   const se = Application("System Events");
   const proc = se.processes.byName(appName);
   let el = proc.windows[0];
   for (let i = 0; i < indexPath.length; i++) {
     el = el.uiElements()[indexPath[i]];
+  }
+  const preRole = readRole(el);
+  if (preRole && preRole !== expectedRole) {
+    return JSON.stringify({ stale: true, actualRole: preRole });
   }
   try {
     el.actions.byName("AXFocus").perform();
@@ -333,6 +353,22 @@ function run(argv) {
 `;
 
 /**
+ * The shared stale-ref refusal (T-15-22). Both `click` and `type` re-check the
+ * role the ref captured at snapshot time against the live role at that index
+ * path and refuse identically, so a ref taken before a UI change is never
+ * acted on by EITHER verb.
+ */
+function staleRefRefusal(actualRole: string | undefined): AxActionResult {
+  const seen = actualRole ? ` (element is now ${actualRole})` : "";
+  return {
+    ok: false,
+    error: `stale ref${seen} — re-run mac_ui_snapshot`,
+    kind: "unknown",
+    refused: "stale-ref",
+  };
+}
+
+/**
  * Interpret a keystroke script's stdout. The script re-verifies its target
  * immediately before typing (15 WR-03), so its payload is authoritative:
  * a `refused` sentinel becomes a structured refusal, and anything that is
@@ -396,11 +432,7 @@ export class AxActionRunner {
     }
 
     if (parsedOut.stale) {
-      return {
-        ok: false,
-        error: `stale ref (element is now ${parsedOut.actualRole}) — re-run mac_ui_snapshot`,
-        kind: "unknown",
-      };
+      return staleRefRefusal(parsedOut.actualRole);
     }
 
     return { ok: true, clicked: ref };
@@ -441,12 +473,17 @@ export class AxActionRunner {
 
   /**
    * Type `text` into the element at `ref`. Two-call structure: an
-   * inspect-only first call reads the element's role AND SUBROLE plus the
-   * process's AXFocusedUIElement role AND SUBROLE; if either pair looks
-   * secure (or undeterminable), a refusal is returned with NO second call and
-   * the secret text never reaches a spawn. Only when both pairs are
-   * non-secure does a second call keystroke the text (and, if `submit`, a
-   * Return).
+   * inspect-only first call re-checks the ref's captured ROLE against the
+   * live role at that index path (T-15-22) and reads the element's role AND
+   * SUBROLE plus the process's AXFocusedUIElement role AND SUBROLE; if the
+   * ref is stale, or if either pair looks secure (or undeterminable), a
+   * refusal is returned with NO second call and the secret text never reaches
+   * a spawn. Only a fresh, non-secure target earns a second call that
+   * keystrokes the text (and, if `submit`, a Return).
+   *
+   * Scope (15 WR-11), identical to `click`: this is a role re-check, not an
+   * element-identity guarantee — the index path is positional, so a DIFFERENT
+   * element of the SAME role that moved into that position passes.
    */
   async type(ref: string, text: string, submit?: boolean): Promise<AxActionResult> {
     const parsed = parseAxRef(ref);
@@ -454,10 +491,16 @@ export class AxActionRunner {
       return { ok: false, error: "malformed ref — re-run mac_ui_snapshot", kind: "unknown" };
     }
 
-    const inspect = await this.script.runJxa(AX_TYPE_INSPECT_SCRIPT, [parsed.app, parsed.indexPath.join(".")]);
+    const inspect = await this.script.runJxa(AX_TYPE_INSPECT_SCRIPT, [
+      parsed.app,
+      parsed.indexPath.join("."),
+      parsed.role,
+    ]);
     if (!inspect.ok) return inspect;
 
     let roles: {
+      stale?: boolean;
+      actualRole?: string;
       elementRole?: string;
       elementSubrole?: string;
       focusedRole?: string;
@@ -467,6 +510,15 @@ export class AxActionRunner {
       roles = JSON.parse(inspect.stdout) as typeof roles;
     } catch {
       return { ok: false, error: "failed to parse type inspection result", kind: "unknown" };
+    }
+
+    // T-15-22: refuse a stale ref exactly like `click` does — before the
+    // keystroke call exists, so the text never reaches a spawn. The script
+    // reports it; the TS-side comparison is a backstop for any runner that
+    // does not (an older script body, a partial payload).
+    if (roles.stale) return staleRefRefusal(roles.actualRole);
+    if (roles.elementRole && roles.elementRole !== parsed.role) {
+      return staleRefRefusal(roles.elementRole);
     }
 
     if (

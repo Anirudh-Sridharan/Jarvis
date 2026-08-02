@@ -158,6 +158,34 @@ describe("mac_ui_click — stale ref", () => {
   });
 });
 
+describe("mac_ui_type — stale ref (T-15-22)", () => {
+  it("refuses typing through a stale ref, and nothing is typed", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
+    const tool = toolByName(fake.runner, "mac_ui_type");
+    const ref = formatAxRef("TextEdit", [0, 1], "AXTextField");
+
+    const result = (await tool.run({
+      element: "search field",
+      ref,
+      text: "stale-target-text",
+      submit: false,
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toContain("re-run mac_ui_snapshot");
+    expect(fake.calls.length).toBe(1);
+    expect(JSON.stringify(fake.calls)).not.toContain("stale-target-text");
+  });
+
+  it("mac_ui_type's description states the stale-ref refusal and its positional scope", () => {
+    const fake = new FakeMacRunner();
+    const tool = toolByName(fake.runner, "mac_ui_type");
+    expect(tool.description).toMatch(/stale ref is refused/i);
+    expect(tool.description).toMatch(/positional/i);
+  });
+});
+
 // ── Degrade, never crash ────────────────────────────────────────────────────────
 
 describe("degrade, never crash", () => {

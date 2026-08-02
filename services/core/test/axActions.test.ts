@@ -84,6 +84,90 @@ describe("isSecureTarget", () => {
   });
 });
 
+// ── type — stale ref (T-15-22) ────────────────────────────────────────────────
+
+describe("AxActionRunner.type — stale ref", () => {
+  it("refuses a stale ref the script reports, exactly 1 call, no text typed", async () => {
+    const fake = new FakeMacRunner();
+    // The element at that index path is no longer the AXTextField the ref was
+    // taken for. Before T-15-22, type() ignored parsed.role entirely and this
+    // went on to keystroke into whatever now occupies the position.
+    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.type(REF, "not-for-this-element");
+
+    expect(result.ok).toBe(false);
+    expect(fake.calls.length).toBe(1); // no keystroke call was ever made
+    expect(JSON.stringify(fake.calls)).not.toContain("not-for-this-element");
+    if (!result.ok) {
+      expect(result.refused).toBe("stale-ref");
+      expect(result.error).toContain("AXStaticText");
+      expect(result.error).toContain("re-run mac_ui_snapshot");
+    }
+  });
+
+  it("refuses on a TS-side role mismatch even when the script omits the stale sentinel", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(
+      JSON.stringify({
+        elementRole: "AXButton", // ref captured AXTextField
+        elementSubrole: SUBROLE_NONE,
+        focusedRole: "AXButton",
+        focusedSubrole: SUBROLE_NONE,
+      }),
+    );
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.type(REF, "backstop-secret");
+
+    expect(result.ok).toBe(false);
+    expect(fake.calls.length).toBe(1);
+    expect(JSON.stringify(fake.calls)).not.toContain("backstop-secret");
+    if (!result.ok) expect(result.refused).toBe("stale-ref");
+  });
+
+  it("passes the ref's captured role to the inspect script, which checks it BEFORE focusing", async () => {
+    const fake = new FakeMacRunner();
+    fake.results = [
+      ok(
+        JSON.stringify({
+          elementRole: "AXTextField",
+          elementSubrole: SUBROLE_NONE,
+          focusedRole: "AXTextField",
+          focusedSubrole: SUBROLE_NONE,
+        }),
+      ),
+      ok(JSON.stringify({ success: true })),
+    ];
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    await runner.type(REF, "hello");
+
+    const inspectCall = fake.calls[0]!;
+    expect(inspectCall.args.slice(-1)).toEqual(["AXTextField"]);
+    const body = scriptBodyOf(inspectCall);
+    // The staleness check must precede the AXFocus in the script body — a
+    // stale ref must not even move focus.
+    expect(body).toContain("stale");
+    expect(body.indexOf("stale: true")).toBeLessThan(body.indexOf("AXFocus"));
+  });
+
+  it("an UNREADABLE live role stays the D-08 secure refusal, not a stale-ref refusal", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ elementRole: "", focusedRole: "" }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.type(REF, "undeterminable-secret");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.refused).toBe("secure-field");
+      expect(result.error).toMatch(/secure field/i);
+    }
+  });
+});
+
 // ── type — secure field refusal ─────────────────────────────────────────────────
 
 describe("AxActionRunner.type — secure field refusal", () => {
