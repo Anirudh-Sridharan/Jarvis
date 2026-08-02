@@ -21,9 +21,17 @@
  *                                          contents are not inspectable before
  *                                          execution (Pitfall 4 / T-15-11)
  *
- * No Tier 1 tool sets returnsExternalContent — Tier 1 returns process names,
- * shortcut names, and script stdout the model itself authored; arbitrary app
- * content (e.g. a UI snapshot of a web page) arrives in a future Tier 2/3.
+ * TAINT (15 WR-04): `mac_run_script` and `mac_frontmost_app` DO set
+ * returnsExternalContent. The model authors the script, but it does not
+ * author the STDOUT — a scripting dictionary is a first-class route to
+ * arbitrary app/document/web content
+ * (`Application("Safari").windows[0].currentTab.text()`,
+ * `Application("Mail").selection[0].content()`), and a window title is
+ * likewise app-controlled text (a web page title, a document name). Both
+ * therefore taint the run exactly like the Tier 2/3 tools, so later gated
+ * actions pick up `taint_escalation` and always-allow grants stop applying.
+ * `mac_list_apps` and `mac_list_shortcuts` return only names the OS and the
+ * user chose, and stay untainted.
  *
  * Scope note: a persisted "recipe/skill file format" for reusable
  * AppleScript snippets (CONTEXT.md Claude's Discretion) is deliberately NOT
@@ -172,6 +180,9 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
         "with window:null and a windowUnavailable remediation instead of failing outright.",
       schema: EmptySchema,
       readOnly: true,
+      // The window title is app-controlled text (a web page title, a document
+      // name) — untrusted content, not something the model authored (WR-04).
+      returnsExternalContent: true,
       run: async (rawArgs: unknown) => {
         EmptySchema.parse(rawArgs ?? {});
         const result = await scriptRunner.runJxa(FRONTMOST_APP_SCRIPT, []);
@@ -233,6 +244,10 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
         "requires approval.",
       schema: RunScriptSchema,
       readOnly: false,
+      // stdout can carry arbitrary app/document/web content read through the
+      // target app's scripting dictionary — the model authored the script,
+      // not the output (WR-04).
+      returnsExternalContent: true,
       run: async (rawArgs: unknown) => {
         const { language, script, args, timeoutMs } = RunScriptSchema.parse(rawArgs);
         const opts = timeoutMs !== undefined ? { timeoutMs } : undefined;

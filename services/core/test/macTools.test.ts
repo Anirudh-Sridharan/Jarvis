@@ -98,11 +98,18 @@ describe("mac tool surface", () => {
     }
   });
 
-  it("no Tier 1 tool sets returnsExternalContent", () => {
+  it("the Tier 1 tools that can return app-controlled content are tainted (15 WR-04)", () => {
     const fake = new FakeMacRunner();
-    for (const tool of makeMacTools(fake.runner)) {
-      expect(tool.returnsExternalContent).toBeFalsy();
-    }
+    const flags = Object.fromEntries(
+      makeMacTools(fake.runner).map((t) => [t.name, t.returnsExternalContent === true]),
+    );
+    // Script stdout is arbitrary app/document/web content read through a
+    // scripting dictionary; a window title is app-controlled text.
+    expect(flags["mac_run_script"]).toBe(true);
+    expect(flags["mac_frontmost_app"]).toBe(true);
+    // Names the OS and the user chose — no app-controlled payload.
+    expect(flags["mac_list_apps"]).toBe(false);
+    expect(flags["mac_list_shortcuts"]).toBe(false);
   });
 
   it("mac_run_script's description states the residual shell capability honestly (15 CR-03)", () => {
