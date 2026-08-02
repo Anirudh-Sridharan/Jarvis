@@ -262,8 +262,9 @@ export function makeComputerUseTools(run: MacCommandRunner, gateway: Pick<Infere
       description:
         "Type text into whatever currently has focus after a computer_click (requires approval). " +
         "Click the target field first. Jarvis never types credentials — typing into a secure/" +
-        "password field, or a field whose role cannot be determined, is refused before any " +
-        "keystroke is synthesized.",
+        "password field (the AXSecureTextField subrole macOS puts on password fields), or a " +
+        "field whose role cannot be determined, or a text field whose subrole cannot be read at " +
+        "all, is refused before any keystroke is synthesized.",
       schema: TypeSchema,
       readOnly: false,
       returnsExternalContent: true,

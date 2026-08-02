@@ -6,8 +6,9 @@
  *   mac_ui_snapshot     readOnly:true   free read — the text-only model's "eyes"
  *   mac_ui_click        readOnly:false  → GATED (mac_action)
  *   mac_ui_type         readOnly:false  → GATED (mac_action) — secure fields
- *                                        refused before any keystroke is
- *                                        synthesized (D-03)
+ *                                        (AXSecureTextField SUBROLE, 15
+ *                                        CR-01) refused before any keystroke
+ *                                        is synthesized (D-03)
  *   mac_ui_press_key    readOnly:false  → GATED (mac_action)
  *
  * All four tools tag their output as external, untrusted content (mandatory,
@@ -75,8 +76,10 @@ export function makeMacUiTools(run: MacCommandRunner): Tool[] {
       description:
         "Read the UI tree of an app that has no scripting dictionary — the desktop equivalent " +
         "of browser_snapshot. Returns a capped, indented tree of element refs required by " +
-        "mac_ui_click and mac_ui_type. Refs go stale when the UI changes; re-run this after any " +
-        "action that may have changed the screen. Read-only, no approval required.",
+        "mac_ui_click and mac_ui_type, each line showing the element's role and (when present) " +
+        "its subrole — an AXSecureTextField subrole marks a password field, which mac_ui_type " +
+        "always refuses. Refs go stale when the UI changes; re-run this after any action that " +
+        "may have changed the screen. Read-only, no approval required.",
       schema: SnapshotSchema,
       readOnly: true,
       returnsExternalContent: true,
@@ -104,8 +107,9 @@ export function makeMacUiTools(run: MacCommandRunner): Tool[] {
       description:
         "Type text into a UI element in an app that has no scripting dictionary (requires " +
         "approval). Use the ref from the latest mac_ui_snapshot. Jarvis never types credentials " +
-        "— typing into a secure/password field, or a field whose role cannot be determined, is " +
-        "refused before any keystroke is synthesized.",
+        "— typing into a secure/password field (role or AXSecureTextField subrole), or a field " +
+        "whose role cannot be determined, or a text field whose subrole cannot be read at all, " +
+        "is refused before any keystroke is synthesized.",
       schema: TypeSchema,
       readOnly: false,
       returnsExternalContent: true,

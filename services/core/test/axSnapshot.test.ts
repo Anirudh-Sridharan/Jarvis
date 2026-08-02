@@ -10,7 +10,13 @@
 import { describe, it, expect } from "vitest";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
 import { ScriptRunner } from "../src/mac/scriptRunner.js";
-import { AxSnapshotRunner, formatAxRef, parseAxRef } from "../src/mac/axSnapshot.js";
+import {
+  AxSnapshotRunner,
+  formatAxRef,
+  parseAxRef,
+  AX_ROLE_HELPER_SCRIPT,
+  SUBROLE_NONE,
+} from "../src/mac/axSnapshot.js";
 
 // ── Fake ──────────────────────────────────────────────────────────────────────
 
@@ -27,6 +33,9 @@ class FakeMacRunner {
 interface FixtureElement {
   indexPath: number[];
   role: string;
+  /** Matches the real script output: a subrole string, SUBROLE_NONE when the
+   * element definitively has none, or "" when it could not be read. */
+  subrole?: string;
   title: string;
   x?: number;
   y?: number;
@@ -45,6 +54,7 @@ function fixture(
     elements: elements.map((e) => ({
       indexPath: e.indexPath,
       role: e.role,
+      subrole: e.subrole ?? SUBROLE_NONE,
       title: e.title,
       x: e.x ?? 0,
       y: e.y ?? 0,
@@ -143,6 +153,67 @@ describe("AxSnapshotRunner.snapshot — tree rendering", () => {
     expect(result.elements[0]!.title).toBe("");
     expect(result.tree.split("\n")).toHaveLength(1);
     expect(result.tree).toContain('""');
+  });
+});
+
+// ── Subrole capture (15 CR-01) ────────────────────────────────────────────────
+
+describe("AxSnapshotRunner.snapshot — subrole capture", () => {
+  it("the snapshot script asks for AXSubrole so the D-03 guard has the attribute macOS actually uses", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = {
+      stdout: fixture([{ indexPath: [0], role: "AXTextField", title: "Password" }]),
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    };
+    const runner = new AxSnapshotRunner(new ScriptRunner(fake.runner));
+
+    await runner.snapshot({});
+
+    const call = fake.calls[0]!;
+    const scriptBody = call.args[call.args.indexOf("-e") + 1]!;
+    expect(scriptBody).toContain("readSubrole");
+    expect(scriptBody).toContain("AXSubrole");
+    expect(AX_ROLE_HELPER_SCRIPT).toContain(SUBROLE_NONE);
+  });
+
+  it("surfaces a secure field's subrole on the element and in the rendered tree", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = {
+      stdout: fixture([
+        { indexPath: [0], role: "AXTextField", subrole: "AXSecureTextField", title: "Password" },
+      ]),
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    };
+    const runner = new AxSnapshotRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.snapshot({});
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.elements[0]!.subrole).toBe("AXSecureTextField");
+    expect(result.tree).toContain("(AXSecureTextField)");
+  });
+
+  it("renders no subrole marker for an element that definitively has none", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = {
+      stdout: fixture([{ indexPath: [0], role: "AXButton", subrole: SUBROLE_NONE, title: "Close" }]),
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    };
+    const runner = new AxSnapshotRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.snapshot({});
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.elements[0]!.subrole).toBe("");
+    expect(result.tree).not.toContain(SUBROLE_NONE);
   });
 });
 

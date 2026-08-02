@@ -108,9 +108,18 @@ describe("mac ui tool surface", () => {
 describe("mac_ui_type — secure field refusal", () => {
   it("refuses typing into a secure field target, no secret text in any recorded argv", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ elementRole: "AXSecureTextField", focusedRole: "AXTextField" }));
+    // The shape macOS ACTUALLY emits for a password field (15 CR-01): the role
+    // is AXTextField and the SUBROLE carries the secure marker.
+    fake.result = ok(
+      JSON.stringify({
+        elementRole: "AXTextField",
+        elementSubrole: "AXSecureTextField",
+        focusedRole: "AXTextField",
+        focusedSubrole: "AXSecureTextField",
+      }),
+    );
     const tool = toolByName(fake.runner, "mac_ui_type");
-    const ref = formatAxRef("TextEdit", [0, 1], "AXSecureTextField");
+    const ref = formatAxRef("TextEdit", [0, 1], "AXTextField");
 
     const result = (await tool.run({ element: "password field", ref, text: "hunter2", submit: false })) as Record<
       string,

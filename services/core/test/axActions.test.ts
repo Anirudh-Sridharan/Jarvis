@@ -10,8 +10,13 @@
 import { describe, it, expect } from "vitest";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
 import { ScriptRunner } from "../src/mac/scriptRunner.js";
-import { AxActionRunner, isSecureRole, SECURE_FIELD_ROLES } from "../src/mac/axActions.js";
-import { formatAxRef } from "../src/mac/axSnapshot.js";
+import {
+  AxActionRunner,
+  isSecureTarget,
+  SECURE_FIELD_SUBROLES,
+  SECURE_FIELD_ROLES,
+} from "../src/mac/axActions.js";
+import { formatAxRef, SUBROLE_NONE } from "../src/mac/axSnapshot.js";
 
 // ── Fake ──────────────────────────────────────────────────────────────────────
 
@@ -33,37 +38,60 @@ function ok(stdout: string): MacCommandResult {
 
 const REF = formatAxRef("TextEdit", [0, 1], "AXTextField");
 
-// ── isSecureRole ──────────────────────────────────────────────────────────────
+// ── isSecureTarget (CR-01) ────────────────────────────────────────────────────
 
-describe("isSecureRole", () => {
-  it("true for both secure roles, any casing", () => {
-    expect(isSecureRole("AXSecureTextField")).toBe(true);
-    expect(isSecureRole("axsecuretextfield")).toBe(true);
-    expect(isSecureRole("AXSECURETEXTAREA")).toBe(true);
+describe("isSecureTarget", () => {
+  it("true for the shape macOS ACTUALLY emits for a password field: role AXTextField + subrole AXSecureTextField", () => {
+    expect(isSecureTarget("AXTextField", "AXSecureTextField")).toBe(true);
+    expect(isSecureTarget("axtextfield", "axsecuretextfield")).toBe(true);
   });
 
-  it("true for null/undefined/empty — fails closed (D-08)", () => {
-    expect(isSecureRole(null)).toBe(true);
-    expect(isSecureRole(undefined)).toBe(true);
-    expect(isSecureRole("")).toBe(true);
+  it("true when the secure marker arrives as a ROLE (defensive — macOS does not do this)", () => {
+    expect(isSecureTarget("AXSecureTextField", SUBROLE_NONE)).toBe(true);
   });
 
-  it("false for non-secure roles", () => {
-    expect(isSecureRole("AXTextField")).toBe(false);
-    expect(isSecureRole("AXButton")).toBe(false);
+  it("true for a null/undefined/empty role — fails closed (D-08)", () => {
+    expect(isSecureTarget(null, SUBROLE_NONE)).toBe(true);
+    expect(isSecureTarget(undefined, SUBROLE_NONE)).toBe(true);
+    expect(isSecureTarget("", SUBROLE_NONE)).toBe(true);
   });
 
-  it("SECURE_FIELD_ROLES lists both secure field roles", () => {
-    expect(SECURE_FIELD_ROLES).toEqual(["AXSecureTextField", "AXSecureTextArea"]);
+  it("true for a text-entry role whose subrole could NOT be read — fails closed (D-08)", () => {
+    expect(isSecureTarget("AXTextField", "")).toBe(true);
+    expect(isSecureTarget("AXTextArea", undefined)).toBe(true);
+    expect(isSecureTarget("AXComboBox", null)).toBe(true);
+  });
+
+  it("false for a text-entry role whose subrole is definitively ABSENT — an ordinary text field stays typable", () => {
+    expect(isSecureTarget("AXTextField", SUBROLE_NONE)).toBe(false);
+    expect(isSecureTarget("AXTextArea", SUBROLE_NONE)).toBe(false);
+  });
+
+  it("false for non-text, non-secure roles", () => {
+    expect(isSecureTarget("AXButton", SUBROLE_NONE)).toBe(false);
+    expect(isSecureTarget("AXButton", "")).toBe(false);
+  });
+
+  it("SECURE_FIELD_SUBROLES holds the real macOS constant; the fictitious AXSecureTextArea is gone", () => {
+    expect(SECURE_FIELD_SUBROLES).toEqual(["AXSecureTextField"]);
+    expect(SECURE_FIELD_ROLES).toEqual(["AXSecureTextField"]);
+    expect(JSON.stringify([SECURE_FIELD_SUBROLES, SECURE_FIELD_ROLES])).not.toContain("AXSecureTextArea");
   });
 });
 
 // ── type — secure field refusal ─────────────────────────────────────────────────
 
 describe("AxActionRunner.type — secure field refusal", () => {
-  it("refuses when the element role is AXSecureTextField, exactly 1 call, no secret text", async () => {
+  it("refuses the REAL macOS password-field shape (role AXTextField + subrole AXSecureTextField), exactly 1 call, no secret text", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ elementRole: "AXSecureTextField", focusedRole: "AXTextField" }));
+    fake.result = ok(
+      JSON.stringify({
+        elementRole: "AXTextField",
+        elementSubrole: "AXSecureTextField",
+        focusedRole: "AXTextField",
+        focusedSubrole: "AXSecureTextField",
+      }),
+    );
     const runner = new AxActionRunner(new ScriptRunner(fake.runner));
 
     const result = await runner.type(REF, "super-secret-password");
@@ -74,9 +102,16 @@ describe("AxActionRunner.type — secure field refusal", () => {
     if (!result.ok) expect(result.error).toMatch(/secure field/i);
   });
 
-  it("refuses when only the FOCUSED element's role is secure (element role itself non-secure)", async () => {
+  it("refuses when only the FOCUSED element is secure (the addressed element itself is not)", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ elementRole: "AXTextField", focusedRole: "AXSecureTextField" }));
+    fake.result = ok(
+      JSON.stringify({
+        elementRole: "AXTextField",
+        elementSubrole: SUBROLE_NONE,
+        focusedRole: "AXTextField",
+        focusedSubrole: "AXSecureTextField",
+      }),
+    );
     const runner = new AxActionRunner(new ScriptRunner(fake.runner));
 
     const result = await runner.type(REF, "another-secret");
@@ -98,10 +133,36 @@ describe("AxActionRunner.type — secure field refusal", () => {
     expect(JSON.stringify(fake.calls)).not.toContain("secret-value");
   });
 
+  it("refuses a text field whose SUBROLE could not be read at all (fails closed)", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(
+      JSON.stringify({
+        elementRole: "AXTextField",
+        elementSubrole: "",
+        focusedRole: "AXTextField",
+        focusedSubrole: "",
+      }),
+    );
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.type(REF, "unreadable-subrole-secret");
+
+    expect(result.ok).toBe(false);
+    expect(fake.calls.length).toBe(1);
+    expect(JSON.stringify(fake.calls)).not.toContain("unreadable-subrole-secret");
+  });
+
   it("a non-secure element issues exactly 2 calls, text present only in the second", async () => {
     const fake = new FakeMacRunner();
     fake.results = [
-      ok(JSON.stringify({ elementRole: "AXTextField", focusedRole: "AXTextField" })),
+      ok(
+        JSON.stringify({
+          elementRole: "AXTextField",
+          elementSubrole: SUBROLE_NONE,
+          focusedRole: "AXTextField",
+          focusedSubrole: SUBROLE_NONE,
+        }),
+      ),
       ok(JSON.stringify({ success: true })),
     ];
     const runner = new AxActionRunner(new ScriptRunner(fake.runner));
@@ -118,9 +179,9 @@ describe("AxActionRunner.type — secure field refusal", () => {
 // ── typeAtFocus — secure field refusal ──────────────────────────────────────────
 
 describe("AxActionRunner.typeAtFocus — secure field refusal", () => {
-  it("refuses when the focused role is secure, exactly 1 call, no secret text", async () => {
+  it("refuses the real secure-field shape at focus, exactly 1 call, no secret text", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ focusedRole: "AXSecureTextArea" }));
+    fake.result = ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: "AXSecureTextField" }));
     const runner = new AxActionRunner(new ScriptRunner(fake.runner));
 
     const result = await runner.typeAtFocus("focus-secret");
@@ -142,9 +203,24 @@ describe("AxActionRunner.typeAtFocus — secure field refusal", () => {
     expect(JSON.stringify(fake.calls)).not.toContain("another-focus-secret");
   });
 
+  it("refuses when the focused text field's subrole could not be read (fails closed)", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: "" }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.typeAtFocus("third-focus-secret");
+
+    expect(result.ok).toBe(false);
+    expect(fake.calls.length).toBe(1);
+    expect(JSON.stringify(fake.calls)).not.toContain("third-focus-secret");
+  });
+
   it("a non-secure focused element issues exactly 2 calls", async () => {
     const fake = new FakeMacRunner();
-    fake.results = [ok(JSON.stringify({ focusedRole: "AXTextField" })), ok(JSON.stringify({ success: true }))];
+    fake.results = [
+      ok(JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE })),
+      ok(JSON.stringify({ success: true })),
+    ];
     const runner = new AxActionRunner(new ScriptRunner(fake.runner));
 
     const result = await runner.typeAtFocus("hi there");

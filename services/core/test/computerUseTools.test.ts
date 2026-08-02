@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
 import { makeComputerUseTools, COMPUTER_MAX_ELEMENTS } from "../src/agent/tools/computerUseTools.js";
 import { imageToScreenPoint } from "../src/mac/screenshotRunner.js";
+import { SUBROLE_NONE } from "../src/mac/axSnapshot.js";
 import type { ChatMessage, JarvisInferenceRequest, InferenceStreamChunk } from "../src/inference/types.js";
 import type { InferenceGateway } from "../src/inference/gateway.js";
 import { getToolMeta, createAgentSystem } from "@jarvis/agent";
@@ -343,7 +344,12 @@ describe("computer_click / computer_type — gated, zero inference", () => {
   it("gated: computer_type issues 0 gateway calls", async () => {
     const fake = new FakeMacRunner();
     fake.responses = [
-      { stdout: JSON.stringify({ focusedRole: "AXTextField" }), stderr: "", exitCode: 0, timedOut: false },
+      {
+        stdout: JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE }),
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+      },
       { stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false },
     ];
     const gateway = new FakeGateway();
@@ -374,7 +380,13 @@ describe("computer_click / computer_type — gated, zero inference", () => {
   it("computer_type refuses a focused secure field — the secret text never reaches recorded argv", async () => {
     const fake = new FakeMacRunner();
     fake.responses = [
-      { stdout: JSON.stringify({ focusedRole: "AXSecureTextField" }), stderr: "", exitCode: 0, timedOut: false },
+      {
+        // Real macOS password-field shape: role AXTextField + secure SUBROLE.
+        stdout: JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: "AXSecureTextField" }),
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+      },
     ];
     const gateway = new FakeGateway();
     const tool = toolByName(fake.runner, gateway, "computer_type");

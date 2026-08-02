@@ -4,37 +4,76 @@
  *
  * D-03 (logins are never automated by the model typing credentials): a
  * typing action is refused BEFORE any keystroke is synthesized whenever the
- * target element's role — or the process's separately-read
- * AXFocusedUIElement role — is secure or undeterminable. The refusal
- * decision is made in TypeScript on roles read by a first, inspect-only
- * script call; only a non-secure, determinable pair of roles earns a SECOND
- * script call that actually types. This two-call structure means the secret
- * text never reaches a spawn on the refusal path (test-asserted in
- * axActions.test.ts).
+ * target element — or the process's separately-read AXFocusedUIElement —
+ * looks secure or undeterminable. The refusal decision is made in TypeScript
+ * on the role AND SUBROLE read by a first, inspect-only script call; only a
+ * non-secure, determinable pair earns a SECOND script call that actually
+ * types. This two-call structure means the secret text never reaches a spawn
+ * on the refusal path (test-asserted in axActions.test.ts).
  *
- * D-08 (unknown fails safe): `isSecureRole` returns true for `null`,
- * `undefined`, and `""` — an undeterminable role is treated as secure.
+ * 15 CR-01 — the SUBROLE is the load-bearing attribute. macOS reports a real
+ * password field (NSSecureTextField, `<input type=password>`) as
+ * role `AXTextField` with subrole `AXSecureTextField`; there is no
+ * `AXSecureTextField` ROLE and no `AXSecureTextArea` constant at all
+ * (AppKit NSAccessibilityConstants.h / HIServices AXRoleConstants.h). A
+ * role-only guard therefore never fires on a real password field. The role
+ * is still checked defensively in case an app reports the secure marker
+ * there.
  *
- * Every role read inside a script body tries `el.role()` first, falling back
- * to `el.attributes.byName("AXRole").value()`, returning an empty string if
- * both fail — this closes 15-RESEARCH's Assumption A1 without needing a live
- * spike, because an empty role is itself treated as secure.
+ * D-08 (unknown fails safe): `isSecureTarget` returns true for a
+ * null/undefined/empty ROLE, and for a text-entry role whose SUBROLE could
+ * not be read at all. It deliberately does NOT refuse when the element
+ * definitively reports no subrole (axSnapshot's SUBROLE_NONE sentinel) —
+ * that is every ordinary text field, and conflating "absent" with
+ * "unreadable" would refuse all normal typing.
+ *
+ * 15 WR-03 (TOCTOU) — the inspect call and the keystroke call are separate
+ * osascript processes, so focus can move between them. The keystroke scripts
+ * therefore RE-READ role+subrole immediately before synthesizing anything and
+ * abort with a `refused` sentinel if the observation no longer matches the
+ * one the refusal decision was made against.
  */
 
 import { ScriptRunner } from "./scriptRunner.js";
-import { parseAxRef } from "./axSnapshot.js";
+import { parseAxRef, AX_ROLE_HELPER_SCRIPT } from "./axSnapshot.js";
 import type { TccFailureKind } from "./tccErrors.js";
 
-/** Roles that must never receive synthesized keystrokes (D-03). */
-export const SECURE_FIELD_ROLES = ["AXSecureTextField", "AXSecureTextArea"];
+/** Subroles that mark a credential field — the real macOS shape (D-03). */
+export const SECURE_FIELD_SUBROLES = ["AXSecureTextField"];
+
+/** Defensive: treat the secure marker as fatal if an app ever reports it as
+ * a ROLE. macOS itself does not — see the CR-01 note in the header. */
+export const SECURE_FIELD_ROLES = ["AXSecureTextField"];
+
+/** Roles that accept typed text. For these, an UNREADABLE subrole fails
+ * closed (it might be a secure field); a definitively-absent one does not. */
+export const TEXT_ENTRY_ROLES = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"];
+
+function matchesAny(list: string[], value: string): boolean {
+  return list.some((entry) => entry.toLowerCase() === value.toLowerCase());
+}
 
 /**
- * Case-insensitive check against SECURE_FIELD_ROLES. Returns TRUE for
- * null/undefined/empty — an undeterminable role fails CLOSED (D-08).
+ * TRUE when the target may be a secure (credential) field and must never
+ * receive synthesized keystrokes. Fails CLOSED (D-08) on an undeterminable
+ * role, and on a text-entry role whose subrole could not be read.
+ *
+ * `subrole` carries three distinguishable states, produced by
+ * axSnapshot.ts's shared readSubrole() helper:
+ *   "AXSecureTextField"  -> secure, refuse
+ *   SUBROLE_NONE         -> the element definitively has no subrole
+ *   "" / null / undefined-> the subrole could not be READ -> fail closed
  */
-export function isSecureRole(role: string | null | undefined): boolean {
+export function isSecureTarget(
+  role: string | null | undefined,
+  subrole: string | null | undefined,
+): boolean {
   if (role === null || role === undefined || role === "") return true;
-  return SECURE_FIELD_ROLES.some((r) => r.toLowerCase() === role.toLowerCase());
+  const sub = subrole ?? "";
+  if (matchesAny(SECURE_FIELD_SUBROLES, sub)) return true;
+  if (matchesAny(SECURE_FIELD_ROLES, role)) return true;
+  if (matchesAny(TEXT_ENTRY_ROLES, role) && sub === "") return true;
+  return false;
 }
 
 export type AxActionResult =
@@ -61,19 +100,11 @@ const ALLOWED_KEYS: Record<string, number> = {
 
 // ── Fixed JXA script bodies (never string-concatenated with untrusted data) ───
 
-const READ_ROLE_HELPER = `
-function readRole(el) {
-  try { var r = el.role(); if (r) return r; } catch (e) {}
-  try { var v = el.attributes.byName("AXRole").value(); if (v) return v; } catch (e) {}
-  return "";
-}
-`;
-
 /** argv: [app, indexPath, expectedRole]. Walks to the element, compares the
  * live role to expectedRole; on match performs AXPress and returns
  * { success:true }, on mismatch returns { stale:true, actualRole }. */
 const AX_CLICK_SCRIPT = `
-${READ_ROLE_HELPER}
+${AX_ROLE_HELPER_SCRIPT}
 function run(argv) {
   const appName = argv[0];
   const indexPath = argv[1].split(".").map(Number);
@@ -106,9 +137,10 @@ function run(argv) {
 `;
 
 /** argv: [app, indexPath]. Inspect-only: focuses the element, reads its role
- * AND separately the process's AXFocusedUIElement role. Types NOTHING. */
+ * AND subrole, AND separately the process's AXFocusedUIElement role/subrole.
+ * Types NOTHING. */
 const AX_TYPE_INSPECT_SCRIPT = `
-${READ_ROLE_HELPER}
+${AX_ROLE_HELPER_SCRIPT}
 function run(argv) {
   const appName = argv[0];
   const indexPath = argv[1].split(".").map(Number);
@@ -122,12 +154,20 @@ function run(argv) {
     el.actions.byName("AXFocus").perform();
   } catch (e) {}
   const elementRole = readRole(el);
+  const elementSubrole = readSubrole(el);
   let focusedRole = "";
+  let focusedSubrole = "";
   try {
     const focused = proc.attributes.byName("AXFocusedUIElement").value();
     focusedRole = readRole(focused);
+    focusedSubrole = readSubrole(focused);
   } catch (e) {}
-  return JSON.stringify({ elementRole: elementRole, focusedRole: focusedRole });
+  return JSON.stringify({
+    elementRole: elementRole,
+    elementSubrole: elementSubrole,
+    focusedRole: focusedRole,
+    focusedSubrole: focusedSubrole,
+  });
 }
 `;
 
@@ -158,17 +198,19 @@ function run(argv) {
  * currently has focus (no ref addressing — vision-grounded click leaves
  * focus somewhere the model did not address by ref). */
 const AX_TYPE_AT_FOCUS_INSPECT_SCRIPT = `
-${READ_ROLE_HELPER}
+${AX_ROLE_HELPER_SCRIPT}
 function run(argv) {
   const se = Application("System Events");
   const matches = se.processes.whose({ frontmost: true });
   const proc = matches[0];
   let focusedRole = "";
+  let focusedSubrole = "";
   try {
     const focused = proc.attributes.byName("AXFocusedUIElement").value();
     focusedRole = readRole(focused);
+    focusedSubrole = readSubrole(focused);
   } catch (e) {}
-  return JSON.stringify({ focusedRole: focusedRole });
+  return JSON.stringify({ focusedRole: focusedRole, focusedSubrole: focusedSubrole });
 }
 `;
 
@@ -252,11 +294,12 @@ export class AxActionRunner {
 
   /**
    * Type `text` into the element at `ref`. Two-call structure: an
-   * inspect-only first call reads both the element's role and the process's
-   * AXFocusedUIElement role; if either is secure (or undeterminable), a
-   * refusal is returned with NO second call and the secret text never
-   * reaches a spawn. Only when both roles are non-secure does a second call
-   * keystroke the text (and, if `submit`, a Return).
+   * inspect-only first call reads the element's role AND SUBROLE plus the
+   * process's AXFocusedUIElement role AND SUBROLE; if either pair looks
+   * secure (or undeterminable), a refusal is returned with NO second call and
+   * the secret text never reaches a spawn. Only when both pairs are
+   * non-secure does a second call keystroke the text (and, if `submit`, a
+   * Return).
    */
   async type(ref: string, text: string, submit?: boolean): Promise<AxActionResult> {
     const parsed = parseAxRef(ref);
@@ -267,14 +310,22 @@ export class AxActionRunner {
     const inspect = await this.script.runJxa(AX_TYPE_INSPECT_SCRIPT, [parsed.app, parsed.indexPath.join(".")]);
     if (!inspect.ok) return inspect;
 
-    let roles: { elementRole?: string; focusedRole?: string };
+    let roles: {
+      elementRole?: string;
+      elementSubrole?: string;
+      focusedRole?: string;
+      focusedSubrole?: string;
+    };
     try {
-      roles = JSON.parse(inspect.stdout) as { elementRole?: string; focusedRole?: string };
+      roles = JSON.parse(inspect.stdout) as typeof roles;
     } catch {
       return { ok: false, error: "failed to parse type inspection result", kind: "unknown" };
     }
 
-    if (isSecureRole(roles.elementRole) || isSecureRole(roles.focusedRole)) {
+    if (
+      isSecureTarget(roles.elementRole, roles.elementSubrole) ||
+      isSecureTarget(roles.focusedRole, roles.focusedSubrole)
+    ) {
       return { ok: false, error: SECURE_FIELD_REFUSAL, kind: "unknown", refused: "secure-field" };
     }
 
@@ -298,14 +349,14 @@ export class AxActionRunner {
     const inspect = await this.script.runJxa(AX_TYPE_AT_FOCUS_INSPECT_SCRIPT, []);
     if (!inspect.ok) return inspect;
 
-    let roles: { focusedRole?: string };
+    let roles: { focusedRole?: string; focusedSubrole?: string };
     try {
-      roles = JSON.parse(inspect.stdout) as { focusedRole?: string };
+      roles = JSON.parse(inspect.stdout) as typeof roles;
     } catch {
       return { ok: false, error: "failed to parse focus inspection result", kind: "unknown" };
     }
 
-    if (isSecureRole(roles.focusedRole)) {
+    if (isSecureTarget(roles.focusedRole, roles.focusedSubrole)) {
       return { ok: false, error: SECURE_FIELD_REFUSAL, kind: "unknown", refused: "secure-field" };
     }
 

@@ -10,8 +10,19 @@
  * snapshot time, rather than an opaque handle, because refs must be
  * resolvable by a LATER, stateless `osascript` process. The embedded role is
  * the staleness check axActions.ts enforces: element titles change
- * constantly, roles do not — so a later action re-reads the live role at
- * that address and refuses if it no longer matches.
+ * constantly, roles do not — so a later action re-reads the live ROLE at
+ * that address and refuses if it no longer matches. Note the exact scope of
+ * that check (15 WR-11): the index path is positional, so a same-role
+ * element that moved into that position passes. It is a role re-check, NOT
+ * an element-identity guarantee — re-run the snapshot after any action that
+ * may have changed the screen.
+ *
+ * Each element also carries its SUBROLE (15 CR-01). macOS reports a password
+ * field as role `AXTextField` with subrole `AXSecureTextField` — the subrole
+ * is the load-bearing attribute for the D-03 credential guard, so it is read
+ * here and by axActions.ts through the SAME shared JXA helper
+ * (AX_ROLE_HELPER_SCRIPT below), which distinguishes "this element has no
+ * subrole" (SUBROLE_NONE) from "the subrole could not be read" ("").
  *
  * Live-verified failure signature (15-RESEARCH.md, macOS 26.5): enumerating
  * process NAMES succeeds without Accessibility, but the very next call
@@ -32,10 +43,59 @@ export const AX_MAX_DEPTH = 5;
 /** Hard cap on the rendered `tree` text returned to the loop. */
 export const AX_TEXT_CAP = 16_000;
 
+/** Render the raw subrole for display: both "definitively absent"
+ * (SUBROLE_NONE) and "unreadable" ("") become an empty string. The
+ * absent-vs-unreadable distinction only matters to axActions.ts's guard,
+ * which reads the raw value from its own inspect call. */
+function normalizeSubrole(subrole: string | undefined): string {
+  if (!subrole || subrole === SUBROLE_NONE) return "";
+  return subrole;
+}
+
 function capTree(text: string): string {
   if (text.length <= AX_TEXT_CAP) return text;
   return `${text.slice(0, AX_TEXT_CAP)}\n[truncated ${text.length - AX_TEXT_CAP} chars]`;
 }
+
+/**
+ * Sentinel returned by the shared `readSubrole()` JXA helper when an element
+ * DEFINITIVELY has no subrole (System Events reports `missing value`), as
+ * distinct from `""` which means the subrole attribute could not be READ at
+ * all. axActions.ts's D-08 fail-closed rule keys on exactly that distinction:
+ * an unreadable subrole on a text-entry element is treated as secure, while a
+ * definitively-absent one (every ordinary AXTextField) is not — otherwise the
+ * guard would refuse every normal text field on real macOS.
+ */
+export const SUBROLE_NONE = "__none__";
+
+/**
+ * Shared JXA helper prepended to every script that needs an element's role or
+ * subrole (this file's snapshot walk and axActions.ts's inspect/keystroke
+ * scripts). Fixed source text — the only interpolation is this module's own
+ * SUBROLE_NONE constant, never caller data, so the two can never drift.
+ */
+export const AX_ROLE_HELPER_SCRIPT = `
+function readRole(el) {
+  try { var r = el.role(); if (r) return String(r); } catch (e) {}
+  try { var v = el.attributes.byName("AXRole").value(); if (v) return String(v); } catch (e) {}
+  return "";
+}
+function readSubrole(el) {
+  // "${SUBROLE_NONE}" = the element definitively has NO subrole.
+  // ""               = the subrole could not be read at all -> caller fails closed.
+  try {
+    var s = el.subrole();
+    if (s) return String(s);
+    if (s === null || s === undefined || s === "") return "${SUBROLE_NONE}";
+  } catch (e) {}
+  try {
+    var v = el.attributes.byName("AXSubrole").value();
+    if (v) return String(v);
+    if (v === null || v === undefined || v === "") return "${SUBROLE_NONE}";
+  } catch (e) {}
+  return "";
+}
+`;
 
 // ── Ref codec ─────────────────────────────────────────────────────────────────
 
@@ -74,6 +134,9 @@ export function parseAxRef(ref: string): { app: string; indexPath: number[]; rol
 export interface AxElement {
   ref: string;
   role: string;
+  /** Subrole captured at snapshot time; `""` when absent or unreadable.
+   * `AXSecureTextField` here marks a password field (15 CR-01). */
+  subrole: string;
   title: string;
   x: number;
   y: number;
@@ -84,6 +147,7 @@ export interface AxElement {
 interface RawAxElement {
   indexPath: number[];
   role: string;
+  subrole?: string;
   title: string;
   x: number;
   y: number;
@@ -116,6 +180,7 @@ export type AxSnapshotResult =
 // yields an empty field instead of aborting the whole walk.
 
 const AX_SNAPSHOT_SCRIPT = `
+${AX_ROLE_HELPER_SCRIPT}
 function run(argv) {
   const targetName = argv[0];
   const maxDepth = parseInt(argv[1], 10);
@@ -155,7 +220,8 @@ function run(argv) {
   function walk(el, indexPath, depth) {
     if (elements.length >= maxElements) { truncated = true; return; }
 
-    const role = readProp(function () { return el.role(); }, "");
+    const role = readRole(el);
+    const subrole = readSubrole(el);
     let title = readProp(function () { return el.title(); }, "");
     if (!title) title = readProp(function () { return el.description(); }, "");
     if (!title) title = readProp(function () { return el.value(); }, "");
@@ -165,6 +231,7 @@ function run(argv) {
     elements.push({
       indexPath: indexPath,
       role: role,
+      subrole: subrole,
       title: String(title || ""),
       x: pos[0],
       y: pos[1],
@@ -234,6 +301,7 @@ export class AxSnapshotRunner {
     const elements: AxElement[] = parsed.elements.map((e) => ({
       ref: formatAxRef(parsed.app, e.indexPath, e.role),
       role: e.role,
+      subrole: normalizeSubrole(e.subrole),
       title: e.title ?? "",
       x: e.x,
       y: e.y,
@@ -245,7 +313,8 @@ export class AxSnapshotRunner {
       const depth = Math.max(0, e.indexPath.length - 1);
       const indent = "  ".repeat(depth);
       const el = elements[i]!;
-      return `${indent}[${el.ref}] ${el.role} "${el.title}" (${el.x},${el.y}) ${el.width}x${el.height}`;
+      const subrole = el.subrole ? ` (${el.subrole})` : "";
+      return `${indent}[${el.ref}] ${el.role}${subrole} "${el.title}" (${el.x},${el.y}) ${el.width}x${el.height}`;
     });
 
     return {
