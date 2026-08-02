@@ -355,18 +355,30 @@ export const QUERIES: SeededQuery[] = TARGET_FACTS.map((f) => ({
 }));
 
 // ─── Negative control (3, zero token overlap with ANY seeded record) ──────
-// Each of these has zero literal token overlap with any TARGET_FACTS or
-// DISTRACTOR_FACTS entry, AND was empirically confirmed (against this exact,
-// fixed corpus) to surface no target's memoryId in its top-EVAL_K results —
-// see recallEval.test.ts's negative-control describe block. Because
+// Each of these has zero literal token overlap (BM25 tokenizer semantics:
+// lowercase, split on non-alphanumeric, no stemming, no stopwords — see
+// services/memory/src/search/bm25.ts) with any TARGET_FACTS or
+// DISTRACTOR_FACTS entry. This is no longer just prose: recallEval.test.ts's
+// "structurally overlap-free" test recomputes the token intersection against
+// all 52 fixture texts and fails on ANY shared token, so a fixture or query
+// edit that reintroduces overlap breaks the suite instead of silently
+// weakening the control. (The original trio violated the claim: "reading"
+// collided with target-scifi-circle, and "shop" with target-walnut-bookshelf
+// + target-lapsang-tea — code-review WR-04.)
+//
+// Each query was ALSO empirically confirmed (against this exact, fixed
+// corpus) to surface no target's memoryId in its top-EVAL_K results — see
+// recallEval.test.ts's negative-control describe block. Because
 // FakeEmbedder's vector channel is non-semantic hash noise (file header),
 // an absent-topic query can occasionally rank an unrelated target into the
 // top-k purely by hash coincidence even though BM25 correctly assigns it
-// zero relevance; these three specific strings were chosen (of several
-// tried) precisely because that coincidence does not occur for them against
-// this fixed 52-record corpus.
+// zero relevance; these three specific strings were verified to avoid that
+// coincidence against this fixed 52-record corpus (several token-clean
+// variants — e.g. "... appointment scheduling", "... referral roster" — DID
+// leak a target into the top-8 by hash coincidence and were rejected; the
+// behavioral negative-control test is what enforces this second property).
 export const ABSENT_TOPIC_QUERIES: string[] = [
   "opera singing lesson audition",
-  "tarot card reading appointment booking",
-  "harmonica repair shop referral list",
+  "tarot card divination appointment",
+  "harmonica reed tuning referral",
 ];

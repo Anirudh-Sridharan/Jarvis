@@ -106,6 +106,35 @@ describe("Recall eval - hermetic baseline (SC1)", () => {
   });
 });
 
+describe("Recall eval - negative control is structurally overlap-free (WR-04)", () => {
+  // Same tokenizer semantics as the BM25 index (services/memory/src/search/
+  // bm25.ts): lowercase, split on non-alphanumeric, no stemming, no
+  // stopwords. Kept in exact sync so "zero token overlap" here means zero
+  // BM25-relevant overlap there.
+  const tokenize = (text: string): string[] =>
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 0);
+
+  it("no ABSENT_TOPIC_QUERIES token appears in ANY seeded fixture text", () => {
+    const corpusTokens = new Set<string>();
+    for (const fact of [...TARGET_FACTS, ...DISTRACTOR_FACTS]) {
+      for (const tok of tokenize(fact.text)) corpusTokens.add(tok);
+    }
+
+    for (const query of ABSENT_TOPIC_QUERIES) {
+      const collisions = tokenize(query).filter((tok) => corpusTokens.has(tok));
+      // Structural enforcement of the fixture-file claim: the invariant is
+      // recomputed from the actual texts, not asserted in prose — an edit to
+      // either side that introduces a shared token fails HERE with the
+      // offending tokens named, instead of leaving the negative control one
+      // hash coincidence away from meaninglessness.
+      expect(collisions, `query "${query}" shares tokens [${collisions.join(", ")}] with the seeded corpus`).toEqual([]);
+    }
+  });
+});
+
 describe("Recall eval - negative control", () => {
   it("no target memoryId surfaces for any absent-topic query (recall is provably 0)", async () => {
     const setup = makeRetrieval();
