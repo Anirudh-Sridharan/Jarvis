@@ -89,19 +89,23 @@ const FOCUS_CHANGED_REFUSAL =
   "and try again";
 
 /** Allowlisted key names -> System Events key codes. Anything outside this
- * set is refused pre-spawn. */
-const ALLOWED_KEYS: Record<string, number> = {
-  Enter: 36,
-  Return: 36,
-  Tab: 48,
-  Escape: 53,
-  Space: 49,
-  Delete: 51,
-  ArrowUp: 126,
-  ArrowDown: 125,
-  ArrowLeft: 123,
-  ArrowRight: 124,
-};
+ * set is refused pre-spawn. A Map (not an object literal) so LLM-supplied
+ * keys cannot reach through the prototype chain: `constructor`, `toString`,
+ * `valueOf` and `hasOwnProperty` are all non-undefined on an object literal
+ * and previously passed the guard, producing a spawn for a key the module
+ * documented as refused (15 WR-05). */
+const ALLOWED_KEYS = new Map<string, number>([
+  ["Enter", 36],
+  ["Return", 36],
+  ["Tab", 48],
+  ["Escape", 53],
+  ["Space", 49],
+  ["Delete", 51],
+  ["ArrowUp", 126],
+  ["ArrowDown", 125],
+  ["ArrowLeft", 123],
+  ["ArrowRight", 124],
+]);
 
 // ── Fixed JXA script bodies (never string-concatenated with untrusted data) ───
 
@@ -515,8 +519,8 @@ export class AxActionRunner {
   /** Press an allowlisted key. Any key outside ALLOWED_KEYS is refused
    * pre-spawn. */
   async pressKey(key: string): Promise<AxActionResult> {
-    const keyCode = ALLOWED_KEYS[key];
-    if (keyCode === undefined) {
+    const keyCode = ALLOWED_KEYS.get(key);
+    if (typeof keyCode !== "number") {
       return { ok: false, error: `key "${key}" is not in the allowed key list`, kind: "unknown" };
     }
 

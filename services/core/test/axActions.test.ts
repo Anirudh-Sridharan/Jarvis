@@ -485,6 +485,21 @@ describe("AxActionRunner.pressKey", () => {
     expect(fake.calls.length).toBe(0);
   });
 
+  // 15 WR-05: these are non-undefined on an object literal via the prototype
+  // chain, so the old `keyCode === undefined` guard let them through and a
+  // spawn occurred for a key the module documents as refused pre-spawn.
+  for (const key of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    it(`refuses the prototype-chain key "${key}" with zero calls`, async () => {
+      const fake = new FakeMacRunner();
+      const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+      const result = await runner.pressKey(key);
+
+      expect(result.ok).toBe(false);
+      expect(fake.calls.length).toBe(0);
+    });
+  }
+
   it("issues one call for an allowed key", async () => {
     const fake = new FakeMacRunner();
     fake.result = ok(JSON.stringify({ success: true }));
