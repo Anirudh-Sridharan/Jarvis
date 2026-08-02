@@ -15,7 +15,9 @@ import { join } from "node:path";
 import { makeMacUiTools } from "../src/agent/tools/macUiTools.js";
 import { buildToolRegistry } from "../src/agent/tools/index.js";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
-import { formatAxRef } from "../src/mac/axSnapshot.js";
+import { formatAxRef, SUBROLE_NONE } from "../src/mac/axSnapshot.js";
+import { MAC_UI_SNAPSHOT_TTL_MS } from "../src/agent/tools/macUiTools.js";
+import type { Tool } from "@jarvis/agent";
 import { getToolMeta } from "@jarvis/agent";
 import { createIntegrations } from "@jarvis/integrations";
 import {
@@ -45,6 +47,63 @@ function ok(stdout: string): MacCommandResult {
 
 function toolByName(runner: MacCommandRunner, name: string) {
   const tool = makeMacUiTools(runner).find((t) => t.name === name);
+  if (!tool) throw new Error(`tool ${name} not built`);
+  return tool;
+}
+
+// ── Perception-binding fixtures (15 UF-03) ────────────────────────────────────
+//
+// Tier 2 acting tools must be bound to a snapshot the same tool set actually
+// produced, so every click/type test builds ONE tool set, primes it with a
+// snapshot fixture, and then acts.
+
+interface FixtureElement {
+  indexPath: number[];
+  role: string;
+  subrole?: string;
+  title?: string;
+}
+
+/** The raw AX_SNAPSHOT_SCRIPT stdout shape. */
+function snapshotJson(app: string, elements: FixtureElement[]): string {
+  return JSON.stringify({
+    app,
+    window: "Untitled",
+    truncated: false,
+    elements: elements.map((e) => ({
+      indexPath: e.indexPath,
+      role: e.role,
+      subrole: e.subrole ?? SUBROLE_NONE,
+      title: e.title ?? "",
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    })),
+  });
+}
+
+/** Build the Tier 2 tool set and prime it with a snapshot the acting tools can
+ * bind to. Clears the recorded calls so per-test assertions are about the
+ * ACTION, not the priming snapshot. */
+async function primedTools(
+  fake: FakeMacRunner,
+  elements: FixtureElement[],
+  opts?: { app?: string; now?: () => number },
+): Promise<Tool[]> {
+  const tools = makeMacUiTools(fake.runner, opts?.now ? { now: opts.now } : undefined);
+  const snapshot = tools.find((t) => t.name === "mac_ui_snapshot")!;
+  const previous = fake.result;
+  fake.result = ok(snapshotJson(opts?.app ?? "TextEdit", elements));
+  const result = (await snapshot.run({})) as Record<string, unknown>;
+  if (result["ok"] !== true) throw new Error("snapshot fixture did not succeed");
+  fake.result = previous;
+  fake.calls.length = 0;
+  return tools;
+}
+
+function pick(tools: Tool[], name: string): Tool {
+  const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not built`);
   return tool;
 }
@@ -118,6 +177,10 @@ describe("mac ui tool surface", () => {
 describe("mac_ui_type — secure field refusal", () => {
   it("refuses typing into a secure field target, no secret text in any recorded argv", async () => {
     const fake = new FakeMacRunner();
+    const ref = formatAxRef("TextEdit", [0, 1], "AXTextField");
+    const tools = await primedTools(fake, [
+      { indexPath: [0, 1], role: "AXTextField", subrole: "AXSecureTextField", title: "Password" },
+    ]);
     // The shape macOS ACTUALLY emits for a password field (15 CR-01): the role
     // is AXTextField and the SUBROLE carries the secure marker.
     fake.result = ok(
@@ -128,17 +191,114 @@ describe("mac_ui_type — secure field refusal", () => {
         focusedSubrole: "AXSecureTextField",
       }),
     );
-    const tool = toolByName(fake.runner, "mac_ui_type");
-    const ref = formatAxRef("TextEdit", [0, 1], "AXTextField");
 
-    const result = (await tool.run({ element: "password field", ref, text: "hunter2", submit: false })) as Record<
-      string,
-      unknown
-    >;
+    const result = (await pick(tools, "mac_ui_type").run({
+      element: "password field",
+      ref,
+      text: "hunter2",
+      submit: false,
+    })) as Record<string, unknown>;
 
     expect(result["ok"]).toBe(false);
     expect(String(result["error"])).toMatch(/secure field/i);
     expect(JSON.stringify(fake.calls)).not.toContain("hunter2");
+  });
+});
+
+// ── Perception binding (15 UF-03) ─────────────────────────────────────────────
+
+describe("Tier 2 actions are bound to the snapshot they came from (UF-03)", () => {
+  const BUTTON_REF = formatAxRef("TextEdit", [0], "AXButton");
+  const SAVE_BUTTON: FixtureElement = { indexPath: [0], role: "AXButton", title: "Save" };
+
+  it("mac_ui_click refuses a ref no snapshot ever produced — zero native calls", async () => {
+    const fake = new FakeMacRunner();
+    const tools = await primedTools(fake, [SAVE_BUTTON]);
+
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "Save",
+      ref: formatAxRef("TextEdit", [7, 7], "AXButton"),
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toContain("mac_ui_snapshot");
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("mac_ui_click refuses when the approved description does not match the ref's element", async () => {
+    const fake = new FakeMacRunner();
+    const tools = await primedTools(fake, [SAVE_BUTTON]);
+    fake.result = ok(JSON.stringify({ success: true }));
+
+    // The human would be shown "Delete everything" while the ref points at Save.
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "Delete everything",
+      ref: BUTTON_REF,
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/does not match/i);
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("mac_ui_click proceeds when the ref and the description agree with the snapshot", async () => {
+    const fake = new FakeMacRunner();
+    const tools = await primedTools(fake, [SAVE_BUTTON]);
+    fake.result = ok(JSON.stringify({ success: true }));
+
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "the Save button",
+      ref: BUTTON_REF,
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(true);
+    expect(fake.calls.length).toBe(1);
+  });
+
+  it("mac_ui_type refuses an unbound ref before any spawn — the text never reaches argv", async () => {
+    const fake = new FakeMacRunner();
+    const tools = await primedTools(fake, [SAVE_BUTTON]);
+
+    const result = (await pick(tools, "mac_ui_type").run({
+      element: "search field",
+      ref: formatAxRef("TextEdit", [3], "AXTextField"),
+      text: "unbound-secret",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(fake.calls.length).toBe(0);
+    expect(JSON.stringify(fake.calls)).not.toContain("unbound-secret");
+  });
+
+  it("an element the snapshot gave no title for cannot contradict the description", async () => {
+    const fake = new FakeMacRunner();
+    const tools = await primedTools(fake, [{ indexPath: [0], role: "AXButton", title: "" }]);
+    fake.result = ok(JSON.stringify({ success: true }));
+
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "the untitled toolbar button",
+      ref: BUTTON_REF,
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(true);
+  });
+
+  it("a snapshot older than the TTL no longer binds an action", async () => {
+    const fake = new FakeMacRunner();
+    let clock = 1_000_000;
+    const tools = await primedTools(fake, [SAVE_BUTTON], { now: () => clock });
+    fake.result = ok(JSON.stringify({ success: true }));
+
+    clock += MAC_UI_SNAPSHOT_TTL_MS + 1;
+
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "Save",
+      ref: BUTTON_REF,
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/expired/i);
+    expect(fake.calls.length).toBe(0);
   });
 });
 
@@ -147,11 +307,14 @@ describe("mac_ui_type — secure field refusal", () => {
 describe("mac_ui_click — stale ref", () => {
   it("refuses a click whose live role no longer matches the ref", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
-    const tool = toolByName(fake.runner, "mac_ui_click");
     const ref = formatAxRef("TextEdit", [0], "AXButton");
+    const tools = await primedTools(fake, [{ indexPath: [0], role: "AXButton", title: "Save" }]);
+    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
 
-    const result = (await tool.run({ element: "save button", ref })) as Record<string, unknown>;
+    const result = (await pick(tools, "mac_ui_click").run({
+      element: "save button",
+      ref,
+    })) as Record<string, unknown>;
 
     expect(result["ok"]).toBe(false);
     expect(String(result["error"])).toContain("re-run mac_ui_snapshot");
@@ -161,11 +324,13 @@ describe("mac_ui_click — stale ref", () => {
 describe("mac_ui_type — stale ref (T-15-22)", () => {
   it("refuses typing through a stale ref, and nothing is typed", async () => {
     const fake = new FakeMacRunner();
-    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
-    const tool = toolByName(fake.runner, "mac_ui_type");
     const ref = formatAxRef("TextEdit", [0, 1], "AXTextField");
+    const tools = await primedTools(fake, [
+      { indexPath: [0, 1], role: "AXTextField", title: "Search" },
+    ]);
+    fake.result = ok(JSON.stringify({ stale: true, actualRole: "AXStaticText" }));
 
-    const result = (await tool.run({
+    const result = (await pick(tools, "mac_ui_type").run({
       element: "search field",
       ref,
       text: "stale-target-text",

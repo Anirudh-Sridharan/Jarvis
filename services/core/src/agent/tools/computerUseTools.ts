@@ -59,6 +59,7 @@ import type { MacCommandRunner } from "../../mac/commandRunner.js";
 import { ScriptRunner } from "../../mac/scriptRunner.js";
 import { ScreenshotRunner, imageToScreenPoint, type ScreenshotFs } from "../../mac/screenshotRunner.js";
 import { AxActionRunner } from "../../mac/axActions.js";
+import { labelsMatch } from "../../mac/labelMatch.js";
 import type { InferenceGateway } from "../../inference/gateway.js";
 import type { Router } from "../../inference/router.js";
 import type { ChatMessage, ContentPart } from "../../inference/types.js";
@@ -128,27 +129,6 @@ interface CaptureRecord {
   id: string;
   createdAt: number;
   elements: ComputerElement[];
-}
-
-function normalizeLabel(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-/** Does the model's human-readable `element` describe the element the capture
- * actually recorded at those coordinates? Containment either way, so "Save
- * button" still matches a label of "Save" — the check exists to catch an
- * approval prompt that describes a DIFFERENT thing from what will run, not to
- * demand verbatim echoing. An element the capture gave no label for cannot
- * contradict anything. */
-function labelsMatch(actual: string, claimed: string): boolean {
-  const a = normalizeLabel(actual);
-  const c = normalizeLabel(claimed);
-  if (!a) return true;
-  if (!c) return false;
-  return a === c || a.includes(c) || c.includes(a);
 }
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
