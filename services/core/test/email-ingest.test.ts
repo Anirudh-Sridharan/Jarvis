@@ -16,9 +16,9 @@ import { FakeEmbedder, FakeLlm } from "@jarvis/memory/testing";
 import type { EmailSearchHit, EmailThread } from "@jarvis/integrations";
 import { runEmailIngest, DEFAULT_EMAIL_QUERY, type EmailSource } from "../src/memory/emailIngest.js";
 
-function makeMemory() {
+function makeMemory(llm: FakeLlm = new FakeLlm()) {
   const dataDir = mkdtempSync(join(tmpdir(), "jarvis-email-mem-"));
-  return createMemorySystem({ embedder: new FakeEmbedder(), llm: new FakeLlm(), dataDir });
+  return createMemorySystem({ embedder: new FakeEmbedder(), llm, dataDir });
 }
 
 function hit(messageId: string, threadId: string): EmailSearchHit {
@@ -119,5 +119,56 @@ describe("runEmailIngest", () => {
     await runEmailIngest({ memory: makeMemory(), email: b, query: "from:boss", maxResults: 25 });
     expect(b.searchCalls[0]!.query).toBe("from:boss");
     expect(b.searchCalls[0]!.maxResults).toBe(25);
+  });
+});
+
+describe("runEmailIngest - MEM-06 force-consolidate -> retrieve -> content assert", () => {
+  it("promotes an ingested message body into the retrievable graph after consolidation", async () => {
+    const marker = "eval-canary-emailingest-msg1";
+    const hits = [hit("m1", "t1")];
+    const threads: Record<string, EmailThread> = {
+      t1: { id: "t1", messages: [msg("m1", "t1", `Message body mentioning ${marker} for retrieval testing.`)] },
+    };
+    const email = new FakeEmailSource(hits, threads);
+
+    // FakeLlm's default extraction is a fixed "User prefers TypeScript" result,
+    // and consolidation never copies a record's literal text into the graph —
+    // so without this override the marker cannot possibly come back, and the
+    // test would be measuring the fake, not the pipeline.
+    const llm = new FakeLlm();
+    // reflectInsights()'s prompt also embeds a raw sample of the same pending
+    // record text (under "Recent experiences:"), so the marker override would
+    // otherwise ALSO match the reflection call and mint a duplicate
+    // marker-bearing EPISODE via indexInsightAsEpisode(). Suppress reflection
+    // explicitly — FakeLlm checks overrides in insertion order, so this must
+    // be registered FIRST to win for the reflect prompt; the extraction
+    // prompt never contains "Recent experiences:", so the marker override
+    // below still matches it (WR-03, mirroring the memory-side retrofits).
+    llm.addOverride("Recent experiences:", "[]");
+    llm.addOverride(
+      marker,
+      JSON.stringify([
+        { entity: "self", predicate: "mentions", object: "canary", text: `Canary note: ${marker}`, confidence: 0.9 },
+      ]),
+    );
+    const memory = makeMemory(llm);
+
+    const r = await runEmailIngest({ memory, email });
+    expect(r.messages).toBe(1);
+    expect(r.errors).toBe(0);
+
+    const result = await memory.consolidation.run("manual");
+    expect(result.run.status).toBe("completed");
+    expect(result.run.errors.length).toBe(0);
+    expect(result.run.counts.recordsProcessed).toBeGreaterThanOrEqual(1);
+
+    // kind === "fact" pins the marker to the extract→resolve→fact promotion
+    // path specifically — a reflection-minted episode (or a still-pending
+    // record) satisfying a bare text-includes check would prove only that the
+    // marker reached the graph via SOME path (WR-03).
+    const hits2 = await memory.retrieval.retrieve(marker, { k: 5 });
+    const factHit = hits2.find((h) => h.text.includes(marker));
+    expect(factHit).toBeDefined();
+    expect(factHit?.kind).toBe("fact");
   });
 });

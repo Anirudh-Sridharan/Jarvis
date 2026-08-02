@@ -33,9 +33,9 @@ function makeTree() {
   return dir;
 }
 
-function makeMemory() {
+function makeMemory(llm: FakeLlm = new FakeLlm()) {
   const dataDir = mkdtempSync(join(tmpdir(), "jarvis-files-mem-"));
-  return createMemorySystem({ embedder: new FakeEmbedder(), llm: new FakeLlm(), dataDir });
+  return createMemorySystem({ embedder: new FakeEmbedder(), llm, dataDir });
 }
 
 describe("runFilesIngest", () => {
@@ -99,5 +99,53 @@ describe("runFilesIngest", () => {
     const memory = makeMemory();
     const r = await runFilesIngest({ memory, dir: join(tmpdir(), "does-not-exist-xyz"), extract });
     expect(r).toEqual({ scanned: 0, documents: 0, chunks: 0, duplicates: 0, skipped: 0, errors: 0 });
+  });
+});
+
+describe("runFilesIngest - MEM-06 force-consolidate -> retrieve -> content assert", () => {
+  it("promotes an ingested document into the retrievable graph after consolidation", async () => {
+    const marker = "eval-canary-files-doc1";
+    const dir = mkdtempSync(join(tmpdir(), "jarvis-files-mem06-"));
+    writeFileSync(join(dir, "canary.txt"), `Document body mentioning ${marker} for retrieval testing.`);
+
+    // FakeLlm's default extraction is a fixed "User prefers TypeScript" result,
+    // and consolidation never copies a record's literal text into the graph —
+    // so without this override the marker cannot possibly come back, and the
+    // test would be measuring the fake, not the pipeline.
+    const llm = new FakeLlm();
+    // reflectInsights()'s prompt also embeds a raw sample of the same pending
+    // record text (under "Recent experiences:"), so the marker override would
+    // otherwise ALSO match the reflection call and mint a duplicate
+    // marker-bearing EPISODE via indexInsightAsEpisode(). Suppress reflection
+    // explicitly — FakeLlm checks overrides in insertion order, so this must
+    // be registered FIRST to win for the reflect prompt; the extraction
+    // prompt never contains "Recent experiences:", so the marker override
+    // below still matches it (WR-03, mirroring the memory-side retrofits).
+    llm.addOverride("Recent experiences:", "[]");
+    llm.addOverride(
+      marker,
+      JSON.stringify([
+        { entity: "self", predicate: "mentions", object: "canary", text: `Canary note: ${marker}`, confidence: 0.9 },
+      ]),
+    );
+    const memory = makeMemory(llm);
+
+    const r = await runFilesIngest({ memory, dir, extract });
+    expect(r.documents).toBe(1);
+    expect(r.errors).toBe(0);
+
+    const result = await memory.consolidation.run("manual");
+    expect(result.run.status).toBe("completed");
+    expect(result.run.errors.length).toBe(0);
+    expect(result.run.counts.recordsProcessed).toBeGreaterThanOrEqual(1);
+
+    // kind === "fact" pins the marker to the extract→resolve→fact promotion
+    // path specifically — a reflection-minted episode (or a still-pending
+    // record) satisfying a bare text-includes check would prove only that the
+    // marker reached the graph via SOME path (WR-03).
+    const hits = await memory.retrieval.retrieve(marker, { k: 5 });
+    const hit = hits.find((h) => h.text.includes(marker));
+    expect(hit).toBeDefined();
+    expect(hit?.kind).toBe("fact");
   });
 });

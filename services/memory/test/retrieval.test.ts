@@ -9,8 +9,9 @@ import { join } from "node:path";
 import { openDatabase } from "../src/db/database.js";
 import { MemoryStore } from "../src/store/memoryStore.js";
 import { RetrievalService } from "../src/retrieval/retrieval.js";
-import { FakeEmbedder } from "../src/testing/fakes.js";
+import { FakeEmbedder, FakeLlm } from "../src/testing/fakes.js";
 import { CaptureService } from "../src/capture/capture.js";
+import { ConsolidationService } from "../src/consolidation/consolidation.js";
 
 function makeRetrieval() {
   const dir = mkdtempSync(join(tmpdir(), "jarvis-retrieval-test-"));
@@ -201,6 +202,40 @@ describe("RetrievalService - access tracking", () => {
     expect(row.access_count).toBe(1);
     expect(row.last_accessed_at).toBeGreaterThan(0);
   });
+
+  it("trackAccess: false leaves access_count and last_accessed_at untouched (WR-01)", async () => {
+    const { store, retrieval } = makeRetrieval();
+    const ep = await store.upsertEpisode({
+      text: "User prefers TypeScript for backend services",
+      occurredAt: "2026-06-01T10:00:00Z",
+      provenance: { source: "chat", sourceId: "touch-2", confidence: 0.9 },
+    });
+
+    const db = (store as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    const before = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+
+    // Read-only measurement retrieval: the episode is returned but NOT touched.
+    const results = await retrieval.retrieve("TypeScript backend services", {
+      k: 5,
+      trackAccess: false,
+    });
+    expect(results.some((r) => r.memoryId === ep.id)).toBe(true);
+
+    const after = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+    expect(after.access_count).toBe(before.access_count);
+    expect(after.last_accessed_at).toBe(before.last_accessed_at);
+
+    // Default behavior is unchanged: an ordinary retrieval still bumps both.
+    await retrieval.retrieve("TypeScript backend services", { k: 5 });
+    const bumped = db
+      .prepare(`SELECT access_count, last_accessed_at FROM episodes WHERE id = ?`)
+      .get(ep.id) as { access_count: number; last_accessed_at: number };
+    expect(bumped.access_count).toBe(before.access_count + 1);
+  });
 });
 
 describe("MemoryStore.pendingSearch() - MEM-01 pending-record search", () => {
@@ -333,6 +368,59 @@ describe("RetrievalService - MEM-01 pendingRetriever (4th retriever + provisiona
     expect(pendingResult).toBeDefined();
     expect(factResult).toBeDefined();
     expect(pendingResult!.fusedScore).toBeLessThan(factResult!.fusedScore);
+  });
+
+  it("the SAME captured text transitions from pending to a promoted graph node after consolidation", async () => {
+    const { store, retrieval, embedder } = makeRetrieval();
+    const capture = new CaptureService(store, embedder);
+    const llm = new FakeLlm();
+    const marker = "eval-canary-pending-5528";
+    // FakeLlm's default extraction is a fixed "User prefers TypeScript" fact —
+    // the captured record's own literal text never reaches the graph unless
+    // an override is registered on a distinctive substring of its body.
+    // reflectInsights() embeds the same raw record text under "Recent
+    // experiences:" — suppress that prompt explicitly (checked first) so the
+    // marker only ever promotes into a single fact, not a duplicate episode.
+    llm.addOverride("Recent experiences:", "[]");
+    llm.addOverride(
+      marker,
+      JSON.stringify([
+        {
+          entity: "self",
+          predicate: "mentions",
+          object: marker,
+          text: `Captured note mentions ${marker}`,
+          confidence: 0.9,
+        },
+      ]),
+    );
+
+    await capture.captureNote({
+      text: `Reminder about ${marker} for the team`,
+      noteId: "pending-transition-1",
+    });
+
+    // Pre-consolidation half (MEM-01's already-proven path): the record
+    // surfaces as a provisional "pending" candidate before consolidation runs.
+    const before = await retrieval.retrieve(`${marker} team`, { k: 5 });
+    const pendingHit = before.find((r) => r.kind === "pending");
+    expect(pendingHit).toBeDefined();
+    expect(pendingHit?.text).toContain(marker);
+
+    const consolidation = new ConsolidationService(store, llm, embedder);
+    await consolidation.run("manual"); // force-consolidate — the MEM-06 gap
+
+    // Post-consolidation half (MEM-06's gap): the SAME text is now retrievable
+    // as a promoted fact, not merely "some pending row exists somewhere".
+    const after = await retrieval.retrieve(`${marker} team`, { k: 5 });
+    const factHit = after.find((r) => r.kind === "fact" && r.text.includes(marker));
+    expect(factHit).toBeDefined();
+    // The disappearance of the pending row here is expected and correct:
+    // MemoryStore.pendingSearch() selects WHERE consolidation_pending = 1 OR
+    // dead_letter = 1, so a legitimately-promoted record leaves that pool —
+    // which is exactly why this post-consolidation half is a distinct proof,
+    // not redundant with the pre-consolidation case above.
+    expect(after.some((r) => r.kind === "pending" && r.text.includes(marker))).toBe(false);
   });
 });
 

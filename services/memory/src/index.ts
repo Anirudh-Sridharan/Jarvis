@@ -64,6 +64,8 @@ export {
   normalizeCosine,
   DEFAULT_SCORING_CONFIG,
 } from "./retrieval/scoring.js";
+export { evaluateRecall } from "./retrieval/recallMetrics.js";
+export type { RecallJudgment, PerQueryRecall, RecallEvalResult } from "./retrieval/recallMetrics.js";
 export { isLiveFact, wasTrueAt, wasBelivedAt, factsBelivedAt, factsTrueAt, liveFacts } from "./store/bitemporal.js";
 export { computeDedupKey, buildConversationRecord, buildNoteRecord, buildExternalRecord } from "./capture/experience.js";
 export { parseMarkdownNote, buildMarkdownRecord, buildMarkdownRecords } from "./capture/adapters/markdown.js";

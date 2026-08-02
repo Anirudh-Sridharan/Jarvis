@@ -17,6 +17,10 @@ import {
   FixedClock,
   FakeLlm,
 } from "@jarvis/integrations/testing";
+import { createMemorySystem } from "@jarvis/memory";
+// Aliased to avoid colliding with @jarvis/integrations/testing's FakeLlm above —
+// this pair backs the real MemorySystem the MEM-06 case constructs below.
+import { FakeEmbedder as MemoryFakeEmbedder, FakeLlm as MemoryFakeLlm } from "@jarvis/memory/testing";
 import { runIngestPass, type IngestDeps } from "../src/memory/ingestBridge.js";
 
 const NOW = new Date("2026-06-10T12:00:00Z");
@@ -47,6 +51,19 @@ function makeFakeMemory() {
   return { memory: memory as unknown as IngestDeps["memory"], captured };
 }
 
+// makeFakeMemory() above exposes only capture.captureExternal — no store,
+// consolidation, or retrieval — so it is structurally incapable of proving
+// MEM-06 (recall by content after force-consolidation). This helper builds a
+// real createMemorySystem instead, mirroring files-ingest.test.ts's
+// makeMemory(). IngestDeps.memory is typed Pick<MemorySystem, "capture">, so
+// a full MemorySystem satisfies it structurally with no cast.
+const mem06DataDirs: string[] = [];
+function makeRealMemory(llm: MemoryFakeLlm) {
+  const memDataDir = mkdtempSync(join(tmpdir(), "jarvis-ingest-bridge-mem-"));
+  mem06DataDirs.push(memDataDir);
+  return createMemorySystem({ embedder: new MemoryFakeEmbedder(), llm, dataDir: memDataDir });
+}
+
 let dataDir: string;
 let integrations: IntegrationsSystem;
 
@@ -64,6 +81,7 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dataDir, { recursive: true, force: true });
+  for (const d of mem06DataDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 function seedCalendarEvent(): void {
@@ -212,5 +230,78 @@ describe("runIngestPass: digest churn guard", () => {
     const second = await runIngestPass({ memory, integrations, now: () => NOW });
     expect(second.captured).toBe(0); // day-keyed content: no contradictory re-capture
     expect(second.duplicates).toBe(2);
+  });
+});
+
+// SC3 coverage boundary this file completes: local documents (files-ingest.test.ts),
+// the Obsidian vault (vault-ingest.test.ts), and Gmail bodies (email-ingest.test.ts)
+// each prove MEM-06 recall. This describe block adds the fourth and final core
+// surface — the connector ingest bridge (calendar events + health/work digests).
+// iMessage is explicitly NOT covered here: Phase 9 shipped only the hermetic
+// orchestrator/safety logic, so there is no real chat.db capture surface to
+// force-consolidate yet. That live wiring is deferred to Phase 10.
+describe("runIngestPass - MEM-06 force-consolidate -> retrieve -> content assert", () => {
+  it("promotes a converted calendar event into the retrievable graph after consolidation, against a real MemorySystem", async () => {
+    const marker = "eval-canary-bridge-evt1";
+
+    integrations.calendar.mirror.upsertEvent({
+      calendarId: "primary",
+      id: "evt-canary",
+      etag: '"v1"',
+      status: "confirmed",
+      summary: marker,
+      start: { dateTime: "2026-06-11T10:00:00Z", timeZone: "UTC" },
+      end: { dateTime: "2026-06-11T10:30:00Z", timeZone: "UTC" },
+      allDay: false,
+      attendees: [],
+      created: "2026-06-01T09:00:00Z",
+      updated: "2026-06-01T09:00:00Z",
+      source: "google",
+      syncedAt: "2026-06-10T08:00:00Z",
+    });
+
+    // makeFakeMemory() exposes only capture.captureExternal — no store, no
+    // consolidation, no retrieval — so it is structurally incapable of proving
+    // MEM-06. This case builds a real createMemorySystem via makeRealMemory()
+    // instead. IngestDeps.memory is typed Pick<MemorySystem, "capture">, so the
+    // full MemorySystem satisfies it structurally with no cast.
+    const llm = new MemoryFakeLlm();
+    // MemoryFakeLlm's default extraction is a fixed "User prefers TypeScript"
+    // result, and consolidation never copies a record's literal text into the
+    // graph — so without this override the marker cannot possibly come back,
+    // and the test would be measuring the fake, not the pipeline.
+    // reflectInsights()'s prompt also embeds a raw sample of the same pending
+    // record text (under "Recent experiences:"), so the marker override would
+    // otherwise ALSO match the reflection call and mint a duplicate
+    // marker-bearing EPISODE via indexInsightAsEpisode(). Suppress reflection
+    // explicitly — FakeLlm checks overrides in insertion order, so this must
+    // be registered FIRST to win for the reflect prompt; the extraction
+    // prompt never contains "Recent experiences:", so the marker override
+    // below still matches it (WR-03, mirroring the memory-side retrofits).
+    llm.addOverride("Recent experiences:", "[]");
+    llm.addOverride(
+      marker,
+      JSON.stringify([
+        { entity: "self", predicate: "mentions", object: "canary", text: `Canary note: ${marker}`, confidence: 0.9 },
+      ]),
+    );
+    const realMemory = makeRealMemory(llm);
+
+    const result = await runIngestPass({ memory: realMemory, integrations, now: () => NOW });
+    expect(result.captured).toBeGreaterThanOrEqual(1);
+
+    const consolidationResult = await realMemory.consolidation.run("manual");
+    expect(consolidationResult.run.status).toBe("completed");
+    expect(consolidationResult.run.errors.length).toBe(0);
+    expect(consolidationResult.run.counts.recordsProcessed).toBeGreaterThanOrEqual(1);
+
+    // kind === "fact" pins the marker to the extract→resolve→fact promotion
+    // path specifically — a reflection-minted episode (or a still-pending
+    // record) satisfying a bare text-includes check would prove only that the
+    // marker reached the graph via SOME path (WR-03).
+    const hits = await realMemory.retrieval.retrieve(marker, { k: 5 });
+    const hit = hits.find((h) => h.text.includes(marker));
+    expect(hit).toBeDefined();
+    expect(hit?.kind).toBe("fact");
   });
 });
