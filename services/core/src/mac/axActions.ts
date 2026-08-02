@@ -368,7 +368,13 @@ export class AxActionRunner {
   constructor(private readonly script: ScriptRunner = new ScriptRunner()) {}
 
   /** Click the element at `ref`. Refuses pre-spawn on a malformed ref;
-   * refuses (after exactly one call) on a stale (mismatched live role) ref. */
+   * refuses (after exactly one call) when the live ROLE at that index path no
+   * longer matches the one captured in the ref.
+   *
+   * Scope (15 WR-11): this is a role re-check, not an element-identity
+   * guarantee — the index path is positional, so a DIFFERENT element of the
+   * SAME role that moved into that position (a re-sorted list, an inserted
+   * row) passes the check. Tool descriptions state exactly this. */
   async click(ref: string): Promise<AxActionResult> {
     const parsed = parseAxRef(ref);
     if (!parsed) {

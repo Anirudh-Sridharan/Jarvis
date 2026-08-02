@@ -92,8 +92,10 @@ export function makeMacUiTools(run: MacCommandRunner): Tool[] {
       name: "mac_ui_click",
       description:
         "Click a UI element in an app that has no scripting dictionary (requires approval). Use " +
-        "the ref from the latest mac_ui_snapshot — a stale ref (from an outdated snapshot) is " +
-        "refused rather than applied to whatever element now occupies that position.",
+        "the ref from the latest mac_ui_snapshot. The element's ROLE at that index path is " +
+        "re-checked live and a role mismatch is refused — but the path is positional, so a " +
+        "different element of the SAME role that has moved into that position would still be " +
+        "clicked. Re-run mac_ui_snapshot after any action that may have changed the screen.",
       schema: ClickSchema,
       readOnly: false,
       returnsExternalContent: true,

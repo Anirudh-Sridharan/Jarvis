@@ -101,6 +101,16 @@ describe("mac ui tool surface", () => {
     const tool = toolByName(fake.runner, "mac_ui_type");
     expect(tool.description).toContain("never types credentials");
   });
+
+  it("mac_ui_click's description describes the ROLE re-check honestly, not element identity (15 WR-11)", () => {
+    const fake = new FakeMacRunner();
+    const tool = toolByName(fake.runner, "mac_ui_click");
+    // The index path is positional: a same-role element that moved into that
+    // position passes. Promising more than that misleads the approver.
+    expect(tool.description).toMatch(/role/i);
+    expect(tool.description).toMatch(/positional/i);
+    expect(tool.description).not.toMatch(/whatever element now occupies that position/i);
+  });
 });
 
 // ── Secure-field refusal (reachable from the tool surface) ─────────────────────
