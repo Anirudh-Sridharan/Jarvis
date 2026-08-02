@@ -13,11 +13,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
-import { makeComputerUseTools, COMPUTER_MAX_ELEMENTS } from "../src/agent/tools/computerUseTools.js";
+import {
+  makeComputerUseTools,
+  COMPUTER_MAX_ELEMENTS,
+  type VisionGateway,
+} from "../src/agent/tools/computerUseTools.js";
 import { imageToScreenPoint } from "../src/mac/screenshotRunner.js";
 import { SUBROLE_NONE } from "../src/mac/axSnapshot.js";
-import type { ChatMessage, JarvisInferenceRequest, InferenceStreamChunk } from "../src/inference/types.js";
-import type { InferenceGateway } from "../src/inference/gateway.js";
+import type {
+  ChatMessage,
+  CloudTarget,
+  JarvisInferenceRequest,
+  InferenceStreamChunk,
+} from "../src/inference/types.js";
 import { getToolMeta, createAgentSystem } from "@jarvis/agent";
 import { FakeLlm, FixedClock, ManualApprovalSink, makeToolRegistry } from "@jarvis/agent/testing";
 import { buildToolRegistry } from "../src/agent/tools/index.js";
@@ -62,8 +70,12 @@ interface FakeGatewayCall {
   messages: ChatMessage[];
 }
 
-class FakeGateway implements Pick<InferenceGateway, "chat"> {
+class FakeGateway implements VisionGateway {
   calls: FakeGatewayCall[] = [];
+  /** Which cloud provider serves a task hint — the seam computer_screenshot's
+   * API-key preflight consults instead of hardcoding Anthropic (15 WR-07). */
+  cloudTarget: CloudTarget = "anthropic";
+  readonly router = { cloudTargetFor: (): CloudTarget => this.cloudTarget };
   /** Chunks yielded for every call, in order. Defaults to a minimal valid reply. */
   chunks: InferenceStreamChunk[] = [
     { type: "token", text: '{"description":"a screen","elements":[]}' },
@@ -106,21 +118,31 @@ const RETINA_CAPTURE_SEQUENCE: MacCommandResult[] = [
   sipsDims(1400, 875), // post-resize dims
 ];
 
-function toolByName(run: MacCommandRunner, gateway: Pick<InferenceGateway, "chat">, name: string) {
+function toolByName(run: MacCommandRunner, gateway: VisionGateway, name: string) {
   const tool = makeComputerUseTools(run, gateway).find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not built`);
   return tool;
 }
 
-const ORIGINAL_KEY = process.env["ANTHROPIC_API_KEY"];
+/** Set/unset env vars for the duration of `fn`, always restoring them. */
+function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
+  const original = new Map<string, string | undefined>(
+    Object.keys(vars).map((k) => [k, process.env[k]]),
+  );
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return fn().finally(() => {
+    for (const [key, value] of original) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
 
 function withApiKey(value: string | undefined, fn: () => Promise<void>): Promise<void> {
-  if (value === undefined) delete process.env["ANTHROPIC_API_KEY"];
-  else process.env["ANTHROPIC_API_KEY"] = value;
-  return fn().finally(() => {
-    if (ORIGINAL_KEY === undefined) delete process.env["ANTHROPIC_API_KEY"];
-    else process.env["ANTHROPIC_API_KEY"] = ORIGINAL_KEY;
-  });
+  return withEnv({ ANTHROPIC_API_KEY: value }, fn);
 }
 
 // ── Surface ───────────────────────────────────────────────────────────────────
@@ -255,6 +277,42 @@ describe("computer_screenshot — degrade, never crash", () => {
       expect(String(result["error"])).toMatch(/ANTHROPIC_API_KEY/);
       expect(fake.calls.length).toBe(0);
       expect(gateway.calls.length).toBe(0);
+    });
+  });
+
+  // 15 WR-07: the preflight must follow routing.cloudTaskProviders.reasoning,
+  // which CLAUDE.md advertises as rebalanceable without touching code.
+  it("checks FIREWORKS_API_KEY when the router routes reasoning to fireworks", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "anthropic-key", FIREWORKS_API_KEY: undefined }, async () => {
+      const fake = new FakeMacRunner();
+      const gateway = new FakeGateway();
+      gateway.cloudTarget = "fireworks";
+      const tool = toolByName(fake.runner, gateway, "computer_screenshot");
+
+      const result = (await tool.run({})) as Record<string, unknown>;
+
+      // An ANTHROPIC key is set, but reasoning routes to fireworks — the old
+      // hardcoded check would have proceeded into a 401.
+      expect(result["ok"]).toBe(false);
+      expect(String(result["error"])).toMatch(/FIREWORKS_API_KEY/);
+      expect(String(result["error"])).toMatch(/fireworks/);
+      expect(fake.calls.length).toBe(0);
+      expect(gateway.calls.length).toBe(0);
+    });
+  });
+
+  it("proceeds on a fireworks-routed run when FIREWORKS_API_KEY is set, with no ANTHROPIC key at all", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: undefined, FIREWORKS_API_KEY: "fireworks-key" }, async () => {
+      const fake = new FakeMacRunner();
+      fake.responses = RETINA_CAPTURE_SEQUENCE;
+      const gateway = new FakeGateway();
+      gateway.cloudTarget = "fireworks";
+      const tool = toolByName(fake.runner, gateway, "computer_screenshot");
+
+      const result = (await tool.run({})) as Record<string, unknown>;
+
+      expect(result["ok"]).toBe(true);
+      expect(gateway.calls.length).toBe(1);
     });
   });
 

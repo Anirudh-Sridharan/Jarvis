@@ -43,7 +43,19 @@ import { ScriptRunner } from "../../mac/scriptRunner.js";
 import { ScreenshotRunner, imageToScreenPoint } from "../../mac/screenshotRunner.js";
 import { AxActionRunner } from "../../mac/axActions.js";
 import type { InferenceGateway } from "../../inference/gateway.js";
+import type { Router } from "../../inference/router.js";
 import type { ChatMessage, ContentPart } from "../../inference/types.js";
+
+/**
+ * What Tier 3 needs from the gateway: the streaming `chat` entry point, and
+ * `router.cloudTargetFor` so the API-key preflight asks WHICH provider serves
+ * `taskHint: "reasoning"` instead of hardcoding one (15 WR-07). Structural —
+ * the real InferenceGateway satisfies it, and tests can supply a plain
+ * object.
+ */
+export type VisionGateway = Pick<InferenceGateway, "chat"> & {
+  readonly router: Pick<Router, "cloudTargetFor">;
+};
 
 /** Cap on the number of elements returned by computer_screenshot — a
  * pathological vision reply cannot flood the agent scratchpad. */
@@ -149,7 +161,7 @@ function parseVisionReply(
  * call). Both must be supplied for the tools to make sense — the registry
  * caller (tools/index.ts) only wires this factory when both are available.
  */
-export function makeComputerUseTools(run: MacCommandRunner, gateway: Pick<InferenceGateway, "chat">): Tool[] {
+export function makeComputerUseTools(run: MacCommandRunner, gateway: VisionGateway): Tool[] {
   const screenshotRunner = new ScreenshotRunner({ run });
   const script = new ScriptRunner(run);
   const axActions = new AxActionRunner(script);
@@ -170,12 +182,20 @@ export function makeComputerUseTools(run: MacCommandRunner, gateway: Pick<Infere
       run: async (rawArgs: unknown) => {
         const args = ScreenshotSchema.parse(rawArgs);
 
-        const apiKey = process.env["ANTHROPIC_API_KEY"];
-        if (!apiKey) {
+        // 15 WR-07: ask the router which provider actually serves this task
+        // hint rather than hardcoding Anthropic. routing.cloudTaskProviders
+        // is advertised as the way to rebalance providers without touching
+        // code, and a hardcoded key check breaks BOTH ways when it is
+        // rebalanced (refusing a request that would work, or proceeding into
+        // a 401).
+        const provider = gateway.router.cloudTargetFor("reasoning");
+        const keyVar = provider === "anthropic" ? "ANTHROPIC_API_KEY" : "FIREWORKS_API_KEY";
+        if (!process.env[keyVar]) {
           return {
             ok: false,
             error:
-              "ANTHROPIC_API_KEY not set — computer_screenshot needs a vision-capable cloud model. Add it to .env.",
+              `${keyVar} not set — computer_screenshot needs a vision-capable cloud model ` +
+              `(taskHint "reasoning" routes to ${provider}). Add it to .env.`,
           };
         }
 

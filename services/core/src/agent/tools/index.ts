@@ -79,9 +79,8 @@ import { makeBrowserTools } from "./browserTools.js";
 import type { McpToolClient } from "../../mcp/playwrightMcp.js";
 import { makeMacTools } from "./macTools.js";
 import { makeMacUiTools } from "./macUiTools.js";
-import { makeComputerUseTools } from "./computerUseTools.js";
+import { makeComputerUseTools, type VisionGateway } from "./computerUseTools.js";
 import type { MacCommandRunner } from "../../mac/commandRunner.js";
-import type { InferenceGateway } from "../../inference/gateway.js";
 
 export function buildToolRegistry(
   integrations: Pick<IntegrationsSystem, "calendar" | "todos" | "email">,
@@ -93,7 +92,7 @@ export function buildToolRegistry(
    * tools are added — Tier 3 requires BOTH a runner and a gateway, so an
    * absent gateway silently omits Tier 3 rather than registering a tool that
    * cannot work. */
-  visionGateway?: Pick<InferenceGateway, "chat"> | null,
+  visionGateway?: VisionGateway | null,
 ): ToolRegistry {
   const tools = [
     // Calendar
