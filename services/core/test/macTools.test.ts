@@ -313,7 +313,7 @@ describe("degrade, never crash", () => {
     expect(result["kind"]).toBe("automation-undecided-timeout");
   });
 
-  it("oversized mac_run_script stdout is capped with a truncation marker", async () => {
+  it("oversized mac_run_script stdout is capped ONCE and reports the real number of dropped chars (WR-06)", async () => {
     const fake = new FakeMacRunner();
     fake.result = { stdout: "x".repeat(MAC_TEXT_CAP + 5_000), stderr: "", exitCode: 0, timedOut: false };
     const tool = toolByName(fake.runner, "mac_run_script");
@@ -323,7 +323,11 @@ describe("degrade, never crash", () => {
     >;
     const stdout = String(result["stdout"]);
     expect(stdout.length).toBeLessThanOrEqual(MAC_TEXT_CAP + 50);
-    expect(stdout).toContain("[truncated");
+    // Exactly one truncation notice, and it names the 5,000 characters that
+    // were actually lost — double-capping reported 23.
+    expect(stdout.match(/\[truncated /g)).toHaveLength(1);
+    expect(stdout).toContain("[truncated 5000 chars]");
+    expect(stdout.endsWith("[truncated 5000 chars]")).toBe(true);
   });
 });
 

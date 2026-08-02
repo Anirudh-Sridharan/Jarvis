@@ -49,7 +49,15 @@ import { ScriptRunner } from "../../mac/scriptRunner.js";
 import { ShortcutsRunner } from "../../mac/shortcutsRunner.js";
 import { classifyTccFailure, type TccFailureKind } from "../../mac/tccErrors.js";
 
-/** Hard cap on free-text fields returned to the loop (script stdout, window titles). */
+/**
+ * Hard cap on free-text fields this file caps ITSELF — window titles and
+ * shortcut stdout. Script stdout is NOT capped here: ScriptRunner.capText
+ * already caps it at the same 16,000 and appends its own
+ * `[truncated N chars]` notice, and capping the capped string a second time
+ * sliced that notice mid-string and reported a count computed against the
+ * already-truncated length (15 WR-06: the agent was told 23 chars were
+ * dropped when 5,000 were). One owner per string.
+ */
 export const MAC_TEXT_CAP = 16_000;
 
 function capText(text: string): string {
@@ -256,7 +264,9 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
             ? await scriptRunner.runJxa(script, args ?? [], opts)
             : await scriptRunner.runAppleScript(script, args ?? [], opts);
         if (!result.ok) return result;
-        return { ok: true, stdout: capText(result.stdout) };
+        // Already capped (with an honest truncation count) by
+        // ScriptRunner.capText — do not cap it again (WR-06).
+        return { ok: true, stdout: result.stdout };
       },
     },
     {
