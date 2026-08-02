@@ -40,6 +40,19 @@
  * memoryId, never run.errors[].message verbatim (those messages can echo up
  * to 4096 chars of a captured record's body — the store already truncates
  * it to 200 chars on the observability surface for exactly this reason).
+ *
+ * The store is NOT left exactly as found (WR-05, honest residual): each live
+ * run permanently adds `--canaries` synthetic facts to the real graph. Facts
+ * are bi-temporal and never hard-deleted (repo invariant), and this probe
+ * deliberately performs no post-run invalidation, so canary facts accumulate
+ * run over run until FORGET decay ages them out. That residual is acceptable
+ * because every content-bearing canary token is nonce-derived (see
+ * mintCanaries): the accumulated facts are BM25-inert for real queries and
+ * pure cosine-noise under the real embedder, so they cannot surface in real
+ * chat context injection or profile derivation the way the earlier
+ * "project … deadline"-shaped canaries could. Probe retrievals also pass
+ * trackAccess: false (WR-01), so re-runs no longer refresh canaries'
+ * last_accessed_at and do not delay their decay.
  */
 import "../loadEnv.js"; // MUST be first: populates process.env from .env
 // ^ This side effect is why tests import evalRecallArgs.ts, never this
@@ -93,17 +106,35 @@ interface Canary {
  * Mint `count` per-invocation-unique synthetic canaries. Each note text is a
  * single, atomic, explicitly-factual sentence whose subject IS the marker,
  * so a real extraction model produces a fact whose text carries the marker
- * verbatim. The query is the marker plus a couple of literal tokens from
- * that same sentence. `noteId === marker` so the dedup key is unique per run
- * (computeDedupKey() is a content hash — Pitfall-2 tripwire).
+ * verbatim. The query is the marker plus the sentence's own content tokens.
+ * `noteId === marker` so the dedup key is unique per run (computeDedupKey()
+ * is a content hash — Pitfall-2 tripwire).
+ *
+ * EVERY content-bearing token is nonce-derived (WR-05): the earlier shape
+ * ("The project codenamed … has a synthetic internal deadline of 2027-0X-15")
+ * seeded the real graph with facts whose tokens (`project`, `deadline`,
+ * `internal`, `2027`) BM25-match entirely ordinary real queries ("what are
+ * my project deadlines?"), so accumulated canaries could surface in real
+ * chat context injection and profile derivation. Now the only non-nonce
+ * tokens are function-word scaffold (the/has/a/of — kept so a real
+ * extraction model still sees a fact-shaped sentence), which BM25's IDF
+ * renders worthless as a ranking signal; the attribute and value pseudo-words
+ * embed the per-run nonce, so no canary content token can ever match a real
+ * query. Canary facts still persist bi-temporally run over run (facts are
+ * never hard-deleted — see the header note), but they are BM25-inert and
+ * only cosine-noise for real queries.
  */
 function mintCanaries(runToken: string, count: number): Canary[] {
+  // Compact the nonce to one alphanumeric run so each derived pseudo-word
+  // tokenizes as a SINGLE BM25 token (bm25.ts splits on non-alphanumeric).
+  const nonce = runToken.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const canaries: Canary[] = [];
   for (let i = 0; i < count; i++) {
     const marker = `jarvis-eval-canary-${runToken}-${i}`;
-    const deadline = `2027-0${(i % 9) + 1}-15`;
-    const text = `The project codenamed ${marker} has a synthetic internal deadline of ${deadline}.`;
-    const query = `${marker} synthetic internal deadline`;
+    const attr = `qf${nonce}x${i}`;
+    const value = `vz${nonce}x${i}`;
+    const text = `The ${marker} has a ${attr} of ${value}.`;
+    const query = `${marker} ${attr} ${value}`;
     canaries.push({ marker, noteId: marker, text, query });
   }
   return canaries;
