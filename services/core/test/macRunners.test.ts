@@ -9,7 +9,12 @@
 import { describe, it, expect } from "vitest";
 import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../src/mac/commandRunner.js";
 import { OpenRunner } from "../src/mac/openRunner.js";
-import { ScriptRunner, SHELL_LAUNDERING_PATTERNS, rejectShellLaundering } from "../src/mac/scriptRunner.js";
+import {
+  ScriptRunner,
+  SHELL_LAUNDERING_PATTERNS,
+  rejectShellLaundering,
+  delaunderSource,
+} from "../src/mac/scriptRunner.js";
 import { ShortcutsRunner } from "../src/mac/shortcutsRunner.js";
 
 // ── Fake ──────────────────────────────────────────────────────────────────────
@@ -196,6 +201,17 @@ describe("ScriptRunner — shell-laundering refusal (D-02)", () => {
     ["ObjC.import", "ObjC.import('Foundation')"],
     ["$.NSTask", "$.NSTask.alloc().init()"],
     ["Application(\"Terminal\")", 'Application("Terminal").doScript("ls")'],
+    // 15 CR-03: these two were EXECUTED live against the original five-pattern
+    // denylist and both reached a real shell.
+    ["AppleScript concatenation", 'run script ("do sh" & "ell script \\"echo pwned\\"")'],
+    ["JXA computed member", 'const a=Application.currentApplication(); a["doShell"+"Script"]("echo pwned")'],
+    // Additional laundering surfaces the original list did not cover.
+    ["ObjC bracket import", 'ObjC["import"]("Foundation")'],
+    ["$ bracket NSTask", '$["NSTask"].alloc.init'],
+    ["Script Editor", 'Application("Script Editor").documents.push(x)'],
+    ["Automator", 'Application("Automator").run()'],
+    ["eval of assembled source", 'eval("do" + "ShellScript")'],
+    ["Application name concatenation", 'Application("Term" + "inal").doScript("ls")'],
   ];
 
   for (const [label, script] of laundering) {
@@ -215,6 +231,22 @@ describe("ScriptRunner — shell-laundering refusal (D-02)", () => {
       expect(fake.calls.length).toBe(0);
     });
   }
+
+  it("delaunderSource collapses the concatenation shapes that defeated the raw denylist", () => {
+    expect(delaunderSource('("do sh" & "ell script \\"x\\"")')).toContain("do shell script");
+    expect(delaunderSource('a["doShell"+"Script"]')).toContain("doShellScript");
+  });
+
+  it("the refusal message does NOT claim shell access is impossible — the gate is the control (CR-03)", () => {
+    const message = rejectShellLaundering('do shell script "ls"');
+    expect(message).toBeTruthy();
+    expect(String(message)).not.toMatch(/shell access is refused/i);
+    expect(String(message)).toMatch(/known shell-laundering pattern/i);
+  });
+
+  it("a clean script returns null — which means 'no known shape matched', not 'cannot reach a shell'", () => {
+    expect(rejectShellLaundering("function run(argv) { return argv[0]; }")).toBeNull();
+  });
 });
 
 describe("ScriptRunner — TCC degrade", () => {

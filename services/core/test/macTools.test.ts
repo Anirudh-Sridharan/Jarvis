@@ -105,6 +105,16 @@ describe("mac tool surface", () => {
     }
   });
 
+  it("mac_run_script's description states the residual shell capability honestly (15 CR-03)", () => {
+    const fake = new FakeMacRunner();
+    const tool = toolByName(fake.runner, "mac_run_script");
+    // The approver must be told a script CAN reach a shell — the old
+    // "Shell access is refused" wording was false and made approval uninformed.
+    expect(tool.description).toMatch(/can ultimately reach a shell/i);
+    expect(tool.description).not.toMatch(/shell access is refused/i);
+    expect(tool.description).toMatch(/not a guarantee/i);
+  });
+
   it("mac_run_shortcut's description states the black-box clause (Pitfall 4 / T-15-11)", () => {
     const fake = new FakeMacRunner();
     const tool = toolByName(fake.runner, "mac_run_shortcut");

@@ -12,9 +12,11 @@
  *                                          isolated-profile equivalent of
  *                                          browser_navigate (15-RESEARCH.md
  *                                          Anti-Patterns)
- *   mac_run_script      readOnly:false  → GATED (mac_action) — scripting-
- *                                          dictionary only; shell access refused
- *                                          pre-spawn (D-02)
+ *   mac_run_script      readOnly:false  → GATED (mac_action) — a script CAN
+ *                                          ultimately reach a shell; the
+ *                                          denylist is a speed bump, the
+ *                                          approval gate is the control
+ *                                          (15 CR-03, scriptRunner.ts header)
  *   mac_run_shortcut    readOnly:false  → GATED (mac_action) — shortcut
  *                                          contents are not inspectable before
  *                                          execution (Pitfall 4 / T-15-11)
@@ -221,10 +223,14 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
       name: "mac_run_script",
       description:
         "Run a script (JXA or AppleScript) against an app's own scripting dictionary. " +
-        "Shell access is refused — the script is checked before execution and rejected if " +
-        "it tries to reach a shell (do shell script, doShellScript, ObjC bridge, Terminal). " +
-        "Variable or untrusted data belongs in args (readable inside the script as argv), " +
-        "never interpolated into script. Always requires approval.",
+        "IMPORTANT: AppleScript and JXA are full programming languages — a script can " +
+        "ultimately reach a shell, read or delete files, and send messages. Jarvis rejects " +
+        "the obvious shell-laundering shapes (do shell script, doShellScript, ObjC bridge, " +
+        "Terminal/Script Editor/Automator, eval) before execution, but that check is a " +
+        "best-effort denylist over source text, NOT a guarantee: approve only if you " +
+        "understand and trust the exact script shown. Variable or untrusted data belongs in " +
+        "args (readable inside the script as argv), never interpolated into script. Always " +
+        "requires approval.",
       schema: RunScriptSchema,
       readOnly: false,
       run: async (rawArgs: unknown) => {
