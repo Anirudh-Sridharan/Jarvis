@@ -162,6 +162,26 @@ interface RawAxSnapshot {
   elements: RawAxElement[];
 }
 
+/**
+ * Runtime shape guard for the script's stdout (15 CR-04). Mirrors the
+ * sibling modules' pattern (screenshotRunner.ts's isValidRect,
+ * computerUseTools.ts's parseVisionReply) so `snapshot()` really never
+ * throws. Per-element numeric fields are read defensively downstream, so
+ * only the fields the mapping actually indexes into are required here.
+ */
+function isRawAxSnapshot(value: unknown): value is RawAxSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const o = value as Record<string, unknown>;
+  if (typeof o["app"] !== "string") return false;
+  const elements = o["elements"];
+  if (!Array.isArray(elements)) return false;
+  return elements.every((e) => {
+    if (typeof e !== "object" || e === null) return false;
+    const el = e as Record<string, unknown>;
+    return Array.isArray(el["indexPath"]) && typeof el["role"] === "string";
+  });
+}
+
 export type AxSnapshotResult =
   | {
       ok: true;
@@ -291,12 +311,20 @@ export class AxSnapshotRunner {
     ]);
     if (!result.ok) return result;
 
-    let parsed: RawAxSnapshot;
+    let raw: unknown;
     try {
-      parsed = JSON.parse(result.stdout) as RawAxSnapshot;
+      raw = JSON.parse(result.stdout);
     } catch {
       return { ok: false, error: "failed to parse AX snapshot output", kind: "unknown" };
     }
+    // 15 CR-04: valid JSON is not the expected SHAPE. `{}`, `"hello"` and
+    // `{"elements":null}` are all reachable (the script's early return, stray
+    // stdout ahead of the JSON) and each threw a TypeError out of the
+    // documented never-throws contract before this guard existed.
+    if (!isRawAxSnapshot(raw)) {
+      return { ok: false, error: "AX snapshot output had an unexpected shape", kind: "unknown" };
+    }
+    const parsed: RawAxSnapshot = raw;
 
     const elements: AxElement[] = parsed.elements.map((e) => ({
       ref: formatAxRef(parsed.app, e.indexPath, e.role),

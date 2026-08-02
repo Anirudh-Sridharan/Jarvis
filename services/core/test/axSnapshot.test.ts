@@ -270,4 +270,36 @@ describe("AxSnapshotRunner.snapshot — malformed stdout", () => {
 
     await expect(runner.snapshot({})).resolves.toMatchObject({ ok: false });
   });
+
+  // 15 CR-04: valid JSON of the WRONG SHAPE previously threw a TypeError out
+  // of a method documented as never throwing.
+  const wrongShapes: Array<[string, string]> = [
+    ["an empty object", "{}"],
+    ["a bare string", '"hello"'],
+    ["a null elements array", '{"app":"X","window":null,"truncated":false,"elements":null}'],
+    ["a number", "42"],
+    ["a top-level array", "[]"],
+    ["a non-object element", '{"app":"X","window":null,"truncated":false,"elements":["nope"]}'],
+    [
+      "an element with no indexPath",
+      '{"app":"X","window":null,"truncated":false,"elements":[{"role":"AXButton"}]}',
+    ],
+    ["a missing app name", '{"window":null,"truncated":false,"elements":[]}'],
+  ];
+
+  for (const [label, stdout] of wrongShapes) {
+    it(`degrades to a structured error instead of throwing on ${label}`, async () => {
+      const fake = new FakeMacRunner();
+      fake.result = { stdout, stderr: "", exitCode: 0, timedOut: false };
+      const runner = new AxSnapshotRunner(new ScriptRunner(fake.runner));
+
+      const result = await runner.snapshot({});
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatch(/unexpected shape/i);
+        expect(result.kind).toBe("unknown");
+      }
+    });
+  }
 });
