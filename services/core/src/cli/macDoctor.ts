@@ -103,10 +103,16 @@ async function main(): Promise<void> {
     renderHuman(report);
   }
 
-  process.exit(report.allGranted ? 0 : 1);
+  // 15 WR-10: set the exit code and let the event loop drain instead of
+  // calling process.exit() — process.stdout is ASYNCHRONOUS when piped or
+  // redirected (synchronous only for a POSIX TTY), so an immediate exit can
+  // truncate the --json report. Redirecting that report to a file is exactly
+  // what the runbook's evidence workflow asks for, and a non-zero exit
+  // (missing grants) is the common path.
+  process.exitCode = report.allGranted ? 0 : 1;
 }
 
 main().catch((err) => {
   console.error(`\n${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
+  process.exitCode = 1;
 });
