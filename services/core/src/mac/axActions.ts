@@ -124,14 +124,23 @@ function run(argv) {
 }
 `;
 
-/** argv: [x, y]. Clicks at a screen coordinate — the entry point Tier 3
- * (plan 15-05) uses for vision-grounded clicks. */
+/** argv: [x, y]. Clicks at a screen coordinate (global coordinates) — the
+ * entry point Tier 3 (plan 15-05) uses for vision-grounded clicks.
+ *
+ * 15 CR-02: the coordinate form of `click` is only valid when sent to a
+ * PROCESS object with the named `at:` parameter — the System Events sdef says
+ * so ("when sent to a 'process' object, the { x, y } location at which to
+ * click"), and `Application("System Events").click({x,y})` throws
+ * `Can't convert types.` at parameter marshalling, before any TCC check,
+ * on every invocation. */
 const AX_CLICK_AT_SCRIPT = `
 function run(argv) {
   const x = parseInt(argv[0], 10);
   const y = parseInt(argv[1], 10);
   const se = Application("System Events");
-  se.click({ x: x, y: y });
+  const matches = se.processes.whose({ frontmost: true });
+  const proc = matches[0];
+  proc.click({ at: [x, y] });
   return JSON.stringify({ success: true });
 }
 `;
@@ -289,6 +298,20 @@ export class AxActionRunner {
 
     const result = await this.script.runJxa(AX_CLICK_AT_SCRIPT, [String(point.x), String(point.y)]);
     if (!result.ok) return result;
+
+    // 15 CR-02: verify the script's own payload rather than trusting
+    // exitCode 0 — a click that never happened must not be reported as
+    // success to the agent (and to the human who approved it).
+    let parsedOut: { success?: boolean };
+    try {
+      parsedOut = JSON.parse(result.stdout) as { success?: boolean };
+    } catch {
+      return { ok: false, error: "failed to parse clickAt result", kind: "unknown" };
+    }
+    if (parsedOut.success !== true) {
+      return { ok: false, error: "click did not report success", kind: "unknown" };
+    }
+
     return { ok: true, clicked: `${point.x},${point.y}` };
   }
 

@@ -36,6 +36,11 @@ function ok(stdout: string): MacCommandResult {
   return { stdout, stderr: "", exitCode: 0, timedOut: false };
 }
 
+/** The JXA body an osascript call actually carried (the argv element after -e). */
+function scriptBodyOf(call: { args: string[] }): string {
+  return call.args[call.args.indexOf("-e") + 1]!;
+}
+
 const REF = formatAxRef("TextEdit", [0, 1], "AXTextField");
 
 // ── isSecureTarget (CR-01) ────────────────────────────────────────────────────
@@ -311,6 +316,59 @@ describe("AxActionRunner.clickAt", () => {
 
     expect(result.ok).toBe(true);
     expect(fake.calls.length).toBe(1);
+  });
+
+  it("sends click to a PROCESS with the named at: parameter — never Application('System Events').click({x,y}) (CR-02)", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ success: true }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    await runner.clickAt({ x: 10, y: 20 });
+
+    const body = scriptBodyOf(fake.calls[0]!);
+    // Live-verified: Application("System Events").click({x,y}) throws
+    // "Can't convert types." at parameter marshalling on every invocation.
+    expect(body).not.toMatch(/se\.click\s*\(/);
+    expect(body).toContain("processes.whose({ frontmost: true })");
+    expect(body).toMatch(/\.click\(\{\s*at:\s*\[x,\s*y\]\s*\}\)/);
+  });
+
+  it("every JXA body handed to osascript parses as JavaScript", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ success: true }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    await runner.clickAt({ x: 10, y: 20 });
+    await runner.pressKey("Enter");
+    await runner.click(REF);
+
+    expect(fake.calls.length).toBe(3);
+    for (const call of fake.calls) {
+      // JXA is JavaScript — a body that does not parse could never run.
+      expect(() => new Function(scriptBodyOf(call))).not.toThrow();
+    }
+  });
+
+  it("reports ok:false when the click script does not report success", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok(JSON.stringify({ success: false }));
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.clickAt({ x: 10, y: 20 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/did not report success/);
+  });
+
+  it("reports ok:false when the click script's stdout is not parseable", async () => {
+    const fake = new FakeMacRunner();
+    fake.result = ok("not json at all");
+    const runner = new AxActionRunner(new ScriptRunner(fake.runner));
+
+    const result = await runner.clickAt({ x: 10, y: 20 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/failed to parse/);
   });
 });
 
