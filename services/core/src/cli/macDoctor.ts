@@ -65,14 +65,21 @@ function renderTiers(report: MacGrantReport): void {
 
   const tier1Ok = automation.granted && shortcuts.granted;
   const tier2Ok = tier1Ok && accessibility.granted;
-  const tier3Ok = tier1Ok && screenRecording.granted;
+  // 15 WR-02: Tier 3 ACTS through AxActionRunner.clickAt / .typeAtFocus,
+  // i.e. System Events click/keystroke — both hard-require Accessibility.
+  // Reporting Tier 3 OK on a machine with Screen Recording but no
+  // Accessibility is a false green on the first command in the runbook.
+  const tier3Ok = tier1Ok && screenRecording.granted && accessibility.granted;
 
   console.log(
     `  Tier 1 (open/script/shortcuts): needs automation-system-events` +
       ` + shortcuts (for mac_run_shortcut) — ${tier1Ok ? "OK" : "DEGRADED"}`,
   );
   console.log(`  Tier 2 (Accessibility UI actions): additionally needs accessibility — ${tier2Ok ? "OK" : "DEGRADED"}`);
-  console.log(`  Tier 3 (vision-grounded computer use): additionally needs screen-recording — ${tier3Ok ? "OK" : "DEGRADED"}`);
+  console.log(
+    `  Tier 3 (vision-grounded computer use): additionally needs screen-recording` +
+      ` (capture) + accessibility (click/type) — ${tier3Ok ? "OK" : "DEGRADED"}`,
+  );
   console.log("\n  A missing grant degrades only its own tier — the other tiers keep working independently.");
   console.log();
 }
