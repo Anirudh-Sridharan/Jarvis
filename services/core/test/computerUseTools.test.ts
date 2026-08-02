@@ -15,8 +15,10 @@ import type { MacCommandOptions, MacCommandResult, MacCommandRunner } from "../s
 import {
   makeComputerUseTools,
   COMPUTER_MAX_ELEMENTS,
+  CAPTURE_TTL_MS,
   type VisionGateway,
 } from "../src/agent/tools/computerUseTools.js";
+import type { Tool } from "@jarvis/agent";
 import { imageToScreenPoint, type ScreenshotFs } from "../src/mac/screenshotRunner.js";
 import { SUBROLE_NONE } from "../src/mac/axSnapshot.js";
 import type {
@@ -132,6 +134,62 @@ function toolByName(run: MacCommandRunner, gateway: VisionGateway, name: string)
   const tool = makeComputerUseTools(run, gateway, { fs: new FakeFs() }).find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not built`);
   return tool;
+}
+
+// ── Action <-> perception binding fixtures (15 WR-12) ─────────────────────────
+
+/** Deterministic capture id, injected so a scripted FakeLlm can reference it. */
+const CAPTURE_ID = "cap-test-1";
+
+interface VisionElement {
+  label: string;
+  role: string;
+  x: number;
+  y: number;
+}
+
+/** An element the vision model reports at IMAGE coordinates (700,350), which
+ * RETINA_CAPTURE_SEQUENCE maps to SCREEN coordinates (500,250). */
+const SAVE_BUTTON: VisionElement = { label: "Save", role: "button", x: 700, y: 350 };
+const SEARCH_BOX: VisionElement = { label: "search box", role: "textfield", x: 700, y: 350 };
+const SAVE_BUTTON_SCREEN_POINT = { x: 500, y: 250 };
+
+function visionReply(elements: VisionElement[]): InferenceStreamChunk[] {
+  return [
+    { type: "token", text: JSON.stringify({ description: "a screen", elements }) },
+    { type: "done" },
+  ];
+}
+
+/**
+ * Build the Tier 3 tools with a deterministic capture id and run
+ * computer_screenshot once, so the acting tools have a capture to bind to.
+ * The caller's `fake.responses` must start with RETINA_CAPTURE_SEQUENCE.
+ */
+async function primedTools(
+  fake: FakeMacRunner,
+  gateway: FakeGateway,
+  elements: VisionElement[],
+  extra?: { now?: () => number },
+): Promise<{ screenshot: Tool; click: Tool; type: Tool }> {
+  gateway.chunks = visionReply(elements);
+  const tools = makeComputerUseTools(fake.runner, gateway, {
+    fs: new FakeFs(),
+    newCaptureId: () => CAPTURE_ID,
+    ...(extra?.now ? { now: extra.now } : {}),
+  });
+  const byName = (name: string): Tool => {
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) throw new Error(`tool ${name} not built`);
+    return tool;
+  };
+  const screenshot = byName("computer_screenshot");
+  await withApiKey("test-key", async () => {
+    const result = (await screenshot.run({})) as Record<string, unknown>;
+    expect(result["ok"]).toBe(true);
+    expect(result["captureId"]).toBe(CAPTURE_ID);
+  });
+  return { screenshot, click: byName("computer_click"), type: byName("computer_type") };
 }
 
 /** Set/unset env vars for the duration of `fn`, always restoring them. */
@@ -397,21 +455,32 @@ describe("computer_click / computer_type — gated, zero inference", () => {
 
   it("gated: computer_click issues 0 gateway calls and exactly one clickAt runner interaction", async () => {
     const fake = new FakeMacRunner();
-    fake.responses = [{ stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false }];
+    fake.responses = [
+      ...RETINA_CAPTURE_SEQUENCE,
+      { stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false },
+    ];
     const gateway = new FakeGateway();
-    const tool = toolByName(fake.runner, gateway, "computer_click");
+    const tools = await primedTools(fake, gateway, [SAVE_BUTTON]);
+    const gatewayCallsAfterCapture = gateway.calls.length;
+    const macCallsAfterCapture = fake.calls.length;
 
-    const result = (await tool.run({ x: 100, y: 200, element: "Save button" })) as Record<string, unknown>;
+    const result = (await tools.click.run({
+      captureId: CAPTURE_ID,
+      ...SAVE_BUTTON_SCREEN_POINT,
+      element: "Save button",
+    })) as Record<string, unknown>;
 
     expect(result["ok"]).toBe(true);
-    expect(gateway.calls.length).toBe(0);
-    expect(fake.calls.length).toBe(1);
-    expect(fake.calls[0]!.cmd).toBe("/usr/bin/osascript");
+    // The ACTING call makes no inference call of its own.
+    expect(gateway.calls.length).toBe(gatewayCallsAfterCapture);
+    expect(fake.calls.length).toBe(macCallsAfterCapture + 1);
+    expect(fake.calls[fake.calls.length - 1]!.cmd).toBe("/usr/bin/osascript");
   });
 
   it("gated: computer_type issues 0 gateway calls", async () => {
     const fake = new FakeMacRunner();
     fake.responses = [
+      ...RETINA_CAPTURE_SEQUENCE,
       {
         stdout: JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: SUBROLE_NONE }),
         stderr: "",
@@ -421,19 +490,24 @@ describe("computer_click / computer_type — gated, zero inference", () => {
       { stdout: JSON.stringify({ success: true }), stderr: "", exitCode: 0, timedOut: false },
     ];
     const gateway = new FakeGateway();
-    const tool = toolByName(fake.runner, gateway, "computer_type");
+    const tools = await primedTools(fake, gateway, [SEARCH_BOX]);
+    const gatewayCallsAfterCapture = gateway.calls.length;
 
-    const result = (await tool.run({ text: "hello", element: "search box" })) as Record<string, unknown>;
+    const result = (await tools.type.run({
+      captureId: CAPTURE_ID,
+      text: "hello",
+      element: "search box",
+    })) as Record<string, unknown>;
 
     expect(result["ok"]).toBe(true);
-    expect(gateway.calls.length).toBe(0);
+    expect(gateway.calls.length).toBe(gatewayCallsAfterCapture);
   });
 
   it("computer_click rejects a negative coordinate with 0 runner calls", async () => {
     const fake = new FakeMacRunner();
     const gateway = new FakeGateway();
     const tool = toolByName(fake.runner, gateway, "computer_click");
-    await expect(tool.run({ x: -5, y: 10, element: "x" })).rejects.toThrow();
+    await expect(tool.run({ captureId: CAPTURE_ID, x: -5, y: 10, element: "x" })).rejects.toThrow();
     expect(fake.calls.length).toBe(0);
   });
 
@@ -441,13 +515,14 @@ describe("computer_click / computer_type — gated, zero inference", () => {
     const fake = new FakeMacRunner();
     const gateway = new FakeGateway();
     const tool = toolByName(fake.runner, gateway, "computer_click");
-    await expect(tool.run({ x: 1.5, y: 10, element: "x" })).rejects.toThrow();
+    await expect(tool.run({ captureId: CAPTURE_ID, x: 1.5, y: 10, element: "x" })).rejects.toThrow();
     expect(fake.calls.length).toBe(0);
   });
 
   it("computer_type refuses a focused secure field — the secret text never reaches recorded argv", async () => {
     const fake = new FakeMacRunner();
     fake.responses = [
+      ...RETINA_CAPTURE_SEQUENCE,
       {
         // Real macOS password-field shape: role AXTextField + secure SUBROLE.
         stdout: JSON.stringify({ focusedRole: "AXTextField", focusedSubrole: "AXSecureTextField" }),
@@ -457,9 +532,12 @@ describe("computer_click / computer_type — gated, zero inference", () => {
       },
     ];
     const gateway = new FakeGateway();
-    const tool = toolByName(fake.runner, gateway, "computer_type");
+    const tools = await primedTools(fake, gateway, [
+      { label: "password field", role: "textfield", x: 700, y: 350 },
+    ]);
 
-    const result = (await tool.run({
+    const result = (await tools.type.run({
+      captureId: CAPTURE_ID,
       text: "super-secret-password",
       element: "password field",
     })) as Record<string, unknown>;
@@ -467,6 +545,117 @@ describe("computer_click / computer_type — gated, zero inference", () => {
     expect(result["ok"]).toBe(false);
     expect(String(result["error"])).toMatch(/secure field/i);
     expect(JSON.stringify(fake.calls)).not.toContain("super-secret-password");
+  });
+
+  // ── Action <-> perception binding (15 WR-12) ─────────────────────────────
+
+  it("computer_click refuses an unknown captureId with 0 runner calls", async () => {
+    const fake = new FakeMacRunner();
+    const gateway = new FakeGateway();
+    const tool = toolByName(fake.runner, gateway, "computer_click");
+
+    const result = (await tool.run({
+      captureId: "never-issued",
+      x: 500,
+      y: 250,
+      element: "Save button",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/unknown captureId/i);
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it("computer_click refuses a coordinate the capture never reported, with 0 extra runner calls", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [...RETINA_CAPTURE_SEQUENCE];
+    const gateway = new FakeGateway();
+    const tools = await primedTools(fake, gateway, [SAVE_BUTTON]);
+    const macCallsAfterCapture = fake.calls.length;
+
+    const result = (await tools.click.run({
+      captureId: CAPTURE_ID,
+      x: 12,
+      y: 34,
+      element: "Save button",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/not one of the elements/i);
+    expect(fake.calls.length).toBe(macCallsAfterCapture);
+  });
+
+  it("computer_click refuses when the approval prompt's element description contradicts the capture", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [...RETINA_CAPTURE_SEQUENCE];
+    const gateway = new FakeGateway();
+    const tools = await primedTools(fake, gateway, [SAVE_BUTTON]);
+    const macCallsAfterCapture = fake.calls.length;
+
+    // A human approving "Delete everything" must not get a click on Save.
+    const result = (await tools.click.run({
+      captureId: CAPTURE_ID,
+      ...SAVE_BUTTON_SCREEN_POINT,
+      element: "Delete everything",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/does not match the element/i);
+    expect(fake.calls.length).toBe(macCallsAfterCapture);
+  });
+
+  it("computer_click refuses an expired capture", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [...RETINA_CAPTURE_SEQUENCE];
+    const gateway = new FakeGateway();
+    let clock = 1_000_000;
+    const tools = await primedTools(fake, gateway, [SAVE_BUTTON], { now: () => clock });
+
+    clock += CAPTURE_TTL_MS + 1;
+    const result = (await tools.click.run({
+      captureId: CAPTURE_ID,
+      ...SAVE_BUTTON_SCREEN_POINT,
+      element: "Save button",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/expired/i);
+  });
+
+  it("computer_type refuses a field the capture never reported", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [...RETINA_CAPTURE_SEQUENCE];
+    const gateway = new FakeGateway();
+    const tools = await primedTools(fake, gateway, [SAVE_BUTTON]);
+    const macCallsAfterCapture = fake.calls.length;
+
+    const result = (await tools.type.run({
+      captureId: CAPTURE_ID,
+      text: "hello",
+      element: "some field nobody saw",
+    })) as Record<string, unknown>;
+
+    expect(result["ok"]).toBe(false);
+    expect(String(result["error"])).toMatch(/no element matching/i);
+    expect(fake.calls.length).toBe(macCallsAfterCapture);
+  });
+
+  it("computer_screenshot returns a captureId the acting tools accept", async () => {
+    const fake = new FakeMacRunner();
+    fake.responses = [...RETINA_CAPTURE_SEQUENCE];
+    const gateway = new FakeGateway();
+    gateway.chunks = visionReply([SAVE_BUTTON]);
+    const tools = makeComputerUseTools(fake.runner, gateway, { fs: new FakeFs() });
+    const screenshot = tools.find((t) => t.name === "computer_screenshot")!;
+
+    const result = (await withApiKey("test-key", async () => {
+      const r = (await screenshot.run({})) as Record<string, unknown>;
+      expect(r["ok"]).toBe(true);
+      expect(typeof r["captureId"]).toBe("string");
+      expect(String(r["captureId"]).length).toBeGreaterThan(0);
+    })) as unknown;
+
+    expect(result).toBeUndefined();
   });
 
   it("computer_type's description states credentials are never typed", () => {
@@ -558,10 +747,17 @@ describe("Tier 3 end-to-end approval ordering (15-SC5)", () => {
           { type: "done" },
         ];
 
-        const tools = makeToolRegistry(makeComputerUseTools(fake.runner, gateway, { fs: new FakeFs() }));
+        // Deterministic capture id so the scripted model can reference the
+        // perception its click is bound to (15 WR-12).
+        const tools = makeToolRegistry(
+          makeComputerUseTools(fake.runner, gateway, { fs: new FakeFs(), newCaptureId: () => CAPTURE_ID }),
+        );
         const llm = new FakeLlm().setScript([
           JSON.stringify({ tool: "computer_screenshot", args: {} }),
-          JSON.stringify({ tool: "computer_click", args: { x: 500, y: 250, element: "Save button" } }),
+          JSON.stringify({
+            tool: "computer_click",
+            args: { captureId: CAPTURE_ID, x: 500, y: 250, element: "Save button" },
+          }),
           JSON.stringify({ tool: "__done__", args: { result: "clicked Save" } }),
         ]);
         const clock = new FixedClock(Date.now());

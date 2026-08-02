@@ -15,6 +15,15 @@
  *                                        focus; secure fields are refused
  *                                        exactly like mac_ui_type (D-03).
  *
+ * ACTIONS ARE BOUND TO THE PERCEPTION THEY CAME FROM (15 WR-12): every
+ * computer_screenshot returns a `captureId` and both acting tools require it.
+ * A click is refused unless its coordinate matches an element that capture
+ * reported AND the model's human-readable `element` string matches that
+ * element's label; typing is refused unless the capture is still fresh and
+ * reported a matching element. Previously `element` was surfaced in the
+ * approval summary but never read, so a human could approve "click the Save
+ * button" while a bare, unrelated coordinate fired.
+ *
  * BINDING ARCHITECTURAL CONSTRAINT (15-RESEARCH.md Summary): this is NOT
  * Anthropic's native `computer_20251124` tool. That tool is unreachable
  * through this codebase's OpenAI-compat provider AND runs an internal
@@ -35,6 +44,7 @@
  * makes Tier 3 safe to ship at all; do not weaken it.
  */
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Tool } from "@jarvis/agent";
 import { registerToolMeta } from "@jarvis/agent";
@@ -68,11 +78,51 @@ export const COMPUTER_DESCRIPTION_CAP = 4_000;
  * not wedge the ReAct step forever. Mirrors AgentLlm's own timeout pattern. */
 export const COMPUTER_VISION_TIMEOUT_MS = 60_000;
 
+/** How long a computer_screenshot's element list stays usable for a bound
+ * action. Beyond this the screen has almost certainly moved on and the
+ * approval prompt would describe a stale world (15 WR-12). */
+export const CAPTURE_TTL_MS = 5 * 60_000;
+
+/** How many recent captures are retained for binding. */
+export const MAX_RETAINED_CAPTURES = 8;
+
+/** Slack (screen points) allowed between the requested coordinate and a
+ * listed element's coordinate. Small on purpose — the model is told to use
+ * the exact coordinates computer_screenshot returned. */
+export const CAPTURE_MATCH_TOLERANCE = 2;
+
 export interface ComputerElement {
   label: string;
   role: string;
   x: number;
   y: number;
+}
+
+interface CaptureRecord {
+  id: string;
+  createdAt: number;
+  elements: ComputerElement[];
+}
+
+function normalizeLabel(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** Does the model's human-readable `element` describe the element the capture
+ * actually recorded at those coordinates? Containment either way, so "Save
+ * button" still matches a label of "Save" — the check exists to catch an
+ * approval prompt that describes a DIFFERENT thing from what will run, not to
+ * demand verbatim echoing. An element the capture gave no label for cannot
+ * contradict anything. */
+function labelsMatch(actual: string, claimed: string): boolean {
+  const a = normalizeLabel(actual);
+  const c = normalizeLabel(claimed);
+  if (!a) return true;
+  if (!c) return false;
+  return a === c || a.includes(c) || c.includes(a);
 }
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
@@ -95,6 +145,10 @@ const ScreenshotSchema = z.object({
 });
 
 const ClickSchema = z.object({
+  captureId: z
+    .string()
+    .min(1)
+    .describe("captureId returned by the computer_screenshot that produced these coordinates"),
   x: z.number().int().finite().min(0),
   y: z.number().int().finite().min(0),
   element: z
@@ -104,6 +158,10 @@ const ClickSchema = z.object({
 });
 
 const TypeSchema = z.object({
+  captureId: z
+    .string()
+    .min(1)
+    .describe("captureId returned by the computer_screenshot that showed this field"),
   text: z.string().min(1),
   element: z
     .string()
@@ -164,14 +222,66 @@ function parseVisionReply(
 export function makeComputerUseTools(
   run: MacCommandRunner,
   gateway: VisionGateway,
-  /** 15 WR-09: ScreenshotRunner's filesystem seam, threaded through so tests
-   * stay hermetic (no real disk I/O) instead of writing real temp files.
-   * Defaults to the live filesystem. */
-  opts?: { fs?: ScreenshotFs },
+  opts?: {
+    /** 15 WR-09: ScreenshotRunner's filesystem seam, threaded through so tests
+     * stay hermetic (no real disk I/O) instead of writing real temp files.
+     * Defaults to the live filesystem. */
+    fs?: ScreenshotFs;
+    /** Clock seam for capture TTLs. Defaults to Date.now. */
+    now?: () => number;
+    /** Capture-id generator seam. Defaults to a random id. */
+    newCaptureId?: () => string;
+  },
 ): Tool[] {
   const screenshotRunner = new ScreenshotRunner({ run, ...(opts?.fs ? { fs: opts.fs } : {}) });
   const script = new ScriptRunner(run);
   const axActions = new AxActionRunner(script);
+  const now = opts?.now ?? (() => Date.now());
+  const newCaptureId = opts?.newCaptureId ?? (() => `cap-${randomUUID()}`);
+
+  // 15 WR-12: every acting call must name the perception it came from, so the
+  // coordinates a human approves are provably the coordinates a
+  // computer_screenshot actually reported — and are still fresh.
+  const captures = new Map<string, CaptureRecord>();
+
+  function recordCapture(elements: ComputerElement[]): string {
+    const id = newCaptureId();
+    const createdAt = now();
+    for (const [key, record] of captures) {
+      if (createdAt - record.createdAt > CAPTURE_TTL_MS) captures.delete(key);
+    }
+    captures.set(id, { id, createdAt, elements });
+    while (captures.size > MAX_RETAINED_CAPTURES) {
+      const oldest = captures.keys().next().value;
+      if (oldest === undefined) break;
+      captures.delete(oldest);
+    }
+    return id;
+  }
+
+  function resolveCapture(
+    captureId: string,
+  ): { ok: true; capture: CaptureRecord } | { ok: false; error: string } {
+    const capture = captures.get(captureId);
+    if (!capture) {
+      return {
+        ok: false,
+        error:
+          `unknown captureId "${captureId}" — an action must reference the computer_screenshot ` +
+          `that showed it. Take a fresh computer_screenshot and use the captureId it returns.`,
+      };
+    }
+    if (now() - capture.createdAt > CAPTURE_TTL_MS) {
+      captures.delete(captureId);
+      return {
+        ok: false,
+        error:
+          `captureId "${captureId}" has expired — the screen may have changed since it was taken. ` +
+          `Take a fresh computer_screenshot and use the captureId it returns.`,
+      };
+    }
+    return { ok: true, capture };
+  }
 
   const tools: Tool[] = [
     {
@@ -261,6 +371,7 @@ export function makeComputerUseTools(
         // checkpointed into SQLite on every step.
         return {
           ok: true,
+          captureId: recordCapture(elements),
           source: capture.source,
           rect: capture.rect,
           imageWidth: capture.imageWidth,
@@ -273,14 +384,48 @@ export function makeComputerUseTools(
     {
       name: "computer_click",
       description:
-        "Click at an exact screen coordinate returned by the latest computer_screenshot (requires " +
+        "Click at an exact screen coordinate returned by a recent computer_screenshot (requires " +
         "approval). Makes NO inference call — the coordinates a human sees in the approval prompt " +
-        "are exactly the coordinates that get clicked.",
+        "are exactly the coordinates that get clicked. Pass the captureId from that screenshot: " +
+        "the coordinate must match one of the elements it reported and your element description " +
+        "must match that element's label, otherwise the click is refused. Captures expire after " +
+        "a few minutes — take a fresh screenshot if that happens.",
       schema: ClickSchema,
       readOnly: false,
       returnsExternalContent: true,
       run: async (rawArgs: unknown) => {
-        const { x, y } = ClickSchema.parse(rawArgs);
+        const { captureId, x, y, element } = ClickSchema.parse(rawArgs);
+
+        // 15 WR-12: bind the action to the perception it claims to come from.
+        // Without this the approval prompt's `element` string was never read,
+        // so a human could approve "click the Save button" while a bare,
+        // unrelated coordinate fired.
+        const lookup = resolveCapture(captureId);
+        if (!lookup.ok) return lookup;
+
+        const match = lookup.capture.elements.find(
+          (e) =>
+            Math.abs(e.x - x) <= CAPTURE_MATCH_TOLERANCE &&
+            Math.abs(e.y - y) <= CAPTURE_MATCH_TOLERANCE,
+        );
+        if (!match) {
+          return {
+            ok: false,
+            error:
+              `(${x},${y}) is not one of the elements computer_screenshot ${captureId} reported — ` +
+              `click only coordinates that screenshot returned, or take a fresh one.`,
+          };
+        }
+        if (!labelsMatch(match.label, element)) {
+          return {
+            ok: false,
+            error:
+              `element description "${element}" does not match the element at (${x},${y}) in ` +
+              `capture ${captureId} ("${match.label}") — the approval prompt must describe the ` +
+              `action that actually runs.`,
+          };
+        }
+
         return axActions.clickAt({ x, y });
       },
     },
@@ -288,7 +433,9 @@ export function makeComputerUseTools(
       name: "computer_type",
       description:
         "Type text into whatever currently has focus after a computer_click (requires approval). " +
-        "Click the target field first. Jarvis never types credentials — typing into a secure/" +
+        "Click the target field first, and pass the captureId of the computer_screenshot that " +
+        "showed it — typing is refused if that capture is unknown or expired, or if it reported " +
+        "no element matching your description. Jarvis never types credentials — typing into a secure/" +
         "password field (the AXSecureTextField subrole macOS puts on password fields), or a " +
         "field whose role cannot be determined, or a text field whose subrole cannot be read at " +
         "all, is refused before any keystroke is synthesized.",
@@ -296,7 +443,25 @@ export function makeComputerUseTools(
       readOnly: false,
       returnsExternalContent: true,
       run: async (rawArgs: unknown) => {
-        const { text, submit } = TypeSchema.parse(rawArgs);
+        const { captureId, text, element, submit } = TypeSchema.parse(rawArgs);
+
+        // 15 WR-12: typing has no coordinate at all — it goes to whatever
+        // holds focus — so the only thing that can make the approval prompt
+        // meaningful is binding it to a recent perception in which the named
+        // field was actually seen.
+        const lookup = resolveCapture(captureId);
+        if (!lookup.ok) return lookup;
+
+        const known = lookup.capture.elements;
+        if (known.length > 0 && !known.some((e) => labelsMatch(e.label, element))) {
+          return {
+            ok: false,
+            error:
+              `computer_screenshot ${captureId} reported no element matching "${element}" — ` +
+              `click the field with computer_click first, or take a fresh screenshot.`,
+          };
+        }
+
         return axActions.typeAtFocus(text, submit);
       },
     },
