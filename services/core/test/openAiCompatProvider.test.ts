@@ -184,6 +184,32 @@ describe("OpenAiCompatProvider", () => {
       expect(body.stream).toBe(true);
       expect(body.tools).toBeUndefined();
     });
+
+    // Phase 15 Tier 3 plumbing: an image content part must survive verbatim
+    // into the serialized request body — proof that no provider-side
+    // transformation is needed for the ContentPart widening.
+    it("passes an image_url content part through verbatim (no transformation)", async () => {
+      fetchMock.mockResolvedValue(makeFakeStreamResponse());
+      const provider = new OpenAiCompatProvider({ endpointUrl: ANTHROPIC_BASE_URL, apiKey: "k" });
+      const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+      const dispatch = makeDispatch({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what's in this screenshot?" },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+      });
+      await drain(provider.streamChat(dispatch));
+      const [, init] = firstCall();
+      const body = JSON.parse(init.body as string) as {
+        messages: { content: { type: string; image_url?: { url: string } }[] }[];
+      };
+      expect(body.messages[0]!.content[1]!.image_url!.url).toBe(imageUrl);
+    });
   });
 
   describe("error surfacing (SC4/D-08)", () => {

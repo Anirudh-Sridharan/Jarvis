@@ -15,6 +15,7 @@ import type { AgentSystem, ApprovalRequest, ApprovalDecision, Clock } from "@jar
 import type { IntegrationsSystem } from "@jarvis/integrations";
 import type { MemorySystem } from "@jarvis/memory";
 import type { McpToolClient } from "../mcp/playwrightMcp.js";
+import type { MacCommandRunner } from "../mac/commandRunner.js";
 import type { InferenceGateway } from "../inference/gateway.js";
 import { AgentLlm } from "./agentLlm.js";
 import { buildToolRegistry } from "./tools/index.js";
@@ -133,6 +134,8 @@ export function getAgentSystem(
   memory: MemorySystem | null = null,
   /** Feature 18: when provided, the browser tools are registered. */
   browser: McpToolClient | null = null,
+  /** Phase 15 Tier 1: when provided, the Mac-control tools are registered. */
+  macRun: MacCommandRunner | null = null,
 ): AgentSystemBag | null {
   if (initialized) {
     if (!agentSystemInstance || !approvalQueueInstance) return null;
@@ -158,7 +161,10 @@ export function getAgentSystem(
     const dataDir = getDataDir();
 
     const llm = new AgentLlm(gateway);
-    const tools = buildToolRegistry(integrations, browser);
+    // Phase 15 Tier 3: the gateway getAgentSystem already holds is the same
+    // object Tier 3's computer_screenshot uses for its single perception
+    // call — no new plumbing reaches liveBootstrap.ts.
+    const tools = buildToolRegistry(integrations, browser, macRun, gateway);
     const queue = new ApprovalQueue();
 
     agentSystemInstance = createAgentSystem({

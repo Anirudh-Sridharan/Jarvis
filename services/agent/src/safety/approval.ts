@@ -9,7 +9,9 @@
  *      is called (earlyDecisions map).
  *   3. approve() / reject(): called externally (by tests or the UI bridge).
  *   4. Always-allow scoping: a decision can come with an AllowScope that pre-approves
- *      future matching actions.
+ *      future matching actions — EXCEPT for a LOCKED risk class (see
+ *      policy.NON_GRANTABLE_RISK_CLASSES). For those, no grant is ever created
+ *      and no grant is ever matched, so every action reaches a human.
  *
  * NOTE(future): In LangGraph.js, step 2 is replaced by interrupt() + Command(resume=...).
  */
@@ -24,7 +26,7 @@ import type {
   ApprovalSink,
   Clock,
 } from "../types.js";
-import { classifyAndDecide, getToolMeta } from "./policy.js";
+import { classifyAndDecide, getToolMeta, isGrantableRiskClass } from "./policy.js";
 import type { AuditLog } from "./audit.js";
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
@@ -133,7 +135,11 @@ export class ApprovalService {
     const tainted =
       action.provenance.derivedFromExternal ||
       (action.provenance.injectionFlags?.length ?? 0) > 0;
-    const grant = tainted ? undefined : this.matchGrant(action);
+    // …and NEVER for a LOCKED risk class (UF-01). browser_action/mac_action
+    // drive the user's real browser/machine: no single earlier decision may
+    // convert them to auto_allow, even on a perfectly clean, untainted run.
+    const locked = !isGrantableRiskClass(decision.riskClass);
+    const grant = tainted || locked ? undefined : this.matchGrant(action);
     if (grant) {
       auditLog.append({
         kind: "decided",
@@ -152,12 +158,19 @@ export class ApprovalService {
       clock.now() + DEFAULT_APPROVAL_TIMEOUT_MS,
     ).toISOString();
 
+    // T-15-11: carry the tool's standing risk disclosure onto the request and
+    // into the summary, so the sentence a human must read before deciding is
+    // actually IN the approval payload — not only in the model-facing tool
+    // description.
+    const disclosure = toolMeta?.disclosure;
+
     const request: ApprovalRequest = {
       id: requestId,
       actionId: action.id,
       runId: action.runId,
       riskClass: decision.riskClass,
-      summary: buildSummary(action, decision),
+      summary: buildSummary(action, decision, disclosure),
+      ...(disclosure !== undefined ? { disclosure } : {}),
       args: action.args,
       reasoning: action.reasoning,
       argsHash: hashArgs(action.args),
@@ -253,14 +266,37 @@ export class ApprovalService {
     // pending — a bogus/expired requestId must never mint a standing grant.
     const entry = this.pending.get(requestId);
     if (!entry || entry.request.status !== "pending") return;
-    if (alwaysAllow) {
-      this.grants.push(alwaysAllow);
+
+    // UF-01: a LOCKED risk class is never grantable. The approval itself still
+    // stands (this one action was approved by a human) — only the STANDING
+    // grant is refused, and the delivered decision must not claim otherwise.
+    const grantable = isGrantableRiskClass(entry.request.riskClass);
+    const grant = alwaysAllow !== undefined && grantable ? alwaysAllow : undefined;
+    if (grant) {
+      this.grants.push(grant);
+    } else if (alwaysAllow !== undefined) {
+      // Refusing silently would leave the user believing a grant exists.
+      // Record it in the hash-chained log.
+      auditLog.append({
+        kind: "decided",
+        actionId: entry.actionId,
+        runId: entry.request.runId,
+        payload: {
+          requestId,
+          outcome: "require_approval",
+          grantRefused: true,
+          riskClass: entry.request.riskClass,
+          reason:
+            "always-allow is not available for this risk class — every action reaches a human",
+        },
+      });
     }
+
     const decision: ApprovalDecision = {
       requestId,
       status: "approved",
       byUser,
-      alwaysAllow,
+      ...(grant !== undefined ? { alwaysAllow: grant } : {}),
     };
     this._deliverDecision(requestId, decision, auditLog);
   }
@@ -313,6 +349,15 @@ export class ApprovalService {
   }
 
   private matchGrant(action: ProposedAction): AllowScope | undefined {
+    // Defense in depth (UF-01): even if a grant was minted before this tool's
+    // metadata declared a LOCKED class (registration order, a renamed tool, a
+    // future caller that skips evaluateAndMaybeRequest), it can never MATCH.
+    // Unknown metadata falls back to outward_comm, exactly like
+    // classifyAndDecide — a grant for an unregistered tool stays possible only
+    // because it was explicitly reviewed and approved as such.
+    const riskClass = getToolMeta(action.tool)?.sideEffects ?? "outward_comm";
+    if (!isGrantableRiskClass(riskClass)) return undefined;
+
     const now = this.clock.isoNow();
     return this.grants.find((g) => {
       if (g.tool !== action.tool) return false;
@@ -347,6 +392,82 @@ export class ApprovalService {
   }
 }
 
-function buildSummary(action: ProposedAction, decision: PolicyDecision): string {
-  return `[${decision.riskClass}] ${action.tool}(${JSON.stringify(action.args).slice(0, 100)})`;
+// ── Human-facing summary ──────────────────────────────────────────────────────
+
+/**
+ * Argument keys that identify a HANDLE rather than the action itself: a
+ * capture id, an element ref, a message/thread id. They are meaningless to a
+ * human approver and, at ~40-55 characters each, used to consume most of the
+ * summary budget — computer_click's `captureId` alone pushed `x`, `y` and
+ * `element` off the line the approver reads (15 security audit UF-04).
+ *
+ * They are not dropped (an approver may still want to see them); they are
+ * ordered LAST so the decision-relevant fields always survive truncation.
+ * Matched case-insensitively.
+ */
+const OPAQUE_ARG_KEYS: ReadonlySet<string> = new Set([
+  "captureid",
+  "ref",
+  "id",
+  "requestid",
+  "runid",
+  "actionid",
+  "threadid",
+  "messageid",
+  "eventid",
+  "sessionid",
+  "token",
+  "hash",
+]);
+
+/** Total budget for the rendered arg list. */
+export const SUMMARY_ARGS_BUDGET = 300;
+
+/** Per-value cap, so one long body/script cannot crowd out every sibling. */
+export const SUMMARY_VALUE_CAP = 80;
+
+/**
+ * Render `args` for a human approver: decision-relevant fields first, opaque
+ * handles last, each value individually capped, and a budget applied to whole
+ * key/value pairs instead of slicing the JSON mid-token.
+ *
+ * The FULL, untruncated args always remain on `ApprovalRequest.args` and in
+ * `argsHash` — this is the display line only.
+ */
+export function summarizeArgs(args: Record<string, unknown>): string {
+  const keys = Object.keys(args);
+  const ordered = [
+    ...keys.filter((k) => !OPAQUE_ARG_KEYS.has(k.toLowerCase())),
+    ...keys.filter((k) => OPAQUE_ARG_KEYS.has(k.toLowerCase())),
+  ];
+
+  const parts: string[] = [];
+  let used = 0;
+  let dropped = 0;
+  for (const key of ordered) {
+    let rendered = JSON.stringify(args[key]) ?? "null"; // undefined → "null"
+    if (rendered.length > SUMMARY_VALUE_CAP) {
+      rendered = `${rendered.slice(0, SUMMARY_VALUE_CAP)}…`;
+    }
+    const part = `${JSON.stringify(key)}:${rendered}`;
+    // Always keep at least one pair, so a single oversized arg still shows.
+    if (parts.length > 0 && used + part.length > SUMMARY_ARGS_BUDGET) {
+      dropped += 1;
+      continue;
+    }
+    parts.push(part);
+    used += part.length + 1; // + the joining comma
+  }
+
+  const more = dropped > 0 ? `,…+${dropped} more` : "";
+  return `{${parts.join(",")}${more}}`;
+}
+
+function buildSummary(
+  action: ProposedAction,
+  decision: PolicyDecision,
+  disclosure?: string,
+): string {
+  const head = `[${decision.riskClass}] ${action.tool}(${summarizeArgs(action.args)})`;
+  return disclosure ? `${head}\nNOTE: ${disclosure}` : head;
 }

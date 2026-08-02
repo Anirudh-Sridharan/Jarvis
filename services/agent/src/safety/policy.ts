@@ -12,8 +12,13 @@
  *   destructive     → require_approval (always; irreversible → double-confirm)
  *   calendar_write  → require_approval (always; delete → double-confirm)
  *   code_exec       → require_approval (always)
- *   browser_action  → require_approval (always)
+ *   browser_action  → require_approval (always; LOCKED — not grantable)
+ *   mac_action      → require_approval (always; LOCKED — not grantable)
  *   unknown/new     → require_approval (read-only default fail-safe)
+ *
+ * "LOCKED" is enforced one layer up, in ApprovalService: see
+ * NON_GRANTABLE_RISK_CLASSES below. "require_approval, always" in this table
+ * is only honest if an always-allow grant cannot later reverse it.
  */
 
 import type {
@@ -30,6 +35,18 @@ import { scanForInjectionMarkers, severityForFlags } from "./injectionGuards.js"
 export interface ToolMeta {
   sideEffects?: RiskClass;
   reversible: boolean;
+  /**
+   * Standing, approver-facing risk disclosure for this tool (T-15-11).
+   * Copied verbatim onto every ApprovalRequest the tool raises and rendered
+   * in the human-facing summary, so the sentence a human is supposed to read
+   * before approving actually reaches the approval surface rather than only
+   * the model-facing tool description.
+   *
+   * Keep it one or two sentences, and state what CANNOT be guaranteed —
+   * that is the part a human needs at the moment of decision. Optional:
+   * tools without one behave exactly as before.
+   */
+  disclosure?: string;
 }
 
 const toolRegistry = new Map<string, ToolMeta>();
@@ -58,7 +75,42 @@ export const DECISION_TABLE: Record<RiskClass, TableEntry> = {
   calendar_write: { defaultOutcome: "require_approval", requiresApproval: true },
   code_exec: { defaultOutcome: "require_approval", requiresApproval: true },
   browser_action: { defaultOutcome: "require_approval", requiresApproval: true },
+  mac_action: { defaultOutcome: "require_approval", requiresApproval: true },
 };
+
+// ── Locked (non-grantable) risk classes ───────────────────────────────────────
+
+/**
+ * LOCKED classes: a standing "always allow" grant may never be CREATED for,
+ * nor MATCHED against, an action in one of these classes. Every such action
+ * reaches a human, every time — one prior decision can never convert the
+ * highest-capability tools in the repo into a permanent, ungated
+ * planner→native path (15 security audit UF-01).
+ *
+ * The decision table alone does NOT give this: DECISION_TABLE is evaluated
+ * inside classifyAndDecide, while the always-allow grant is applied one layer
+ * up in ApprovalService — so "require_approval, always" in the table was
+ * silently reversible by a single earlier alwaysAllow decision.
+ *
+ * Both entries are load-bearing:
+ *   browser_action — drives a real browser session; CLAUDE.md has described
+ *                    this class as "locked" since the feature-18 slice, and
+ *                    this is where the code finally matches that contract.
+ *   mac_action     — drives the user's REAL machine: Launch Services,
+ *                    arbitrary AppleScript/JXA, synthesized keystrokes,
+ *                    screen clicks.
+ *
+ * Do not weaken. Adding a class here is safe; removing one is a gate change.
+ */
+export const NON_GRANTABLE_RISK_CLASSES: ReadonlySet<RiskClass> = new Set<RiskClass>([
+  "browser_action",
+  "mac_action",
+]);
+
+/** False for a LOCKED class — see NON_GRANTABLE_RISK_CLASSES. */
+export function isGrantableRiskClass(riskClass: RiskClass): boolean {
+  return !NON_GRANTABLE_RISK_CLASSES.has(riskClass);
+}
 
 // ── Dynamic trigger evaluation ────────────────────────────────────────────────
 

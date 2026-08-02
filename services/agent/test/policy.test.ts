@@ -19,6 +19,8 @@ import {
   classifyAndDecide,
   registerToolMeta,
   DECISION_TABLE,
+  NON_GRANTABLE_RISK_CLASSES,
+  isGrantableRiskClass,
 } from "../src/safety/policy.js";
 import type { ProposedAction, RiskClass } from "../src/types.js";
 
@@ -249,6 +251,7 @@ describe("Policy decision table", () => {
     const riskClasses: RiskClass[] = [
       "read_only", "internal_write", "outward_comm", "financial",
       "destructive", "calendar_write", "code_exec", "browser_action",
+      "mac_action",
     ];
     for (const cls of riskClasses) {
       expect(DECISION_TABLE[cls]).toBeDefined();
@@ -280,5 +283,48 @@ describe("browser_action decisions (feature 18 browser slice)", () => {
     });
     expect(decision.outcome).toBe("require_approval");
     expect(decision.reasons.join(" ")).toMatch(/untrusted|external/i);
+  });
+
+  it("browser_action is LOCKED — never grantable via always-allow (UF-01)", () => {
+    // CLAUDE.md has described browser_action as a "locked" class since the
+    // feature-18 slice; the table alone never enforced it, because the
+    // always-allow grant is applied above classifyAndDecide.
+    expect(NON_GRANTABLE_RISK_CLASSES.has("browser_action")).toBe(true);
+    expect(isGrantableRiskClass("browser_action")).toBe(false);
+  });
+});
+
+describe("mac_action decisions (phase 15 mac-control slice)", () => {
+  it("mac_action → require_approval, even from a clean (untainted) run", () => {
+    const decision = classifyAndDecide(makeAction("mac_open"), {
+      sideEffects: "mac_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.riskClass).toBe("mac_action");
+  });
+
+  it("mac_action from an external-content-tainted run still requires approval", () => {
+    const action = makeAction("mac_open", {}, {
+      provenance: {
+        derivedFromExternal: true,
+        sources: ["mac_ui_snapshot"],
+        injectionFlags: ["external_content_source"],
+      },
+    });
+    const decision = classifyAndDecide(action, {
+      sideEffects: "mac_action",
+      reversible: false,
+    });
+    expect(decision.outcome).toBe("require_approval");
+    expect(decision.reasons.join(" ")).toMatch(/untrusted|external/i);
+  });
+
+  it("mac_action is LOCKED — never grantable via always-allow (UF-01)", () => {
+    // The invariant "every non-readOnly Mac tool reaches a human" is only true
+    // if no standing grant can ever cover it. Enforced in ApprovalService;
+    // asserted end-to-end in approval.test.ts.
+    expect(NON_GRANTABLE_RISK_CLASSES.has("mac_action")).toBe(true);
+    expect(isGrantableRiskClass("mac_action")).toBe(false);
   });
 });
