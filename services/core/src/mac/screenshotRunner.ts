@@ -252,6 +252,12 @@ export class ScreenshotRunner {
       }
 
       // Step 5: read + base64-encode; compute the scale factor.
+      // IN-04: parsePixelDimensions matches \d+, which accepts 0 — dividing by
+      // it yields Infinity and every mapped coordinate silently serializes to
+      // null. Fail structurally instead.
+      if (!(imageWidth > 0) || !(imageHeight > 0)) {
+        return { ok: false, error: "capture reported a zero-sized image", kind: "unknown" };
+      }
       const buf = await this.fs.readFile(tmpPath);
       const pngBase64 = buf.toString("base64");
       const pointsPerImagePixel = rect.width / imageWidth;

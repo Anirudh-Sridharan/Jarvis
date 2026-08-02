@@ -47,7 +47,7 @@ import type { MacCommandRunner } from "../../mac/commandRunner.js";
 import { OpenRunner } from "../../mac/openRunner.js";
 import { ScriptRunner } from "../../mac/scriptRunner.js";
 import { ShortcutsRunner } from "../../mac/shortcutsRunner.js";
-import { classifyTccFailure, type TccFailureKind } from "../../mac/tccErrors.js";
+import { classifyTccFailure, tccRemediation, type TccFailureKind } from "../../mac/tccErrors.js";
 
 /**
  * Hard cap on free-text fields this file caps ITSELF — window titles and
@@ -104,10 +104,16 @@ const EmptySchema = z.object({});
 
 const OpenTargetSchema = z
   .object({
-    app: z.string().optional().describe("App name to launch, e.g. 'TextEdit' (may accompany path)"),
-    bundleId: z.string().optional().describe("Bundle identifier, e.g. 'com.apple.TextEdit'"),
-    url: z.string().optional().describe("Absolute http(s) URL to open in the user's REAL default browser"),
-    path: z.string().optional().describe("Absolute path to a file to open"),
+    // IN-06: .min(1) — an empty string counts as "provided" (it is not
+    // undefined), so `{ app: "" }` used to reach `open -a ""`.
+    app: z.string().min(1).optional().describe("App name to launch, e.g. 'TextEdit' (may accompany path)"),
+    bundleId: z.string().min(1).optional().describe("Bundle identifier, e.g. 'com.apple.TextEdit'"),
+    url: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Absolute http(s) URL to open in the user's REAL default browser"),
+    path: z.string().min(1).optional().describe("Absolute path to a file to open"),
   })
   .superRefine((val, ctx) => {
     const provided = [val.app, val.bundleId, val.url, val.path].filter((v) => v !== undefined);
@@ -206,8 +212,16 @@ export function makeMacTools(run: MacCommandRunner): Tool[] {
           return { ok: false, error: "failed to parse frontmost app info", kind: "unknown" as TccFailureKind };
         }
         if (parsed.windowError) {
+          // IN-02: the description promises a REMEDIATION, so return the
+          // sentence alongside the kind enum instead of only the enum.
           const windowUnavailable = classifyTccFailure(parsed.windowError, false);
-          return { ok: true, app: parsed.app, window: null, windowUnavailable };
+          return {
+            ok: true,
+            app: parsed.app,
+            window: null,
+            windowUnavailable,
+            windowRemediation: tccRemediation(windowUnavailable),
+          };
         }
         return { ok: true, app: parsed.app, window: parsed.window ? capText(parsed.window) : null };
       },

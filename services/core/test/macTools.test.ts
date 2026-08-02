@@ -175,6 +175,8 @@ describe("mac tool behavior — reads", () => {
     expect(result["app"]).toBe("TextEdit");
     expect(result["window"]).toBeNull();
     expect(result["windowUnavailable"]).toBe("accessibility-denied");
+    // IN-02: the description promises a remediation, not just the kind enum.
+    expect(String(result["windowRemediation"])).toContain("Privacy & Security > Accessibility");
   });
 
   it("mac_list_shortcuts delegates to ShortcutsRunner.list()", async () => {
@@ -210,6 +212,16 @@ describe("mac_open — Zod validation", () => {
     const result = (await tool.run({ app: "TextEdit", path: "/tmp/x.txt" })) as Record<string, unknown>;
     expect(result["ok"]).toBe(true);
     expect(fake.calls[0]).toEqual({ cmd: "/usr/bin/open", args: ["-a", "TextEdit", "/tmp/x.txt"] });
+  });
+
+  it("rejects an empty-string target (IN-06) with 0 calls", async () => {
+    const fake = new FakeMacRunner();
+    const tool = toolByName(fake.runner, "mac_open");
+    // "" is not undefined, so it counted as a provided target and reached
+    // `open -a ""`.
+    await expect(tool.run({ app: "" })).rejects.toThrow();
+    await expect(tool.run({ bundleId: "" })).rejects.toThrow();
+    expect(fake.calls.length).toBe(0);
   });
 
   it("a file: URL passes Zod but is refused by OpenRunner pre-spawn (0 calls)", async () => {

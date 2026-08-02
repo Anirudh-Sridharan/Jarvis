@@ -73,6 +73,11 @@ describe("formatAxRef / parseAxRef", () => {
     expect(parseAxRef(ref)).toEqual({ app: "TextEdit", indexPath: [0, 3, 1], role: "AXButton" });
   });
 
+  it("round-trips an app name containing '#' (IN-05)", () => {
+    const ref = formatAxRef("C#", [0, 1], "AXButton");
+    expect(parseAxRef(ref)).toEqual({ app: "C#", indexPath: [0, 1], role: "AXButton" });
+  });
+
   const malformed = ["TextEdit", "TextEdit#", "TextEdit#0.x.1#AXButton", "#0.1#AXButton"];
   for (const ref of malformed) {
     it(`returns null for malformed ref: ${JSON.stringify(ref)}`, () => {

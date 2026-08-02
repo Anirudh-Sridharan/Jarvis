@@ -113,9 +113,16 @@ export function formatAxRef(app: string, indexPath: number[], role: string): str
  * (axActions.ts) must refuse rather than spawn on a null parse.
  */
 export function parseAxRef(ref: string): { app: string; indexPath: number[]; role: string } | null {
-  const parts = ref.split("#");
-  if (parts.length !== 3) return null;
-  const [app, pathStr, role] = parts;
+  // IN-05: split from the RIGHT — a plain split("#") required exactly 3 parts,
+  // so an app whose name contains "#" (e.g. "C#") produced 4 and every Tier 2
+  // action against it refused permanently as "malformed".
+  const roleSep = ref.lastIndexOf("#");
+  if (roleSep <= 0) return null;
+  const pathSep = ref.lastIndexOf("#", roleSep - 1);
+  if (pathSep <= 0) return null;
+  const app = ref.slice(0, pathSep);
+  const pathStr = ref.slice(pathSep + 1, roleSep);
+  const role = ref.slice(roleSep + 1);
   if (!app || !pathStr || !role) return null;
 
   const segments = pathStr.split(".");

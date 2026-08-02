@@ -2,7 +2,7 @@
 #
 # check-15-docs.sh — documentation completeness gate for Phase 15 (Mac
 # control tools — gated computer use). Greps the live-verification runbook
-# for its eight required section headings and four live-verified failure
+# for its eight required section headings and six live-verified failure
 # signatures, and CLAUDE.md for the Mac-control tool surface/gating
 # vocabulary — printing every missing string and exiting non-zero if any
 # are absent. A doc task with no automated check is a doc task that
@@ -44,6 +44,10 @@ check_in_file "$RUNBOOK" "## Known live-verified failure signatures"
 check_in_file "$RUNBOOK" "-25211"
 check_in_file "$RUNBOOK" "-1712"
 check_in_file "$RUNBOOK" "-1743"
+# 15 IN-01: the two signatures this machine actually emits, which the original
+# four-needle list did not cover.
+check_in_file "$RUNBOOK" "-1719"
+check_in_file "$RUNBOOK" "osascript is not allowed to send keystrokes."
 check_in_file "$RUNBOOK" "could not create image from display"
 
 echo "Checking $CLAUDE_MD ..."

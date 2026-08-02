@@ -150,6 +150,27 @@ describe("ScreenshotRunner.capture — capture already under the limit", () => {
   });
 });
 
+// ── Zero-sized capture (IN-04) ────────────────────────────────────────────────
+
+describe("ScreenshotRunner.capture — zero-sized image", () => {
+  it("degrades structurally instead of returning an Infinity scale factor", async () => {
+    const fake = new FakeMacRunner();
+    const fs = new FakeFs();
+    fake.responses = [
+      boundsJson({ x: 0, y: 0, width: 800, height: 500 }),
+      OK_EMPTY,
+      sipsDims(0, 0), // sips reports a zero-width image — \d+ accepts "0"
+    ];
+    const runner = new ScreenshotRunner({ run: fake.runner, fs });
+
+    const result = await runner.capture();
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected ok:false");
+    expect(result.error).toMatch(/zero-sized image/i);
+  });
+});
+
 // ── Screen Recording denied ────────────────────────────────────────────────────
 
 describe("ScreenshotRunner.capture — screen recording denied", () => {
