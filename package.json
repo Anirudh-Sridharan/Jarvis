@@ -20,6 +20,7 @@
     "connect": "npm --workspace @jarvis/core run connect --",
     "voice": "npm --workspace @jarvis/core run voice",
     "eval:browser-use": "npm --workspace @jarvis/core run eval:browser-use --",
+    "eval:recall": "npm --workspace @jarvis/core run eval:recall --",
     "mac-doctor": "npm --workspace @jarvis/core run mac-doctor --",
     "sidecar": "bash sidecar/mlx/run.sh",
     "sidecar:voice": "bash sidecar/voice/run.sh"
