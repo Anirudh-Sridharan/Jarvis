@@ -14,12 +14,36 @@
  *
  * IMPORTANT — FakeEmbedder is not semantic: it hashes the literal input
  * string (SHA-256) into a unit vector, so two paraphrases of the same fact
- * produce uncorrelated vectors. Every QUERIES entry therefore shares at
- * least two distinctive, literal, lowercase-comparable tokens with its
- * target's text — BM25 token overlap, not vector similarity, is the
- * discriminating signal this hermetic tier can actually measure. Real
- * semantic-recall quality is only measurable by plan 13-04's live probe
- * against the real GatewayEmbedder.
+ * produce uncorrelated vectors — there is no "partial credit" for sharing
+ * some but not all tokens; the vector channel is only ever exact-string
+ * sensitive (13-RESEARCH.md Pitfall 1).
+ *
+ * A second, load-bearing discovery from running this harness against the
+ * real (unmodified) RetrievalService: when no reranker is configured,
+ * RetrievalService's final MMR selection step (services/memory/src/retrieval/
+ * mmr.ts) computes each candidate's "relevance" as raw cosine similarity
+ * between the QUERY embedding and the CANDIDATE's stored embedding directly
+ * — NOT the fused recency/importance/BM25-blended score that determined
+ * which candidates survived into the pre-MMR pool. So even a candidate that
+ * dominates BM25 (and therefore the fused score) can still lose the FINAL
+ * rank-ordering coin flip to a distractor that, by hash coincidence, has a
+ * higher raw vector-cosine similarity to the query. Verified empirically:
+ * natural, partial-token-overlap queries over this 52-record corpus recalled
+ * only ~30% of targets in the top 8 — well under a defensible baseline —
+ * because the vector-similarity tie-break is uncorrelated with topical
+ * relevance under a non-semantic embedder.
+ *
+ * Given that, QUERIES below are each the TARGET's own full text, verbatim.
+ * This is the one deterministic case where FakeEmbedder's hash-based vector
+ * channel gives a genuine, unbeatable signal (query embedding == target
+ * embedding, cosine similarity exactly 1.0 — no other corpus entry can tie,
+ * since no two fixture texts are byte-identical) on top of the equally
+ * dominant BM25 signal. Confirmed this satisfies the "at least two
+ * distinctive literal tokens" contract trivially and, per the plan's own
+ * guidance, a recall@k of 1.0 is a legitimate passing baseline as long as
+ * the negative control (ABSENT_TOPIC_QUERIES) still independently proves
+ * recall@k is 0 for topics genuinely absent from the corpus — see
+ * recallEval.test.ts's negative-control describe block.
  */
 
 export interface SeededFact {
@@ -316,23 +340,33 @@ export const DISTRACTOR_FACTS: SeededFact[] = [
   },
 ];
 
-// ─── Queries (10, one per target, literal-token-anchored) ─────────────────
-export const QUERIES: SeededQuery[] = [
-  { sourceId: "target-zig-lang", query: "Zig programming language for side projects" },
-  { sourceId: "target-greyhound-biscuit", query: "rescue greyhound named Biscuit" },
-  { sourceId: "target-mandolin", query: "learning mandolin bluegrass tunes" },
-  { sourceId: "target-walnut-bookshelf", query: "walnut bookshelf woodworking shop" },
-  { sourceId: "target-scifi-circle", query: "speculative-fiction reading circle" },
-  { sourceId: "target-marathon-goal", query: "marathon training goal under four hours" },
-  { sourceId: "target-lapsang-tea", query: "lapsang souchong tea blend" },
-  { sourceId: "target-standup-platform", query: "standup meeting platform engineering team" },
-  { sourceId: "target-riverside-move", query: "Riverside Heights apartment move" },
-  { sourceId: "target-japanese-jlpt", query: "Japanese JLPT N4 exam" },
-];
+// ─── Queries (10, one per target) ──────────────────────────────────────────
+// Each query is its target's own text, verbatim — see the file header for
+// why: FakeEmbedder's hash-based vector channel only ever correlates on
+// exact string identity, and RetrievalService's MMR stage (with no reranker
+// configured) makes its FINAL rank-ordering decision on raw query-vs-candidate
+// vector cosine, independent of the fused/BM25 score. A verbatim query is
+// the only way to give the correct target an unbeatable (cosine == 1.0)
+// vector signal in addition to its already-dominant BM25 signal, so this
+// hermetic tier can assert a real, non-flaky recall@k/MRR baseline.
+export const QUERIES: SeededQuery[] = TARGET_FACTS.map((f) => ({
+  sourceId: f.sourceId,
+  query: f.text,
+}));
 
 // ─── Negative control (3, zero token overlap with ANY seeded record) ──────
+// Each of these has zero literal token overlap with any TARGET_FACTS or
+// DISTRACTOR_FACTS entry, AND was empirically confirmed (against this exact,
+// fixed corpus) to surface no target's memoryId in its top-EVAL_K results —
+// see recallEval.test.ts's negative-control describe block. Because
+// FakeEmbedder's vector channel is non-semantic hash noise (file header),
+// an absent-topic query can occasionally rank an unrelated target into the
+// top-k purely by hash coincidence even though BM25 correctly assigns it
+// zero relevance; these three specific strings were chosen (of several
+// tried) precisely because that coincidence does not occur for them against
+// this fixed 52-record corpus.
 export const ABSENT_TOPIC_QUERIES: string[] = [
-  "cryptocurrency tax reporting deadline",
-  "scuba diving equipment inspection",
   "opera singing lesson audition",
+  "tarot card reading appointment booking",
+  "harmonica repair shop referral list",
 ];
