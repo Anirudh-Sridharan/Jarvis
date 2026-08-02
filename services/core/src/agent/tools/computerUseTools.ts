@@ -40,7 +40,7 @@ import type { Tool } from "@jarvis/agent";
 import { registerToolMeta } from "@jarvis/agent";
 import type { MacCommandRunner } from "../../mac/commandRunner.js";
 import { ScriptRunner } from "../../mac/scriptRunner.js";
-import { ScreenshotRunner, imageToScreenPoint } from "../../mac/screenshotRunner.js";
+import { ScreenshotRunner, imageToScreenPoint, type ScreenshotFs } from "../../mac/screenshotRunner.js";
 import { AxActionRunner } from "../../mac/axActions.js";
 import type { InferenceGateway } from "../../inference/gateway.js";
 import type { Router } from "../../inference/router.js";
@@ -161,8 +161,15 @@ function parseVisionReply(
  * call). Both must be supplied for the tools to make sense — the registry
  * caller (tools/index.ts) only wires this factory when both are available.
  */
-export function makeComputerUseTools(run: MacCommandRunner, gateway: VisionGateway): Tool[] {
-  const screenshotRunner = new ScreenshotRunner({ run });
+export function makeComputerUseTools(
+  run: MacCommandRunner,
+  gateway: VisionGateway,
+  /** 15 WR-09: ScreenshotRunner's filesystem seam, threaded through so tests
+   * stay hermetic (no real disk I/O) instead of writing real temp files.
+   * Defaults to the live filesystem. */
+  opts?: { fs?: ScreenshotFs },
+): Tool[] {
+  const screenshotRunner = new ScreenshotRunner({ run, ...(opts?.fs ? { fs: opts.fs } : {}) });
   const script = new ScriptRunner(run);
   const axActions = new AxActionRunner(script);
 

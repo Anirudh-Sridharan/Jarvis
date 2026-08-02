@@ -8,7 +8,6 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { writeFile as fsWriteFile } from "node:fs/promises";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +17,7 @@ import {
   COMPUTER_MAX_ELEMENTS,
   type VisionGateway,
 } from "../src/agent/tools/computerUseTools.js";
-import { imageToScreenPoint } from "../src/mac/screenshotRunner.js";
+import { imageToScreenPoint, type ScreenshotFs } from "../src/mac/screenshotRunner.js";
 import { SUBROLE_NONE } from "../src/mac/axSnapshot.js";
 import type {
   ChatMessage,
@@ -37,13 +36,10 @@ import {
   FakeLlm as IntegrationsFakeLlm,
 } from "@jarvis/integrations/testing";
 
-const SCREENCAPTURE = "/usr/sbin/screencapture";
-
-/** Bytes the fake "screencapture" call writes to the real temp path so the
- * production ScreenshotRunner's (unfaked, LIVE) fs.readFile succeeds.
- * makeComputerUseTools does not expose an fs injection seam — only `run` and
- * `gateway` — so this is the one point where these tests touch a real (but
- * always-cleaned-up) temp file; no real macOS command ever executes. */
+/** Bytes the injected FakeFs hands back as the "captured" PNG. 15 WR-09:
+ * makeComputerUseTools now threads ScreenshotRunner's fs seam, so these tests
+ * touch no real file at all — no real macOS command, no real disk I/O, no
+ * dependence on tmpdir writability or on the runner's cleanup. */
 const FAKE_PNG_BYTES = Buffer.from("fake-png-bytes");
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -57,12 +53,26 @@ class FakeMacRunner {
     this.calls.push(opts !== undefined ? { cmd, args, opts } : { cmd, args });
     const result = this.responses[this.callIndex] ?? { stdout: "", stderr: "", exitCode: 0, timedOut: false };
     this.callIndex++;
-    if (cmd === SCREENCAPTURE && result.exitCode === 0 && !result.timedOut) {
-      const outPath = args[args.length - 1];
-      if (outPath) await fsWriteFile(outPath, FAKE_PNG_BYTES);
-    }
     return result;
   };
+}
+
+class FakeFs implements ScreenshotFs {
+  readFileCalls: string[] = [];
+  rmCalls: string[] = [];
+
+  async mkdtemp(prefix: string): Promise<string> {
+    return `${prefix}FAKE123`;
+  }
+
+  async readFile(path: string): Promise<Buffer> {
+    this.readFileCalls.push(path);
+    return FAKE_PNG_BYTES;
+  }
+
+  async rm(path: string): Promise<void> {
+    this.rmCalls.push(path);
+  }
 }
 
 interface FakeGatewayCall {
@@ -119,7 +129,7 @@ const RETINA_CAPTURE_SEQUENCE: MacCommandResult[] = [
 ];
 
 function toolByName(run: MacCommandRunner, gateway: VisionGateway, name: string) {
-  const tool = makeComputerUseTools(run, gateway).find((t) => t.name === name);
+  const tool = makeComputerUseTools(run, gateway, { fs: new FakeFs() }).find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not built`);
   return tool;
 }
@@ -548,7 +558,7 @@ describe("Tier 3 end-to-end approval ordering (15-SC5)", () => {
           { type: "done" },
         ];
 
-        const tools = makeToolRegistry(makeComputerUseTools(fake.runner, gateway));
+        const tools = makeToolRegistry(makeComputerUseTools(fake.runner, gateway, { fs: new FakeFs() }));
         const llm = new FakeLlm().setScript([
           JSON.stringify({ tool: "computer_screenshot", args: {} }),
           JSON.stringify({ tool: "computer_click", args: { x: 500, y: 250, element: "Save button" } }),
