@@ -59,6 +59,7 @@ import {
   MAX_CANARIES,
   MAX_K,
   parseEvalRecallArgs,
+  resolveOutPathWithinRepo,
   type EvalRecallArgs,
 } from "./evalRecallArgs.js";
 
@@ -108,10 +109,10 @@ function mintCanaries(runToken: string, count: number): Canary[] {
   return canaries;
 }
 
-function runDryRun(args: EvalRecallArgs, canaries: Canary[]): void {
+function runDryRun(args: EvalRecallArgs, canaries: Canary[], outPath: string): void {
   console.log("Dry run — no MLX sidecar, no network, no writes to the real memory store.\n");
   console.log(`Data dir:    ${getDataDir()}`);
-  console.log(`Output path: ${resolve(REPO_ROOT, args.out)}`);
+  console.log(`Output path: ${outPath}`);
   console.log(`k:           ${args.k}`);
   console.log(`Canaries:    ${canaries.length}\n`);
   for (const c of canaries) {
@@ -131,7 +132,12 @@ interface PerCanaryResult {
   promoted: boolean;
 }
 
-async function runLive(args: EvalRecallArgs, canaries: Canary[], runToken: string): Promise<void> {
+async function runLive(
+  args: EvalRecallArgs,
+  canaries: Canary[],
+  runToken: string,
+  outPath: string,
+): Promise<void> {
   const { loadConfig } = await import("../config.js");
   const { InferenceGateway } = await import("../inference/gateway.js");
   const { getMemorySystem } = await import("../memory/memorySystem.js");
@@ -248,7 +254,9 @@ async function runLive(args: EvalRecallArgs, canaries: Canary[], runToken: strin
   };
 
   try {
-    const outPath = resolve(REPO_ROOT, args.out);
+    // outPath was resolved AND containment-checked against REPO_ROOT in
+    // main() via resolveOutPathWithinRepo() (T-13-15, WR-02) before any
+    // live work started.
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
     console.log(`Wrote baseline to ${outPath}`);
@@ -284,17 +292,31 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Containment enforcement (T-13-15, WR-02): resolve --out against the repo
+  // root and hard-fail if it escapes — BEFORE any canary is minted or any
+  // live work starts. An absolute or ../-escaping --out exits non-zero here
+  // instead of writing (and mkdir-ing) outside the repo at the end of a paid
+  // live run.
+  let outPath: string;
+  try {
+    outPath = resolveOutPathWithinRepo(REPO_ROOT, args.out);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+    return;
+  }
+
   // Per-invocation-unique token — the whole reason a re-run never collides
   // with a prior canary's content hash.
   const runToken = `${randomUUID().slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`;
   const canaries = mintCanaries(runToken, args.canaries);
 
   if (args.dryRun) {
-    runDryRun(args, canaries);
+    runDryRun(args, canaries, outPath);
     return;
   }
 
-  await runLive(args, canaries, runToken);
+  await runLive(args, canaries, runToken, outPath);
 }
 
 // Only run when this file is the invoked entrypoint (tsx / node), never on import — so the

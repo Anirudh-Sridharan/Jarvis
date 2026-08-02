@@ -7,8 +7,10 @@
  * invariant, WR-03 precedent from browserUseEval.test.ts).
  */
 import { describe, it, expect } from "vitest";
+import { resolve, sep } from "node:path";
 import {
   parseEvalRecallArgs,
+  resolveOutPathWithinRepo,
   DEFAULT_OUT_PATH,
   DEFAULT_K,
   DEFAULT_CANARIES,
@@ -40,7 +42,11 @@ describe("parseEvalRecallArgs", () => {
     expect(parseEvalRecallArgs(["--dry-run"]).dryRun).toBe(true);
   });
 
-  it("--out overrides the default output path", () => {
+  it("--out overrides the default output path (parser is a pure pass-through; containment is enforced at resolution, not here)", () => {
+    // The parser deliberately accepts any string — repo containment is a
+    // property of path RESOLUTION and is enforced by
+    // resolveOutPathWithinRepo() (tested below), which evalRecall.ts calls
+    // before any dry-run or live work (WR-02).
     expect(parseEvalRecallArgs(["--out", "/tmp/custom-recall-eval.json"]).out).toBe(
       "/tmp/custom-recall-eval.json",
     );
@@ -84,5 +90,47 @@ describe("parseEvalRecallArgs", () => {
 
   it("rejects an unknown flag", () => {
     expect(() => parseEvalRecallArgs(["--bogus"])).toThrow(/Unknown argument/);
+  });
+});
+
+describe("resolveOutPathWithinRepo (WR-02 containment — the path-traversal mitigation must enforce, not decorate)", () => {
+  const repoRoot = resolve("/repo/jarvis");
+
+  it("resolves a relative path inside the repo", () => {
+    expect(resolveOutPathWithinRepo(repoRoot, "out/baseline.json")).toBe(
+      resolve(repoRoot, "out/baseline.json"),
+    );
+  });
+
+  it("resolves the default out path inside the repo", () => {
+    const resolved = resolveOutPathWithinRepo(repoRoot, DEFAULT_OUT_PATH);
+    expect(resolved.startsWith(repoRoot + sep)).toBe(true);
+  });
+
+  it("rejects an absolute path outside the repo", () => {
+    expect(() => resolveOutPathWithinRepo(repoRoot, "/tmp/escape.json")).toThrow(
+      /--out must resolve inside the repo/,
+    );
+  });
+
+  it("rejects a ../ relative escape", () => {
+    expect(() => resolveOutPathWithinRepo(repoRoot, "../../../outside.json")).toThrow(
+      /--out must resolve inside the repo/,
+    );
+  });
+
+  it("rejects a prefix-cousin directory (repo root + suffix without a separator)", () => {
+    // /repo/jarvis-evil starts with the string "/repo/jarvis" but is NOT
+    // inside it — the containment check must compare against root + sep,
+    // not a bare startsWith(root).
+    expect(() => resolveOutPathWithinRepo(repoRoot, `${repoRoot}-evil/out.json`)).toThrow(
+      /--out must resolve inside the repo/,
+    );
+  });
+
+  it("accepts an absolute path that is inside the repo", () => {
+    expect(resolveOutPathWithinRepo(repoRoot, `${repoRoot}/sub/out.json`)).toBe(
+      resolve(repoRoot, "sub/out.json"),
+    );
   });
 });

@@ -10,6 +10,8 @@
  * (WR-03).
  */
 
+import { resolve, sep } from "node:path";
+
 export const DEFAULT_OUT_PATH =
   ".planning/phases/13-retrieval-eval-harness-recall-verification-discipline/13-eval-recall-baseline.json";
 
@@ -83,4 +85,29 @@ export function parseEvalRecallArgs(argv: string[]): EvalRecallArgs {
   }
 
   return args;
+}
+
+/**
+ * Resolve `--out` against the repo root and ENFORCE containment (T-13-15,
+ * code-review WR-02): a resolved path outside `repoRoot` throws, so an
+ * absolute `--out /anywhere/file.json` or a relative `--out ../../escape.json`
+ * can never direct `mkdirSync`/`writeFileSync` outside the repo. Before this
+ * check the "resolve against REPO_ROOT" step was labeled a path-traversal
+ * mitigation while enforcing nothing.
+ *
+ * Pure (node:path only — no I/O, no process.exit) so it is unit-testable
+ * from evalRecallArgs.test.ts without the entrypoint's loadEnv side effect.
+ * The parser above stays a pure string pass-through; containment is a
+ * property of path RESOLUTION, enforced here at the single point both the
+ * dry-run and live paths use.
+ */
+export function resolveOutPathWithinRepo(repoRoot: string, out: string): string {
+  const root = resolve(repoRoot);
+  const outPath = resolve(root, out);
+  if (outPath !== root && !outPath.startsWith(root + sep)) {
+    throw new Error(
+      `--out must resolve inside the repo (repo root: ${root}) — got "${out}" which resolves to "${outPath}"`,
+    );
+  }
+  return outPath;
 }
