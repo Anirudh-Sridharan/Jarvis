@@ -3,6 +3,7 @@
  *
  * Rule order (must not change — see feature 1 spec "Local vs cloud routing"):
  *   1. forceTarget set            -> honor it (reason: forced)
+ *   1b. request carries an image  -> cloud (task-cloud)  [15 WR-08]
  *   5. estPromptTokens > localCtxSafe -> cloud (token-overflow)   [hard ceiling]
  *   2. consolidation | reasoning  -> cloud (task-cloud)
  *   3. voice | chat               -> local (task-local)
@@ -25,6 +26,7 @@ import type { RoutingConfig } from "../config.js";
 import type { RamProbe } from "./ram.js";
 import type { Registry } from "./registry.js";
 import { estimateRequestTokens } from "./tokens.js";
+import { requestHasImagePart } from "./types.js";
 import { logRouting } from "./telemetry.js";
 import type {
   CloudTarget,
@@ -90,6 +92,23 @@ export class Router {
     // 1. explicit override / escape hatch
     if (req.forceTarget) {
       return this.decide(req.forceTarget, req.taskHint, "forced", estPromptTokens);
+    }
+
+    // 1b. image-bearing request -> cloud (15 WR-08). The local MLX chat model
+    // has no vision support and mlxProvider.streamChat throws on image parts,
+    // so a `chat`/`voice` hint carrying an image used to route LOCAL, load the
+    // 4B model on a fanless Air, throw, and only then fall over to cloud. The
+    // gateway's cloudPinned predicate is evaluated only inside the CLOUD
+    // failure catch — it never kept an image request off the local path.
+    // Chat-kind hints only (same reasoning as the token ceiling below: there
+    // are no cloud embedding/reranker registry entries to escalate to).
+    if (kindFor(req.taskHint) === "chat" && requestHasImagePart(req.messages)) {
+      return this.decide(
+        this.cloudTargetFor(req.taskHint),
+        req.taskHint,
+        "task-cloud",
+        estPromptTokens,
+      );
     }
 
     // 5. hard context ceiling — overrides task preference. Chat-kind hints

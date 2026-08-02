@@ -76,6 +76,28 @@ function request(taskHint: TaskHint, content: string, forceTarget?: JarvisInfere
   };
 }
 
+/** A request whose user message carries an image content part (Tier 3's
+ * computer_screenshot shape). */
+function imageRequest(
+  taskHint: TaskHint,
+  forceTarget?: JarvisInferenceRequest["forceTarget"],
+): JarvisInferenceRequest {
+  return {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is on screen?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ],
+      },
+    ],
+    stream: true,
+    taskHint,
+    forceTarget,
+  };
+}
+
 // Varied-vocabulary word cycle (NOT a repeated single character) — repeated
 // single characters compress far too well under BPE to reliably cross a
 // token ceiling. estimateRequestTokens (services/core/src/inference/tokens.ts)
@@ -236,6 +258,40 @@ describe("Router.resolve — task-class routing matrix", () => {
     expect(() => registry.defaultFor("chat", "hf" as never)).toThrow(
       /Unknown routing target "hf"/,
     );
+  });
+
+  // 15 WR-08: an image-bearing request must never be ROUTED local — the MLX
+  // chat model has no vision support, so a local pick means loading the 4B
+  // model on a fanless Air only to throw and fall over to cloud.
+  it('a chat request carrying an image resolves to cloud, never local (task-cloud)', () => {
+    const cfg = makeRoutingConfig();
+    const router = new Router(makeRegistry(), AMPLE_RAM, cfg);
+    const decision = router.resolve(imageRequest("chat"));
+    expect(decision.target).not.toBe("local");
+    expect(decision.target).toBe(cfg.defaultCloudProvider);
+    expect(decision.reason).toBe("task-cloud");
+  });
+
+  it("a voice request carrying an image also resolves to cloud", () => {
+    const router = new Router(makeRegistry(), AMPLE_RAM, makeRoutingConfig());
+    expect(router.resolve(imageRequest("voice")).target).not.toBe("local");
+  });
+
+  it("an image-bearing reasoning request still resolves to its configured cloud provider", () => {
+    const router = new Router(makeRegistry(), AMPLE_RAM, makeRoutingConfig());
+    expect(router.resolve(imageRequest("reasoning")).target).toBe("anthropic");
+  });
+
+  it('forceTarget still wins over the image pin — forceTarget:"local" is honored (the provider then fails loudly)', () => {
+    const router = new Router(makeRegistry(), AMPLE_RAM, makeRoutingConfig());
+    const decision = router.resolve(imageRequest("chat", "local"));
+    expect(decision.target).toBe("local");
+    expect(decision.reason).toBe("forced");
+  });
+
+  it("a text-only chat request is unaffected and still resolves local", () => {
+    const router = new Router(makeRegistry(), AMPLE_RAM, makeRoutingConfig());
+    expect(router.resolve(request("chat", "hi there")).target).toBe("local");
   });
 
   it("SC1 heart — a config rebalance (consolidation -> anthropic) flips the resolved target with ZERO code change", () => {
